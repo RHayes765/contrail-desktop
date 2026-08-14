@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build all packages
+        run: pnpm build
+      - name: Engine tests (includes write-safety + schema-freeze suites)
+        run: pnpm --filter @contrail/engine test
+      - name: Desktop smoke boot (isolated data dir)
+        # Verifies the packaged main boots under Electron with both native
+        # modules, against a FRESH data dir — CI must never need real orgs.
+        shell: bash
+        env:
+          CONTRAIL_DATA_DIR: ${{ runner.temp }}/contrail-smoke
+        run: |
+          cd apps/desktop
+          ./node_modules/.bin/electron . --smoke --smoke-out="$RUNNER_TEMP/smoke.json"
+          node -e "const s=require(process.env.RUNNER_TEMP+'/smoke.json'); if(!s.health||!s.health.ok){console.error(JSON.stringify(s));process.exit(1)}; console.log('smoke ok — schema', s.health.schemaVersion)"

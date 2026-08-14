@@ -11,13 +11,28 @@ import type {
   OrgType,
 } from './types.js';
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 /**
  * Local SQLite store: connection metadata and the audit log (P0.1); the
  * artifact index, dependency graph, and deploy requests join it in later
  * milestones. Stable UUIDs and workspace_id columns from day one so the data
  * survives into the desktop app (spec §6).
+ *
+ * ── v5 FREEZE CONTRACT (shared database) ─────────────────────────────────
+ * This database is SHARED with the Contrail plugin, whose engine is frozen
+ * at schema v5 logic and whose migrate() no-ops for user_version >= 5. While
+ * that sharing lasts, migrations here (v6+) must be ADDITIVE ONLY:
+ *   - never rename, repurpose, or drop anything a v5 reader touches
+ *     (connections, artifacts, dependency_edges, artifact_fts,
+ *     deploy_requests' existing columns, audit_events);
+ *   - new columns on those tables must be nullable (no NOT NULL without
+ *     default — v5 INSERTs don't know them);
+ *   - deploy_requests.status keeps its v5 vocabulary (validated/executing/
+ *     executed/execution_failed/expired/superseded/locked) because the v5
+ *     claimCode path queries it; the desktop's richer state machine lives in
+ *     the separate desktop_state column.
+ * Desktop-only state goes in NEW tables.
  */
 export class ContrailDb {
   private readonly db: Database.Database;
@@ -26,7 +41,15 @@ export class ContrailDb {
     this.db = new Database(filePath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
+    // Shared-DB politeness: the plugin may hold short write transactions on
+    // the same file; wait instead of surfacing SQLITE_BUSY immediately.
+    this.db.pragma('busy_timeout = 5000');
     this.migrate();
+  }
+
+  /** The stored schema version (SQLite user_version). */
+  schemaVersion(): number {
+    return this.db.pragma('user_version', { simple: true }) as number;
   }
 
   private migrate(): void {
@@ -132,6 +155,123 @@ export class ContrailDb {
         this.db.exec(
           `ALTER TABLE deploy_requests ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0;`,
         );
+      }
+      if (current < 6) {
+        // Desktop app (v1): projects as context silos, agent sessions,
+        // capability-layer registries, and cross-process advisory locks.
+        // ADDITIVE ONLY per the v5 freeze contract above.
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS projects (
+            id            TEXT PRIMARY KEY,
+            workspace_id  TEXT NOT NULL DEFAULT 'default',
+            name          TEXT NOT NULL,
+            description   TEXT,
+            instructions  TEXT,
+            ruleset_ref   TEXT,
+            settings_json TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS project_bindings (
+            id            TEXT PRIMARY KEY,
+            workspace_id  TEXT NOT NULL DEFAULT 'default',
+            project_id    TEXT NOT NULL,
+            connection_id TEXT NOT NULL,
+            env_role      TEXT NOT NULL CHECK (env_role IN ('dev','qa','uat','prod','other')),
+            created_at    TEXT NOT NULL,
+            UNIQUE (project_id, connection_id)
+          );
+          CREATE TABLE IF NOT EXISTS project_docs (
+            id            TEXT PRIMARY KEY,
+            workspace_id  TEXT NOT NULL DEFAULT 'default',
+            project_id    TEXT NOT NULL,
+            filename      TEXT NOT NULL,
+            mime          TEXT,
+            size_bytes    INTEGER,
+            added_at      TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS project_notes (
+            id            TEXT PRIMARY KEY,
+            workspace_id  TEXT NOT NULL DEFAULT 'default',
+            project_id    TEXT NOT NULL,
+            session_id    TEXT,
+            author        TEXT NOT NULL CHECK (author IN ('user','agent')),
+            body          TEXT NOT NULL,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS sessions (
+            id                TEXT PRIMARY KEY,
+            workspace_id      TEXT NOT NULL DEFAULT 'default',
+            project_id        TEXT NOT NULL,
+            title             TEXT,
+            status            TEXT NOT NULL,
+            transcript_path   TEXT,
+            model             TEXT,
+            input_tokens      INTEGER NOT NULL DEFAULT 0,
+            output_tokens     INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cost_usd          REAL NOT NULL DEFAULT 0,
+            created_at        TEXT NOT NULL,
+            ended_at          TEXT
+          );
+          CREATE TABLE IF NOT EXISTS metadata_snapshots (
+            id             TEXT PRIMARY KEY,
+            workspace_id   TEXT NOT NULL DEFAULT 'default',
+            connection_id  TEXT NOT NULL,
+            taken_at       TEXT NOT NULL,
+            kind           TEXT NOT NULL,
+            types_json     TEXT,
+            archive_path   TEXT,
+            artifact_count INTEGER
+          );
+          CREATE TABLE IF NOT EXISTS mcp_server_toggles (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL DEFAULT 'default',
+            project_id   TEXT,
+            server_key   TEXT NOT NULL,
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            UNIQUE (project_id, server_key)
+          );
+          CREATE TABLE IF NOT EXISTS custom_mcp_servers (
+            id             TEXT PRIMARY KEY,
+            workspace_id   TEXT NOT NULL DEFAULT 'default',
+            name           TEXT NOT NULL,
+            transport      TEXT NOT NULL,
+            url_or_command TEXT NOT NULL,
+            auth_mode      TEXT NOT NULL DEFAULT 'independent'
+                           CHECK (auth_mode IN ('independent','org_bound')),
+            config_json    TEXT,
+            enabled        INTEGER NOT NULL DEFAULT 0,
+            created_at     TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS connector_configs (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL DEFAULT 'default',
+            kind         TEXT NOT NULL CHECK (kind IN ('slack','jira','google','custom')),
+            name         TEXT NOT NULL,
+            config_json  TEXT,
+            enabled      INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS app_locks (
+            name        TEXT PRIMARY KEY,
+            holder      TEXT NOT NULL,
+            pid         INTEGER NOT NULL,
+            acquired_at TEXT NOT NULL,
+            expires_at  TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_bindings_project ON project_bindings (project_id);
+          CREATE INDEX IF NOT EXISTS idx_docs_project ON project_docs (project_id);
+          CREATE INDEX IF NOT EXISTS idx_notes_project ON project_notes (project_id);
+          CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions (project_id);
+          ALTER TABLE deploy_requests ADD COLUMN session_id TEXT;
+          ALTER TABLE deploy_requests ADD COLUMN source_connection_id TEXT;
+          ALTER TABLE deploy_requests ADD COLUMN approved_at TEXT;
+          ALTER TABLE deploy_requests ADD COLUMN approved_comment TEXT;
+          ALTER TABLE deploy_requests ADD COLUMN desktop_state TEXT;
+          ALTER TABLE deploy_requests ADD COLUMN origin TEXT;
+        `);
       }
       this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     });
