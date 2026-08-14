@@ -1,0 +1,32 @@
+{
+  "name": "@contrail/engine",
+  "version": "0.1.0",
+  "description": "Contrail Engine — Salesforce metadata engine, connection manager, and capability layer. MCP-free.",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@napi-rs/keyring": "^1.3.0",
+    "better-sqlite3": "^13.0.3",
+    "fast-xml-parser": "^4.5.0",
+    "fflate": "^0.8.2",
+    "open": "^10.1.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.15.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

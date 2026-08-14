@@ -1,0 +1,11 @@
+packages:
+  - packages/*
+  - apps/*
+
+# Build-script policy: better-sqlite3 v13 ships N-API prebuilds in-package and
+# must NOT fall back to a node-gyp source build; esbuild and electron have
+# legitimate platform-binary install steps.
+allowBuilds:
+  better-sqlite3: false
+  esbuild: true
+  electron: true
