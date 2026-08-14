@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, shell, utilityProcess } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { log } from '@contrail/engine';
@@ -20,6 +20,8 @@ import { makeHandlers } from './ipc/handlers.js';
 const SMOKE = process.argv.includes('--smoke');
 const smokeOutArg = process.argv.find((a) => a.startsWith('--smoke-out='));
 const SMOKE_OUT = smokeOutArg ? smokeOutArg.slice('--smoke-out='.length) : null;
+const agentSpikeArg = process.argv.find((a) => a.startsWith('--agent-spike='));
+const AGENT_SPIKE = agentSpikeArg ? agentSpikeArg.slice('--agent-spike='.length) : null;
 
 function smokeWrite(payload: unknown): void {
   const text = JSON.stringify(payload, null, 2) + '\n';
@@ -27,8 +29,8 @@ function smokeWrite(payload: unknown): void {
   else process.stdout.write(text);
 }
 
-if (SMOKE) {
-  // Headless mode must never block on a native error dialog (Windows Electron
+if (SMOKE || AGENT_SPIKE) {
+  // Headless modes must never block on a native error dialog (Windows Electron
   // detaches from the console, so a dialog is a silent hang for the caller).
   process.on('uncaughtException', (err) => {
     smokeWrite({ ok: false, error: `uncaught: ${String(err)}` });
@@ -91,6 +93,38 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  if (AGENT_SPIKE) {
+    // Risk-#1 spike: run the Agent SDK spike script inside a utilityProcess —
+    // the exact process topology real sessions will use (main → utilityProcess
+    // → claude.exe subprocess) — and mirror its output to the smoke-out file.
+    // Watchdogged: on timeout we dump whatever partial output exists instead
+    // of hanging the caller.
+    const child = utilityProcess.fork(AGENT_SPIKE, [], { stdio: 'pipe' });
+    let out = '';
+    let spawned = false;
+    let finished = false;
+    const finish = (payload: Record<string, unknown>, code: number): void => {
+      if (finished) return; // watchdog-kill also fires 'exit' — first verdict wins
+      finished = true;
+      smokeWrite({ child_spawned: spawned, child_output: out, ...payload });
+      app.exit(code);
+    };
+    const watchdog = setTimeout(() => {
+      finish({ ok: false, error: 'watchdog: utilityProcess spike exceeded 240s' }, 1);
+      child.kill();
+    }, 240_000);
+    child.on('spawn', () => {
+      spawned = true;
+    });
+    child.stdout?.on('data', (d) => (out += String(d)));
+    child.stderr?.on('data', (d) => (out += String(d)));
+    child.on('exit', (code) => {
+      clearTimeout(watchdog);
+      finish({ utility_process_exit_code: code }, code === 0 ? 0 : 1);
+    });
+    return;
+  }
+
   try {
     boot = bootstrap(app.getVersion());
   } catch (err) {

@@ -1,0 +1,155 @@
+import { describe, expect, it } from 'vitest';
+import { buildSessionOptions } from '../options.js';
+import { grantUnion, mintableCapabilities, SESSION_EXCLUDED_CAPABILITIES } from '../mint.js';
+import type { BindingWithGrants, SessionContext } from '../types.js';
+
+/**
+ * The tool-manifest snapshot suite — the tripwire for the Agent SDK decision's
+ * config risk. If ANY assertion here fails after an SDK bump or refactor,
+ * something changed the session's tool universe: stop and review before
+ * shipping. (Agreed guardrails: allowlist-only, Bash never, one factory.)
+ */
+
+const FULL: BindingWithGrants = {
+  connectionId: 'c1',
+  alias: 'dev-org',
+  orgName: 'Dev',
+  orgType: 'developer',
+  envRole: 'dev',
+  grants: {
+    metadata_read: true,
+    metadata_write: true,
+    diagnostics_read: true,
+    data_read: true,
+    data_write: true,
+  },
+};
+
+const READ_ONLY: BindingWithGrants = {
+  ...FULL,
+  connectionId: 'c2',
+  alias: 'client-prod',
+  orgType: 'production',
+  envRole: 'prod',
+  grants: {
+    metadata_read: true,
+    metadata_write: false,
+    diagnostics_read: false,
+    data_read: false,
+    data_write: false,
+  },
+};
+
+function ctxWith(bindings: BindingWithGrants[]): SessionContext {
+  return {
+    sessionId: 's1',
+    project: { id: 'p1', name: 'Test', description: null, instructions: null },
+    bindings,
+    model: 'claude-haiku-4-5',
+    maxTurns: 4,
+    maxBudgetUsd: 0.25,
+    cwd: 'C:/tmp/scratch',
+    apiKey: 'sk-test',
+  };
+}
+
+const invoke = async () => ({ content: [{ type: 'text' as const, text: 'ok' }] });
+
+describe('tool manifest (THE isolation snapshot)', () => {
+  it('full grants mint exactly the expected capability set — no more, no less', () => {
+    const names = mintableCapabilities([FULL]).map((c) => c.name).sort();
+    expect(names).toEqual([
+      'deactivate_flow',
+      'describe_schema',
+      'diff_artifact',
+      'diff_orgs',
+      'dml_execute',
+      'dml_propose',
+      'execute_deploy',
+      'get_audit_log',
+      'get_debug_logs',
+      'get_dependencies',
+      'get_flow_errors',
+      'get_permissions',
+      'get_record',
+      'list_connections',
+      'list_metadata',
+      'refresh_snapshot',
+      'retrieve_metadata',
+      'search_metadata',
+      'soql_query',
+      'validate_deploy',
+    ]);
+  });
+
+  it('connection lifecycle is NEVER minted into a session', () => {
+    const names = mintableCapabilities([FULL]).map((c) => c.name);
+    for (const excluded of SESSION_EXCLUDED_CAPABILITIES) {
+      expect(names).not.toContain(excluded);
+    }
+  });
+
+  it('metadata_read-only bindings get no write/data/diagnostics families', () => {
+    const names = mintableCapabilities([READ_ONLY]).map((c) => c.name).sort();
+    expect(names).toEqual([
+      'describe_schema',
+      'diff_artifact',
+      'diff_orgs',
+      'get_audit_log',
+      'get_dependencies',
+      'get_permissions',
+      'list_connections',
+      'list_metadata',
+      'refresh_snapshot',
+      'retrieve_metadata',
+      'search_metadata',
+    ]);
+  });
+
+  it('grant union across bindings works (mixed fleet mints the union)', () => {
+    const union = grantUnion([FULL, READ_ONLY]);
+    expect(union.metadata_write).toBe(true);
+    expect(union.data_write).toBe(true);
+  });
+
+  it('session options hold every isolation invariant', () => {
+    const options = buildSessionOptions(ctxWith([FULL]), invoke);
+    // NO built-in tools, by construction — the single most load-bearing line.
+    expect(options.tools).toEqual([]);
+    // Never load the user's ~/.claude settings, CLAUDE.md, or skills.
+    expect(options.settingSources).toEqual([]);
+    // Never write to the user's Claude session store.
+    expect(options.persistSession).toBe(false);
+    // Budget caps present.
+    expect(options.maxTurns).toBe(4);
+    expect(options.maxBudgetUsd).toBe(0.25);
+  });
+
+  it('allowedTools carries ONLY namespaced contrail capabilities — no built-in names ever', () => {
+    const options = buildSessionOptions(ctxWith([FULL]), invoke);
+    const allowed = options.allowedTools ?? [];
+    expect(allowed.length).toBeGreaterThan(0);
+    for (const name of allowed) {
+      expect(name).toMatch(/^mcp__contrail__/);
+    }
+    const FORBIDDEN = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Task', 'Skill'];
+    for (const builtIn of FORBIDDEN) {
+      expect(allowed).not.toContain(builtIn);
+    }
+  });
+
+  it('read-only sessions cannot see write tools even in allowedTools', () => {
+    const options = buildSessionOptions(ctxWith([READ_ONLY]), invoke);
+    const allowed = options.allowedTools ?? [];
+    for (const writeTool of ['validate_deploy', 'execute_deploy', 'dml_propose', 'dml_execute', 'deactivate_flow']) {
+      expect(allowed).not.toContain(`mcp__contrail__${writeTool}`);
+    }
+  });
+
+  it('system prompt is stable across calls (prompt-cache invariant)', () => {
+    const a = buildSessionOptions(ctxWith([FULL]), invoke).systemPrompt;
+    const b = buildSessionOptions(ctxWith([FULL]), invoke).systemPrompt;
+    expect(a).toEqual(b);
+    expect(String(a)).not.toMatch(/\d{4}-\d{2}-\d{2}|\d{2}:\d{2}/); // no dates/clocks in the prefix
+  });
+});
