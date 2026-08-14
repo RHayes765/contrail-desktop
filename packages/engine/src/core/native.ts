@@ -34,3 +34,40 @@ export function probeKeyring(): NativeProbe {
     return { ok: false, detail: String(err) };
   }
 }
+
+// ── generic OS-keychain secrets (e.g. the BYO Anthropic API key) ─────────
+// Host apps must go through these helpers: under pnpm strict isolation the
+// keyring package resolves only from the engine's own context.
+
+interface KeyringEntry {
+  getPassword(): string | null;
+  setPassword(value: string): void;
+  deletePassword(): boolean;
+}
+
+function entry(service: string, account: string): KeyringEntry {
+  const { Entry } = require('@napi-rs/keyring') as {
+    Entry: new (service: string, account: string) => KeyringEntry;
+  };
+  return new Entry(service, account);
+}
+
+export function readSecret(service: string, account: string): string | null {
+  try {
+    return entry(service, account).getPassword();
+  } catch {
+    return null;
+  }
+}
+
+export function writeSecret(service: string, account: string, value: string): void {
+  entry(service, account).setPassword(value);
+}
+
+export function deleteSecret(service: string, account: string): boolean {
+  try {
+    return entry(service, account).deletePassword();
+  } catch {
+    return false;
+  }
+}

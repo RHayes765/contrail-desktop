@@ -5,6 +5,7 @@ import { log } from '@contrail/engine';
 import { bootstrap, type Bootstrap } from './bootstrap.js';
 import { registerHandlers } from './ipc/registry.js';
 import { makeHandlers } from './ipc/handlers.js';
+import { runHeadlessSession, type SessionSpec } from './services/agentRuntime.js';
 
 /**
  * Contrail desktop — main process. Hardening posture (spec §8), set before
@@ -22,6 +23,8 @@ const smokeOutArg = process.argv.find((a) => a.startsWith('--smoke-out='));
 const SMOKE_OUT = smokeOutArg ? smokeOutArg.slice('--smoke-out='.length) : null;
 const agentSpikeArg = process.argv.find((a) => a.startsWith('--agent-spike='));
 const AGENT_SPIKE = agentSpikeArg ? agentSpikeArg.slice('--agent-spike='.length) : null;
+const agentDemoArg = process.argv.find((a) => a.startsWith('--agent-demo='));
+const AGENT_DEMO = agentDemoArg ? agentDemoArg.slice('--agent-demo='.length) : null;
 
 function smokeWrite(payload: unknown): void {
   const text = JSON.stringify(payload, null, 2) + '\n';
@@ -29,7 +32,7 @@ function smokeWrite(payload: unknown): void {
   else process.stdout.write(text);
 }
 
-if (SMOKE || AGENT_SPIKE) {
+if (SMOKE || AGENT_SPIKE || AGENT_DEMO) {
   // Headless modes must never block on a native error dialog (Windows Electron
   // detaches from the console, so a dialog is a silent hang for the caller).
   process.on('uncaughtException', (err) => {
@@ -122,6 +125,58 @@ app.whenReady().then(() => {
       clearTimeout(watchdog);
       finish({ utility_process_exit_code: code }, code === 0 ? 0 : 1);
     });
+    return;
+  }
+
+  if (AGENT_DEMO) {
+    // Session 3 finish line: a real headless agent session against the real
+    // shared DB, answering the question passed as the flag value. Uses the
+    // "Dev Sandbox" project (auto-created, bound to dev-org), Haiku, and
+    // hard budget caps.
+    void (async () => {
+      try {
+        const b = bootstrap(app.getVersion());
+        const devOrg = b.deps.db.resolveConnection('dev-org');
+        if (!devOrg) throw new Error('dev-org connection not found in shared DB');
+        let project = b.deps.db.findProjectByName('Dev Sandbox');
+        if (!project) {
+          const created = b.deps.db.createProject({
+            name: 'Dev Sandbox',
+            description: 'Default development project (auto-created by the agent demo).',
+          });
+          project = { ...created, description: null, instructions: null };
+        }
+        b.deps.db.addProjectBinding(project.id, devOrg.id, 'dev');
+        const spec: SessionSpec = {
+          project,
+          bindings: [{ connection: devOrg, envRole: 'dev' }],
+          model: 'claude-haiku-4-5',
+          maxTurns: 6,
+          maxBudgetUsd: 0.25,
+        };
+        const childPath = path.join(
+          app.getAppPath(),
+          '..',
+          '..',
+          'packages',
+          'agent-runtime',
+          'dist',
+          'child.js',
+        );
+        const result = await runHeadlessSession(b.deps, spec, childPath, AGENT_DEMO);
+        smokeWrite({
+          ok: true,
+          final_text: result.finalText,
+          usage: result.usage,
+          capability_calls: result.capabilityCalls,
+          event_types: result.events.map((e) => e.type),
+        });
+        app.exit(0);
+      } catch (err) {
+        smokeWrite({ ok: false, error: String(err) });
+        app.exit(1);
+      }
+    })();
     return;
   }
 

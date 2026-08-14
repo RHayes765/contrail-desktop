@@ -37,7 +37,14 @@ export {
 } from './core/grants.js';
 export { assertGrant } from './core/gate.js';
 export { log } from './core/log.js';
-export { probeBetterSqlite3, probeKeyring, type NativeProbe } from './core/native.js';
+export {
+  probeBetterSqlite3,
+  probeKeyring,
+  readSecret,
+  writeSecret,
+  deleteSecret,
+  type NativeProbe,
+} from './core/native.js';
 export type {
   ConnectionRecord,
   ArtifactRecord,

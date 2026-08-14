@@ -278,6 +278,84 @@ export class ContrailDb {
     tx();
   }
 
+  // ── projects & agent sessions (v6, desktop-owned) ──────────────────────
+
+  createProject(input: {
+    name: string;
+    description?: string | null;
+    instructions?: string | null;
+  }): { id: string; name: string } {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO projects (id, workspace_id, name, description, instructions, created_at, updated_at)
+         VALUES (?, 'default', ?, ?, ?, ?, ?)`,
+      )
+      .run(id, input.name, input.description ?? null, input.instructions ?? null, now, now);
+    return { id, name: input.name };
+  }
+
+  findProjectByName(
+    name: string,
+  ): { id: string; name: string; description: string | null; instructions: string | null } | null {
+    const row = this.db
+      .prepare(`SELECT id, name, description, instructions FROM projects WHERE name = ?`)
+      .get(name) as
+      | { id: string; name: string; description: string | null; instructions: string | null }
+      | undefined;
+    return row ?? null;
+  }
+
+  addProjectBinding(projectId: string, connectionId: string, envRole: string): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO project_bindings (id, workspace_id, project_id, connection_id, env_role, created_at)
+         VALUES (?, 'default', ?, ?, ?, ?)`,
+      )
+      .run(randomUUID(), projectId, connectionId, envRole, new Date().toISOString());
+  }
+
+  listProjectBindings(projectId: string): Array<{ connectionId: string; envRole: string }> {
+    return (
+      this.db
+        .prepare(`SELECT connection_id, env_role FROM project_bindings WHERE project_id = ?`)
+        .all(projectId) as Array<{ connection_id: string; env_role: string }>
+    ).map((r) => ({ connectionId: r.connection_id, envRole: r.env_role }));
+  }
+
+  createAgentSession(input: { projectId: string; title: string | null; model: string }): string {
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO sessions (id, workspace_id, project_id, title, status, model, created_at)
+         VALUES (?, 'default', ?, ?, 'active', ?, ?)`,
+      )
+      .run(id, input.projectId, input.title, input.model, new Date().toISOString());
+    return id;
+  }
+
+  finishAgentSession(
+    id: string,
+    usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; costUsd: number },
+    status: 'ended' | 'error' = 'ended',
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE sessions SET status = ?, input_tokens = ?, output_tokens = ?,
+           cache_read_tokens = ?, cost_usd = ?, ended_at = ? WHERE id = ?`,
+      )
+      .run(
+        status,
+        usage.inputTokens,
+        usage.outputTokens,
+        usage.cacheReadTokens,
+        usage.costUsd,
+        new Date().toISOString(),
+        id,
+      );
+  }
+
   // ── connections ────────────────────────────────────────────────────────
 
   insertConnection(input: {
