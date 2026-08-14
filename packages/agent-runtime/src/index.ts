@@ -14,4 +14,7 @@ export {
   sdkToolName,
   MCP_SERVER_NAME,
   SESSION_EXCLUDED_CAPABILITIES,
+  PROJECT_TOOLS,
+  PROJECT_TOOL_NAMES,
+  type ProjectToolDef,
 } from './mint.js';

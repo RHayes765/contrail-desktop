@@ -6,7 +6,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import type { BridgeToolResult, SessionContext } from './types.js';
 import { buildSystemPrompt } from './context.js';
-import { MCP_SERVER_NAME, mintableCapabilities, sdkToolName } from './mint.js';
+import { MCP_SERVER_NAME, mintableCapabilities, PROJECT_TOOLS, sdkToolName } from './mint.js';
 
 /**
  * THE session-options factory — the only code path allowed to construct
@@ -48,6 +48,24 @@ export function buildSessionOptions(
     ),
   );
 
+  // Project-silo tools mint unconditionally — the executor resolves the
+  // project from the session, so there is no cross-project surface to gate.
+  for (const def of PROJECT_TOOLS) {
+    tools.push(
+      tool(
+        def.name,
+        def.description,
+        def.inputSchema as Record<string, never>,
+        async (args: unknown) => {
+          const result = await invoke(def.name, args);
+          return { content: result.content, isError: result.isError };
+        },
+      ),
+    );
+  }
+
+  const allowed = [...caps.map((cap) => sdkToolName(cap.name)), ...PROJECT_TOOLS.map((t) => sdkToolName(t.name))];
+
   return {
     cwd: ctx.cwd,
     model: ctx.model,
@@ -62,7 +80,7 @@ export function buildSessionOptions(
         tools,
       }),
     },
-    allowedTools: caps.map((cap) => sdkToolName(cap.name)),
+    allowedTools: allowed,
     maxTurns: ctx.maxTurns,
     maxBudgetUsd: ctx.maxBudgetUsd,
     env: {

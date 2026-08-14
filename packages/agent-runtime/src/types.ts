@@ -53,13 +53,23 @@ export type ToChild =
   | { kind: 'init'; ctx: SessionContext }
   | { kind: 'send'; text: string }
   | { kind: 'capability:result'; id: number; result: BridgeToolResult }
-  | { kind: 'interrupt' };
+  | { kind: 'interrupt' }
+  /**
+   * Graceful teardown: close the input stream so the live query (and its CLI
+   * subprocess) exits on its own, then reply 'closed'. Main must wait for
+   * 'closed' (with a timeout fallback) before killing this process — killing
+   * a utilityProcess does NOT reap the SDK's claude.exe grandchild on
+   * Windows, so an abrupt kill would orphan it.
+   */
+  | { kind: 'shutdown' };
 
 /** child → main */
 export type ToMain =
   | { kind: 'ready' }
   | { kind: 'capability:invoke'; id: number; name: string; args: unknown }
-  | { kind: 'event'; event: AgentEvent };
+  | { kind: 'event'; event: AgentEvent }
+  /** The live query has fully ended (input closed or fatal error); safe to kill this process. */
+  | { kind: 'closed' };
 
 /** Matches the engine's ToolResult shape (content parts + isError). */
 export interface BridgeToolResult {

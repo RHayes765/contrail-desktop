@@ -6,6 +6,7 @@ import {
   type EngineDeps,
 } from '@contrail/engine';
 import type { HealthView } from '@contrail/shared';
+import { openBrowserViaShell } from './services/connections.js';
 
 /**
  * Main-process bootstrap: verify the two native modules load under Electron's
@@ -36,7 +37,8 @@ export function bootstrap(appVersion: string): Bootstrap {
     );
   }
 
-  const deps = createEngineDeps();
+  // Electron owns the browser opener; everything else is production wiring.
+  const deps = createEngineDeps({ flowOps: { openBrowser: openBrowserViaShell } });
   const schemaVersion = deps.db.schemaVersion();
   const connectionCount = deps.db.listConnections().length;
 

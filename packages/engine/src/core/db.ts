@@ -3,12 +3,16 @@ import { randomUUID } from 'node:crypto';
 import { dbPath } from './paths.js';
 import { normalizeGrants, type GrantSet } from './grants.js';
 import type {
+  AgentSessionRecord,
   ArtifactRecord,
   AuditEvent,
   ConnectionRecord,
   DependencyEdge,
   DeployRequestRecord,
   OrgType,
+  ProjectDocRecord,
+  ProjectNoteRecord,
+  ProjectRecord,
 } from './types.js';
 
 const SCHEMA_VERSION = 6;
@@ -280,11 +284,34 @@ export class ContrailDb {
 
   // ── projects & agent sessions (v6, desktop-owned) ──────────────────────
 
+  private projectFromRow(row: {
+    id: string;
+    name: string;
+    description: string | null;
+    instructions: string | null;
+    ruleset_ref: string | null;
+    created_at: string;
+    updated_at: string;
+  }): ProjectRecord {
+    return {
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      instructions: row.instructions,
+      rulesetRef: row.ruleset_ref,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private static readonly PROJECT_COLS =
+    'id, name, description, instructions, ruleset_ref, created_at, updated_at';
+
   createProject(input: {
     name: string;
     description?: string | null;
     instructions?: string | null;
-  }): { id: string; name: string } {
+  }): ProjectRecord {
     const id = randomUUID();
     const now = new Date().toISOString();
     this.db
@@ -293,18 +320,62 @@ export class ContrailDb {
          VALUES (?, 'default', ?, ?, ?, ?, ?)`,
       )
       .run(id, input.name, input.description ?? null, input.instructions ?? null, now, now);
-    return { id, name: input.name };
+    const created = this.getProject(id);
+    if (!created) throw new Error('project insert did not persist');
+    return created;
   }
 
-  findProjectByName(
-    name: string,
-  ): { id: string; name: string; description: string | null; instructions: string | null } | null {
+  listProjects(): ProjectRecord[] {
+    return (
+      this.db
+        .prepare(`SELECT ${ContrailDb.PROJECT_COLS} FROM projects ORDER BY created_at`)
+        .all() as Parameters<ContrailDb['projectFromRow']>[0][]
+    ).map((r) => this.projectFromRow(r));
+  }
+
+  getProject(id: string): ProjectRecord | null {
     const row = this.db
-      .prepare(`SELECT id, name, description, instructions FROM projects WHERE name = ?`)
-      .get(name) as
-      | { id: string; name: string; description: string | null; instructions: string | null }
-      | undefined;
-    return row ?? null;
+      .prepare(`SELECT ${ContrailDb.PROJECT_COLS} FROM projects WHERE id = ?`)
+      .get(id) as Parameters<ContrailDb['projectFromRow']>[0] | undefined;
+    return row ? this.projectFromRow(row) : null;
+  }
+
+  findProjectByName(name: string): ProjectRecord | null {
+    const row = this.db
+      .prepare(`SELECT ${ContrailDb.PROJECT_COLS} FROM projects WHERE name = ?`)
+      .get(name) as Parameters<ContrailDb['projectFromRow']>[0] | undefined;
+    return row ? this.projectFromRow(row) : null;
+  }
+
+  updateProject(
+    id: string,
+    patch: { name?: string; description?: string | null; instructions?: string | null },
+  ): ProjectRecord | null {
+    const current = this.getProject(id);
+    if (!current) return null;
+    this.db
+      .prepare(
+        `UPDATE projects SET name = ?, description = ?, instructions = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(
+        patch.name ?? current.name,
+        patch.description !== undefined ? patch.description : current.description,
+        patch.instructions !== undefined ? patch.instructions : current.instructions,
+        new Date().toISOString(),
+        id,
+      );
+    return this.getProject(id);
+  }
+
+  /** Removes the project and its silo rows. Session rows stay (audit history). */
+  deleteProject(id: string): void {
+    const tx = this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM project_bindings WHERE project_id = ?`).run(id);
+      this.db.prepare(`DELETE FROM project_docs WHERE project_id = ?`).run(id);
+      this.db.prepare(`DELETE FROM project_notes WHERE project_id = ?`).run(id);
+      this.db.prepare(`DELETE FROM projects WHERE id = ?`).run(id);
+    });
+    tx();
   }
 
   addProjectBinding(projectId: string, connectionId: string, envRole: string): void {
@@ -316,6 +387,12 @@ export class ContrailDb {
       .run(randomUUID(), projectId, connectionId, envRole, new Date().toISOString());
   }
 
+  removeProjectBinding(projectId: string, connectionId: string): void {
+    this.db
+      .prepare(`DELETE FROM project_bindings WHERE project_id = ? AND connection_id = ?`)
+      .run(projectId, connectionId);
+  }
+
   listProjectBindings(projectId: string): Array<{ connectionId: string; envRole: string }> {
     return (
       this.db
@@ -324,15 +401,259 @@ export class ContrailDb {
     ).map((r) => ({ connectionId: r.connection_id, envRole: r.env_role }));
   }
 
-  createAgentSession(input: { projectId: string; title: string | null; model: string }): string {
+  // ── project docs & notes ───────────────────────────────────────────────
+
+  private docFromRow(row: {
+    id: string;
+    project_id: string;
+    filename: string;
+    mime: string | null;
+    size_bytes: number | null;
+    added_at: string;
+  }): ProjectDocRecord {
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      filename: row.filename,
+      mime: row.mime,
+      sizeBytes: row.size_bytes,
+      addedAt: row.added_at,
+    };
+  }
+
+  listProjectDocs(projectId: string): ProjectDocRecord[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT id, project_id, filename, mime, size_bytes, added_at
+           FROM project_docs WHERE project_id = ? ORDER BY filename`,
+        )
+        .all(projectId) as Parameters<ContrailDb['docFromRow']>[0][]
+    ).map((r) => this.docFromRow(r));
+  }
+
+  getProjectDoc(projectId: string, filename: string): ProjectDocRecord | null {
+    // NOCASE: doc files live on case-insensitive filesystems (Windows/macOS) —
+    // 'Notes.md' and 'notes.md' are one file on disk, so they must be one row.
+    const row = this.db
+      .prepare(
+        `SELECT id, project_id, filename, mime, size_bytes, added_at
+         FROM project_docs WHERE project_id = ? AND filename = ? COLLATE NOCASE`,
+      )
+      .get(projectId, filename) as Parameters<ContrailDb['docFromRow']>[0] | undefined;
+    return row ? this.docFromRow(row) : null;
+  }
+
+  getProjectDocById(id: string): ProjectDocRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, project_id, filename, mime, size_bytes, added_at FROM project_docs WHERE id = ?`,
+      )
+      .get(id) as Parameters<ContrailDb['docFromRow']>[0] | undefined;
+    return row ? this.docFromRow(row) : null;
+  }
+
+  /** Re-uploading the same filename (case-insensitive) replaces the row, like the disk does. */
+  upsertProjectDoc(input: {
+    projectId: string;
+    filename: string;
+    mime: string | null;
+    sizeBytes: number | null;
+  }): ProjectDocRecord {
+    const tx = this.db.transaction((): ProjectDocRecord => {
+      const existing = this.getProjectDoc(input.projectId, input.filename);
+      const now = new Date().toISOString();
+      if (existing) {
+        this.db
+          .prepare(
+            `UPDATE project_docs SET filename = ?, mime = ?, size_bytes = ?, added_at = ? WHERE id = ?`,
+          )
+          .run(input.filename, input.mime, input.sizeBytes, now, existing.id);
+        return {
+          ...existing,
+          filename: input.filename,
+          mime: input.mime,
+          sizeBytes: input.sizeBytes,
+          addedAt: now,
+        };
+      }
+      const id = randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO project_docs (id, workspace_id, project_id, filename, mime, size_bytes, added_at)
+           VALUES (?, 'default', ?, ?, ?, ?, ?)`,
+        )
+        .run(id, input.projectId, input.filename, input.mime, input.sizeBytes, now);
+      return {
+        id,
+        projectId: input.projectId,
+        filename: input.filename,
+        mime: input.mime,
+        sizeBytes: input.sizeBytes,
+        addedAt: now,
+      };
+    });
+    return tx();
+  }
+
+  removeProjectDoc(id: string): void {
+    this.db.prepare(`DELETE FROM project_docs WHERE id = ?`).run(id);
+  }
+
+  listProjectNotes(projectId: string): ProjectNoteRecord[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT id, project_id, session_id, author, body, created_at
+           FROM project_notes WHERE project_id = ? ORDER BY created_at, rowid`,
+        )
+        .all(projectId) as Array<{
+        id: string;
+        project_id: string;
+        session_id: string | null;
+        author: 'user' | 'agent';
+        body: string;
+        created_at: string;
+      }>
+    ).map((r) => ({
+      id: r.id,
+      projectId: r.project_id,
+      sessionId: r.session_id,
+      author: r.author,
+      body: r.body,
+      createdAt: r.created_at,
+    }));
+  }
+
+  addProjectNote(input: {
+    projectId: string;
+    sessionId?: string | null;
+    author: 'user' | 'agent';
+    body: string;
+  }): ProjectNoteRecord {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO project_notes (id, workspace_id, project_id, session_id, author, body, created_at, updated_at)
+         VALUES (?, 'default', ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, input.projectId, input.sessionId ?? null, input.author, input.body, now, now);
+    return {
+      id,
+      projectId: input.projectId,
+      sessionId: input.sessionId ?? null,
+      author: input.author,
+      body: input.body,
+      createdAt: now,
+    };
+  }
+
+  // ── agent session rows ─────────────────────────────────────────────────
+
+  private sessionFromRow(row: {
+    id: string;
+    project_id: string;
+    title: string | null;
+    status: string;
+    transcript_path: string | null;
+    model: string | null;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cost_usd: number;
+    created_at: string;
+    ended_at: string | null;
+  }): AgentSessionRecord {
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      title: row.title,
+      status: row.status,
+      transcriptPath: row.transcript_path,
+      model: row.model,
+      inputTokens: row.input_tokens,
+      outputTokens: row.output_tokens,
+      cacheReadTokens: row.cache_read_tokens,
+      costUsd: row.cost_usd,
+      createdAt: row.created_at,
+      endedAt: row.ended_at,
+    };
+  }
+
+  private static readonly SESSION_COLS =
+    'id, project_id, title, status, transcript_path, model, input_tokens, output_tokens, cache_read_tokens, cost_usd, created_at, ended_at';
+
+  createAgentSession(input: {
+    projectId: string;
+    title: string | null;
+    model: string;
+    transcriptPath?: string | null;
+  }): string {
     const id = randomUUID();
     this.db
       .prepare(
-        `INSERT INTO sessions (id, workspace_id, project_id, title, status, model, created_at)
-         VALUES (?, 'default', ?, ?, 'active', ?, ?)`,
+        `INSERT INTO sessions (id, workspace_id, project_id, title, status, model, transcript_path, created_at)
+         VALUES (?, 'default', ?, ?, 'active', ?, ?, ?)`,
       )
-      .run(id, input.projectId, input.title, input.model, new Date().toISOString());
+      .run(
+        id,
+        input.projectId,
+        input.title,
+        input.model,
+        input.transcriptPath ?? null,
+        new Date().toISOString(),
+      );
     return id;
+  }
+
+  listAgentSessions(projectId: string): AgentSessionRecord[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT ${ContrailDb.SESSION_COLS} FROM sessions WHERE project_id = ? ORDER BY created_at DESC`,
+        )
+        .all(projectId) as Parameters<ContrailDb['sessionFromRow']>[0][]
+    ).map((r) => this.sessionFromRow(r));
+  }
+
+  getAgentSession(id: string): AgentSessionRecord | null {
+    const row = this.db
+      .prepare(`SELECT ${ContrailDb.SESSION_COLS} FROM sessions WHERE id = ?`)
+      .get(id) as Parameters<ContrailDb['sessionFromRow']>[0] | undefined;
+    return row ? this.sessionFromRow(row) : null;
+  }
+
+  setAgentSessionTitle(id: string, title: string): void {
+    this.db.prepare(`UPDATE sessions SET title = ? WHERE id = ?`).run(title, id);
+  }
+
+  setAgentSessionTranscriptPath(id: string, transcriptPath: string): void {
+    this.db.prepare(`UPDATE sessions SET transcript_path = ? WHERE id = ?`).run(transcriptPath, id);
+  }
+
+  /**
+   * Startup reconciliation: no session can genuinely be active when the app
+   * boots, so any 'active' row is the residue of a crash or force-kill.
+   * Returns how many rows were closed.
+   */
+  reconcileOrphanedAgentSessions(): number {
+    const result = this.db
+      .prepare(`UPDATE sessions SET status = 'error', ended_at = ? WHERE status = 'active'`)
+      .run(new Date().toISOString());
+    return result.changes;
+  }
+
+  /** Live running totals, written after every completed turn. */
+  updateAgentSessionUsage(
+    id: string,
+    usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; costUsd: number },
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE sessions SET input_tokens = ?, output_tokens = ?, cache_read_tokens = ?, cost_usd = ? WHERE id = ?`,
+      )
+      .run(usage.inputTokens, usage.outputTokens, usage.cacheReadTokens, usage.costUsd, id);
   }
 
   finishAgentSession(

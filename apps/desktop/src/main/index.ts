@@ -1,11 +1,14 @@
-import { app, BrowserWindow, shell, utilityProcess } from 'electron';
+import { app, BrowserWindow, shell } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { log } from '@contrail/engine';
+import type { ChatEvent, PushChannel, PushEvents } from '@contrail/shared';
 import { bootstrap, type Bootstrap } from './bootstrap.js';
 import { registerHandlers } from './ipc/registry.js';
-import { makeHandlers } from './ipc/handlers.js';
-import { runHeadlessSession, type SessionSpec } from './services/agentRuntime.js';
+import { makeHandlers, type MainServices } from './ipc/handlers.js';
+import { ConnectionService } from './services/connections.js';
+import { ProjectService } from './services/projects.js';
+import { AgentSessionManager } from './services/agentRuntime.js';
 
 /**
  * Contrail desktop — main process. Hardening posture (spec §8), set before
@@ -21,10 +24,10 @@ import { runHeadlessSession, type SessionSpec } from './services/agentRuntime.js
 const SMOKE = process.argv.includes('--smoke');
 const smokeOutArg = process.argv.find((a) => a.startsWith('--smoke-out='));
 const SMOKE_OUT = smokeOutArg ? smokeOutArg.slice('--smoke-out='.length) : null;
-const agentSpikeArg = process.argv.find((a) => a.startsWith('--agent-spike='));
-const AGENT_SPIKE = agentSpikeArg ? agentSpikeArg.slice('--agent-spike='.length) : null;
 const agentDemoArg = process.argv.find((a) => a.startsWith('--agent-demo='));
 const AGENT_DEMO = agentDemoArg ? agentDemoArg.slice('--agent-demo='.length) : null;
+
+const HEADLESS = SMOKE || AGENT_DEMO !== null;
 
 function smokeWrite(payload: unknown): void {
   const text = JSON.stringify(payload, null, 2) + '\n';
@@ -32,7 +35,7 @@ function smokeWrite(payload: unknown): void {
   else process.stdout.write(text);
 }
 
-if (SMOKE || AGENT_SPIKE || AGENT_DEMO) {
+if (HEADLESS) {
   // Headless modes must never block on a native error dialog (Windows Electron
   // detaches from the console, so a dialog is a silent hang for the caller).
   process.on('uncaughtException', (err) => {
@@ -46,12 +49,26 @@ if (SMOKE || AGENT_SPIKE || AGENT_DEMO) {
 }
 
 // Single instance — a second launch focuses the first window instead.
-if (!SMOKE && !app.requestSingleInstanceLock()) {
+if (!HEADLESS && !app.requestSingleInstanceLock()) {
   app.quit();
 }
 
 let boot: Bootstrap | null = null;
 let mainWindow: BrowserWindow | null = null;
+let sessionManager: AgentSessionManager | null = null;
+
+/** Where the runtime child bundle lives (dev layout; packaging revisits this). */
+function runtimeChildPath(): string {
+  return path.join(
+    app.getAppPath(),
+    '..',
+    '..',
+    'packages',
+    'agent-runtime',
+    'dist',
+    'child.js',
+  );
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -95,96 +112,107 @@ function createWindow(): void {
   }
 }
 
-app.whenReady().then(() => {
-  if (AGENT_SPIKE) {
-    // Risk-#1 spike: run the Agent SDK spike script inside a utilityProcess —
-    // the exact process topology real sessions will use (main → utilityProcess
-    // → claude.exe subprocess) — and mirror its output to the smoke-out file.
-    // Watchdogged: on timeout we dump whatever partial output exists instead
-    // of hanging the caller.
-    const child = utilityProcess.fork(AGENT_SPIKE, [], { stdio: 'pipe' });
-    let out = '';
-    let spawned = false;
-    let finished = false;
-    const finish = (payload: Record<string, unknown>, code: number): void => {
-      if (finished) return; // watchdog-kill also fires 'exit' — first verdict wins
-      finished = true;
-      smokeWrite({ child_spawned: spawned, child_output: out, ...payload });
-      app.exit(code);
-    };
-    const watchdog = setTimeout(() => {
-      finish({ ok: false, error: 'watchdog: utilityProcess spike exceeded 240s' }, 1);
-      child.kill();
-    }, 240_000);
-    child.on('spawn', () => {
-      spawned = true;
-    });
-    child.stdout?.on('data', (d) => (out += String(d)));
-    child.stderr?.on('data', (d) => (out += String(d)));
-    child.on('exit', (code) => {
-      clearTimeout(watchdog);
-      finish({ utility_process_exit_code: code }, code === 0 ? 0 : 1);
-    });
-    return;
-  }
+// ── the Session 4 live demo (headless spec demo, budget-capped) ──────────
 
-  if (AGENT_DEMO) {
-    // Session 3 finish line: a real headless agent session against the real
-    // shared DB, answering the question passed as the flag value. Uses the
-    // "Dev Sandbox" project (auto-created, bound to dev-org), Haiku, and
-    // hard budget caps.
-    void (async () => {
-      try {
-        const b = bootstrap(app.getVersion());
-        const devOrg = b.deps.db.resolveConnection('dev-org');
-        if (!devOrg) throw new Error('dev-org connection not found in shared DB');
-        let project = b.deps.db.findProjectByName('Dev Sandbox');
-        if (!project) {
-          const created = b.deps.db.createProject({
-            name: 'Dev Sandbox',
-            description: 'Default development project (auto-created by the agent demo).',
-          });
-          project = { ...created, description: null, instructions: null };
-        }
-        b.deps.db.addProjectBinding(project.id, devOrg.id, 'dev');
-        const spec: SessionSpec = {
-          project,
-          bindings: [{ connection: devOrg, envRole: 'dev' }],
-          model: 'claude-haiku-4-5',
-          maxTurns: 6,
-          maxBudgetUsd: 0.25,
-        };
-        const childPath = path.join(
-          app.getAppPath(),
-          '..',
-          '..',
-          'packages',
-          'agent-runtime',
-          'dist',
-          'child.js',
-        );
-        const result = await runHeadlessSession(b.deps, spec, childPath, AGENT_DEMO);
-        smokeWrite({
-          ok: true,
-          final_text: result.finalText,
-          usage: result.usage,
-          capability_calls: result.capabilityCalls,
-          event_types: result.events.map((e) => e.type),
-        });
-        app.exit(0);
-      } catch (err) {
-        smokeWrite({ ok: false, error: String(err) });
-        app.exit(1);
+/**
+ * Proves the whole Session 4 stack without a window: a REAL multi-turn chat
+ * session on the Dev Sandbox project that (1) reads a seeded project doc via
+ * read_project_doc and (2) answers a SOQL question against dev-org — the two
+ * halves of the spec demo the Chat UI will drive.
+ */
+async function runAgentDemo(b: Bootstrap, question: string): Promise<void> {
+  const projects = new ProjectService(b.deps);
+  const devOrg = b.deps.db.resolveConnection('dev-org');
+  if (!devOrg) throw new Error('dev-org connection not found in shared DB');
+
+  const project =
+    b.deps.db.findProjectByName('Dev Sandbox') ??
+    b.deps.db.createProject({
+      name: 'Dev Sandbox',
+      description: 'Default development project (auto-created by the agent demo).',
+    });
+  b.deps.db.removeProjectBinding(project.id, devOrg.id);
+  b.deps.db.addProjectBinding(project.id, devOrg.id, 'dev');
+
+  // Seed a doc the agent has to actually read to answer turn 1.
+  const scratchDoc = path.join(app.getPath('temp'), 'contrail-demo-conventions.md');
+  fs.writeFileSync(
+    scratchDoc,
+    [
+      '# Dev Sandbox conventions',
+      '',
+      '- Naming: all custom fields use the `LF4_` prefix.',
+      '- The integration user for this project is `integration@lanefour.dev`.',
+      '- Deploy window: weekdays after 4pm Eastern only.',
+      '',
+    ].join('\n'),
+  );
+  projects.addDocFromPath(project.id, scratchDoc);
+
+  // Capture pushes instead of a renderer; resolve turn boundaries on 'done'.
+  const events: Array<{ sessionId: string; event: ChatEvent }> = [];
+  let turnResolve: (() => void) | null = null;
+  const push = <C extends PushChannel>(channel: C, payload: PushEvents[C]): void => {
+    if (channel === 'session:event') {
+      const p = payload as PushEvents['session:event'];
+      events.push(p);
+      if (p.event.type === 'done' && turnResolve) {
+        const r = turnResolve;
+        turnResolve = null;
+        r();
       }
-    })();
-    return;
-  }
+    }
+  };
 
+  const manager = new AgentSessionManager(b.deps, projects, runtimeChildPath(), push);
+  sessionManager = manager;
+
+  const view = manager.start(project.id);
+  const waitTurn = (timeoutMs: number): Promise<void> =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('turn timed out')), timeoutMs);
+      turnResolve = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+
+  const turn1 = waitTurn(120_000);
+  manager.send(
+    view.id,
+    'Check the project docs for our naming convention for custom fields and answer with just the prefix.',
+  );
+  await turn1;
+
+  const turn2 = waitTurn(120_000);
+  manager.send(view.id, question);
+  await turn2;
+
+  const inspection = manager.inspect(view.id);
+  await manager.end(view.id);
+
+  const finalTexts = events
+    .filter((e) => e.event.type === 'text')
+    .map((e) => (e.event as { text: string }).text);
+  const row = b.deps.db.getAgentSession(view.id);
+  smokeWrite({
+    ok: true,
+    session_id: view.id,
+    turn_texts: finalTexts,
+    capability_calls: inspection?.capabilityCalls ?? [],
+    usage: inspection?.usage ?? null,
+    row_status: row?.status,
+    transcript_path: row?.transcriptPath,
+    event_types: [...new Set(events.map((e) => e.event.type))],
+  });
+}
+
+app.whenReady().then(async () => {
   try {
     boot = bootstrap(app.getVersion());
   } catch (err) {
     log('error', 'bootstrap failed', { err: String(err) });
-    if (SMOKE) {
+    if (HEADLESS) {
       smokeWrite({ ok: false, error: String(err) });
       app.exit(1);
       return;
@@ -204,7 +232,38 @@ app.whenReady().then(() => {
     return;
   }
 
-  registerHandlers(boot.deps, makeHandlers(boot.health));
+  if (AGENT_DEMO) {
+    try {
+      await runAgentDemo(boot, AGENT_DEMO);
+      app.exit(0);
+    } catch (err) {
+      smokeWrite({ ok: false, error: String(err) });
+      app.exit(1);
+    }
+    return;
+  }
+
+  // ── windowed app ───────────────────────────────────────────────────────
+
+  const push = <C extends PushChannel>(channel: C, payload: PushEvents[C]): void => {
+    const contents = mainWindow?.webContents;
+    if (contents && !contents.isDestroyed()) contents.send(channel, payload);
+  };
+
+  const projects = new ProjectService(boot.deps);
+  const connections = new ConnectionService(boot.deps, (reason) =>
+    push('connections:changed', { reason }),
+  );
+  sessionManager = new AgentSessionManager(boot.deps, projects, runtimeChildPath(), push);
+
+  const services: MainServices = {
+    connections,
+    projects,
+    sessions: sessionManager,
+    getWindow: () => mainWindow,
+  };
+
+  registerHandlers(boot.deps, makeHandlers(boot.health, services));
   createWindow();
 
   app.on('second-instance', () => {
@@ -216,6 +275,16 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+// Close live sessions gracefully on quit — an abrupt exit would orphan the
+// SDK's CLI subprocesses (utilityProcess kill does not reap grandchildren).
+let quitting = false;
+app.on('before-quit', (event) => {
+  if (quitting || !sessionManager) return;
+  event.preventDefault();
+  quitting = true;
+  void sessionManager.endAll().finally(() => app.quit());
 });
 
 app.on('window-all-closed', () => {

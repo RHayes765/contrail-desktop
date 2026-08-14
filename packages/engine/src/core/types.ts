@@ -95,3 +95,51 @@ export interface AuditEvent {
   outcome: 'success' | 'refused' | 'error';
   detail: Record<string, unknown> | null;
 }
+
+// ── v6 desktop records (projects / sessions — see the v5 freeze contract in db.ts) ──
+
+export type EnvRole = 'dev' | 'qa' | 'uat' | 'prod' | 'other';
+
+/** A project = context silo: instructions, docs, notes, and org bindings. */
+export interface ProjectRecord {
+  id: string;
+  name: string;
+  description: string | null;
+  instructions: string | null;
+  rulesetRef: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProjectDocRecord {
+  id: string;
+  projectId: string;
+  filename: string;
+  mime: string | null;
+  sizeBytes: number | null;
+  addedAt: string;
+}
+
+export interface ProjectNoteRecord {
+  id: string;
+  projectId: string;
+  sessionId: string | null;
+  author: 'user' | 'agent';
+  body: string;
+  createdAt: string;
+}
+
+export interface AgentSessionRecord {
+  id: string;
+  projectId: string;
+  title: string | null;
+  status: string;
+  transcriptPath: string | null;
+  model: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  costUsd: number;
+  createdAt: string;
+  endedAt: string | null;
+}

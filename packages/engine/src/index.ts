@@ -51,6 +51,11 @@ export type {
   DependencyEdge,
   DeployRequestRecord,
   AuditEvent,
+  EnvRole,
+  ProjectRecord,
+  ProjectDocRecord,
+  ProjectNoteRecord,
+  AgentSessionRecord,
 } from './core/types.js';
 
 // Connect / Salesforce

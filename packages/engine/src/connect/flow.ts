@@ -98,18 +98,34 @@ export class ConnectFlowManager {
   private activeConnect: ActiveConnectFlow | null = null;
   private readonly manageSessions = new Map<string, ActiveManageSession>();
 
+  private readonly ops: FlowOps;
+
   constructor(
     private readonly db: ContrailDb,
     private readonly tokens: TokenStore,
     private readonly audit: AuditLog,
     private readonly config: ContrailConfig,
-    private readonly ops: FlowOps = defaultOps,
-  ) {}
+    ops?: Partial<FlowOps>,
+  ) {
+    // Partial override so a host can swap just the browser opener (Electron
+    // uses shell.openExternal) while keeping the real OAuth externals.
+    this.ops = { ...defaultOps, ...ops };
+  }
 
   /** Bound port of the active connect flow's callback listener (diagnostics/tests). */
   activeConnectPort(): number | null {
     const addr = this.activeConnect?.server.address();
     return typeof addr === 'object' && addr ? addr.port : null;
+  }
+
+  /**
+   * Final outcome of the currently active connect flow, if one is running.
+   * connectOrg() returns 'pending' after a short wait so callers are never
+   * blocked; a UI that wants to react when the browser flow actually finishes
+   * awaits this promise (it settles exactly once per flow).
+   */
+  activeConnectOutcome(): Promise<ConnectOutcome> | null {
+    return this.activeConnect?.outcome ?? null;
   }
 
   // ── connect_org ────────────────────────────────────────────────────────

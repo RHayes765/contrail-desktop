@@ -3,8 +3,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  dataDir,
   invokeCapability,
+  log,
   readSecret,
+  type AgentSessionRecord,
   type ConnectionRecord,
   type EngineDeps,
 } from '@contrail/engine';
@@ -16,17 +19,19 @@ import type {
   ToChild,
   ToMain,
 } from '@contrail/agent-runtime';
+import type { ChatEvent, EnvRole, PushChannel, PushEvents, SessionView } from '@contrail/shared';
+import type { ProjectService } from './projects.js';
 
 /**
- * AgentRuntimeManager: one utilityProcess per session, bridged capability
- * execution, and THE project-silo enforcement point.
+ * AgentSessionManager: one utilityProcess per live session, bridged
+ * capability execution, and THE project-silo enforcement point.
  *
  * Every capability call from the runtime lands in `executeCapability`, which
  * validates session → project → binding BEFORE anything else touches the
  * engine. The runtime child can ask for whatever it likes; a connection not
  * bound to the session's project does not exist as far as it's concerned.
- * project identity is resolved server-side from the session — never from
- * agent-supplied arguments.
+ * Project identity is resolved server-side from the session — never from
+ * agent-supplied arguments (project tools carry no project argument at all).
  */
 
 const API_KEY_SERVICE = 'Contrail Desktop';
@@ -36,8 +41,30 @@ export function readApiKey(): string | null {
   return readSecret(API_KEY_SERVICE, API_KEY_ACCOUNT);
 }
 
+/** Interactive chat defaults — conservative while the key runs on a small budget. */
+export const CHAT_DEFAULT_MODEL = 'claude-haiku-4-5';
+export const CHAT_MAX_TURNS = 50;
+export const CHAT_MAX_BUDGET_USD = 0.5;
+/** Live utilityProcess cap — each holds a CLI subprocess, and budget is real money. */
+const MAX_LIVE_SESSIONS = 4;
+/**
+ * How long to wait for the graceful 'closed' handshake before killing the
+ * child. Shutdown interrupts any in-flight turn, so the query winds down in
+ * seconds; the kill is strictly a hung-child last resort (it orphans the
+ * SDK's CLI subprocess on Windows).
+ */
+const SHUTDOWN_GRACE_MS = 15_000;
+
 /** Capabilities whose scoped answer the executor owns outright (never delegated raw). */
 const EXECUTOR_OWNED = new Set(['list_connections', 'get_permissions']);
+
+/** Project-silo tools — always executor-owned; project id comes from the session. */
+const PROJECT_TOOL_HANDLERS = new Set([
+  'list_project_docs',
+  'read_project_doc',
+  'list_project_notes',
+  'add_project_note',
+]);
 
 /** Argument keys that name a target connection, per capability shape. */
 const CONNECTION_ARG_KEYS = ['connection', 'connection_a', 'connection_b'] as const;
@@ -50,40 +77,114 @@ export interface SessionSpec {
   maxBudgetUsd: number;
 }
 
-export interface SessionRunResult {
-  events: AgentEvent[];
-  finalText: string | null;
-  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; costUsd: number };
-  capabilityCalls: Array<{ name: string; refused: boolean }>;
+export interface UsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  costUsd: number;
 }
 
 function refuse(message: string): BridgeToolResult {
   return { content: [{ type: 'text', text: message }], isError: true };
 }
 
+function okJson(payload: unknown): BridgeToolResult {
+  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
+}
+
+// ── redaction (invariant 2: nothing code-bearing leaves main's memory) ───
+
+/** Keys whose values must never reach the renderer, transcripts, or logs. */
+const SENSITIVE_KEY = /code|secret|token|password/i;
+
+/** Deep-copy with sensitive keys' values replaced. Cycles impossible: tool inputs are JSON. */
+export function redactSensitive(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactSensitive);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, v] of Object.entries(value)) {
+      out[key] = SENSITIVE_KEY.test(key) ? '[redacted]' : redactSensitive(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+/** Matches the deploy confirmation-code shape (codes.ts ALPHABET, XXXX-XXXX). */
+const CONFIRMATION_CODE = /\b[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}\b/g;
+
+/** Scrub live confirmation codes out of user text before it is persisted. */
+export function scrubCodes(text: string): string {
+  return text.replace(CONFIRMATION_CODE, '[code]');
+}
+
+/** Riskiest-first ordering for env-role annotation on multi-org tool calls. */
+const ENV_RISK_ORDER: EnvRole[] = ['prod', 'uat', 'qa', 'other', 'dev'];
+
 export class AgentSessionRun {
-  private readonly boundByAlias = new Map<string, ConnectionRecord>();
-  private readonly boundById = new Map<string, ConnectionRecord>();
   readonly capabilityCalls: Array<{ name: string; refused: boolean }> = [];
 
   constructor(
     private readonly deps: EngineDeps,
     private readonly spec: SessionSpec,
-  ) {
-    for (const b of spec.bindings) {
-      this.boundByAlias.set(b.connection.alias.toLowerCase(), b.connection);
-      this.boundById.set(b.connection.id, b.connection);
+    private readonly sessionId: string,
+    private readonly silo: ProjectService,
+  ) {}
+
+  /**
+   * The project's bindings AS OF RIGHT NOW. The silo gate must never enforce
+   * a snapshot: unbinding an org (or deleting the project) has to apply to
+   * live sessions on their very next call, so every resolution reads the DB.
+   */
+  private liveBindings(): Array<{ connection: ConnectionRecord; envRole: string }> {
+    const out: Array<{ connection: ConnectionRecord; envRole: string }> = [];
+    for (const b of this.deps.db.listProjectBindings(this.spec.project.id)) {
+      const connection = this.deps.db.resolveConnection(b.connectionId);
+      if (connection) out.push({ connection, envRole: b.envRole });
     }
+    return out;
   }
 
-  /** Resolve a connection reference WITHIN the project silo only. */
+  /** Resolve a connection reference WITHIN the project silo, against current bindings. */
   private resolveBound(ref: unknown): ConnectionRecord | null {
     if (typeof ref !== 'string' || !ref) return null;
-    return this.boundById.get(ref) ?? this.boundByAlias.get(ref.toLowerCase()) ?? null;
+    const conn = this.deps.db.resolveConnection(ref);
+    if (!conn) return null;
+    const bound = this.deps.db
+      .listProjectBindings(this.spec.project.id)
+      .some((b) => b.connectionId === conn.id);
+    return bound ? conn : null;
+  }
+
+  /** Env-role annotation for tool cards: which bound org(s) does this call target? */
+  annotateTarget(input: unknown): { connection: string | null; envRole: EnvRole | null } {
+    const targets: Array<{ alias: string; envRole: EnvRole | null }> = [];
+    if (input && typeof input === 'object') {
+      const bindings = this.liveBindings();
+      for (const key of CONNECTION_ARG_KEYS) {
+        const ref = (input as Record<string, unknown>)[key];
+        const bound = this.resolveBound(ref);
+        if (bound) {
+          const binding = bindings.find((b) => b.connection.id === bound.id);
+          targets.push({ alias: bound.alias, envRole: (binding?.envRole ?? null) as EnvRole | null });
+        }
+      }
+    }
+    if (targets.length === 0) return { connection: null, envRole: null };
+    // Multi-org calls (diff_orgs): show every target, color by the riskiest.
+    const riskiest =
+      ENV_RISK_ORDER.find((r) => targets.some((t) => t.envRole === r)) ?? targets[0]?.envRole ?? null;
+    return { connection: targets.map((t) => t.alias).join(' → '), envRole: riskiest };
   }
 
   async executeCapability(name: string, args: unknown): Promise<BridgeToolResult> {
     const a = (args ?? {}) as Record<string, unknown>;
+
+    // Silo rule 0: project tools answer for THIS session's project, full stop.
+    // The agent cannot name a project; there is nothing to validate away.
+    if (PROJECT_TOOL_HANDLERS.has(name)) {
+      return this.executeProjectTool(name, a);
+    }
 
     // Silo rule 1: connection-listing capabilities answer from the project's
     // bindings, never from the global connections table.
@@ -101,7 +202,7 @@ export class AgentSessionRun {
           this.capabilityCalls.push({ name, refused: true });
           return refuse(
             `Connection "${String(a[key])}" is not part of this project. ` +
-              `Available connections: ${this.spec.bindings.map((b) => b.connection.alias).join(', ') || 'none'}.`,
+              `Available connections: ${this.liveBindings().map((b) => b.connection.alias).join(', ') || 'none'}.`,
           );
         }
         a[key] = bound.id; // canonicalize so downstream resolution cannot drift
@@ -121,8 +222,58 @@ export class AgentSessionRun {
     return invokeCapability(this.deps, name, a);
   }
 
+  private executeProjectTool(name: string, a: Record<string, unknown>): BridgeToolResult {
+    const projectId = this.spec.project.id; // server-side identity, always
+    if (!this.deps.db.getProject(projectId)) {
+      // The project was deleted out from under a live session — its silo is gone.
+      this.capabilityCalls.push({ name, refused: true });
+      return refuse('This project no longer exists; its documents and notes are gone.');
+    }
+    try {
+      switch (name) {
+        case 'list_project_docs': {
+          this.capabilityCalls.push({ name, refused: false });
+          const docs = this.silo.listDocs(projectId).map((d) => ({
+            filename: d.filename,
+            mime: d.mime,
+            size_bytes: d.sizeBytes,
+            added_at: d.addedAt,
+          }));
+          return okJson({ docs, count: docs.length });
+        }
+        case 'read_project_doc': {
+          const result = this.silo.readDocText(projectId, String(a.filename ?? ''));
+          this.capabilityCalls.push({ name, refused: !result.ok });
+          if (!result.ok) return refuse(result.message);
+          return { content: [{ type: 'text', text: result.text }] };
+        }
+        case 'list_project_notes': {
+          this.capabilityCalls.push({ name, refused: false });
+          const notes = this.silo.listNotes(projectId).map((n) => ({
+            author: n.author,
+            body: n.body,
+            created_at: n.createdAt,
+            session_id: n.sessionId,
+          }));
+          return okJson({ notes, count: notes.length });
+        }
+        case 'add_project_note': {
+          const body = typeof a.body === 'string' ? a.body : '';
+          const note = this.silo.addNote(projectId, body, 'agent', this.sessionId);
+          this.capabilityCalls.push({ name, refused: false });
+          return okJson({ saved: true, created_at: note.createdAt });
+        }
+        default:
+          return refuse(`Unknown project tool: ${name}`);
+      }
+    } catch (err) {
+      this.capabilityCalls.push({ name, refused: true });
+      return refuse(String(err).slice(0, 500));
+    }
+  }
+
   private scopedListing(name: string, a: Record<string, unknown>): BridgeToolResult {
-    const views = this.spec.bindings.map((b) => ({
+    const views = this.liveBindings().map((b) => ({
       alias: b.connection.alias,
       org_name: b.connection.orgName,
       org_type: b.connection.orgType,
@@ -136,13 +287,9 @@ export class AgentSessionRun {
         return refuse(`Connection "${a.connection}" is not part of this project.`);
       }
       const view = views.find((v) => v.alias === bound.alias);
-      return { content: [{ type: 'text', text: JSON.stringify(view, null, 2) }] };
+      return okJson(view);
     }
-    return {
-      content: [
-        { type: 'text', text: JSON.stringify({ connections: views, count: views.length }, null, 2) },
-      ],
-    };
+    return okJson({ connections: views, count: views.length });
   }
 
   buildContext(sessionId: string, apiKey: string): SessionContext {
@@ -168,85 +315,375 @@ export class AgentSessionRun {
   }
 }
 
-/** Run one headless question through a real utilityProcess session. */
-export function runHeadlessSession(
-  deps: EngineDeps,
-  spec: SessionSpec,
-  childPath: string,
-  question: string,
-  timeoutMs = 180_000,
-): Promise<SessionRunResult> {
-  return new Promise((resolve, reject) => {
+// ── the manager ──────────────────────────────────────────────────────────
+
+type PushFn = <C extends PushChannel>(channel: C, payload: PushEvents[C]) => void;
+
+interface LiveSession {
+  sessionId: string;
+  projectId: string;
+  child: UtilityProcess;
+  run: AgentSessionRun;
+  ctx: SessionContext;
+  usage: UsageTotals;
+  status: 'active' | 'ending';
+  sentFirstMessage: boolean;
+  transcript: fs.WriteStream | null;
+  lastError: string | null;
+  closedWaiters: Array<() => void>;
+  childClosed: boolean;
+  /** True once the child confirmed init — sends queue here until then. */
+  ready: boolean;
+  pendingSends: string[];
+}
+
+export function sessionView(rec: AgentSessionRecord): SessionView {
+  return {
+    id: rec.id,
+    projectId: rec.projectId,
+    title: rec.title,
+    status: rec.status as SessionView['status'],
+    model: rec.model,
+    inputTokens: rec.inputTokens,
+    outputTokens: rec.outputTokens,
+    cacheReadTokens: rec.cacheReadTokens,
+    costUsd: rec.costUsd,
+    createdAt: rec.createdAt,
+    endedAt: rec.endedAt,
+  };
+}
+
+export class AgentSessionManager {
+  private readonly live = new Map<string, LiveSession>();
+
+  constructor(
+    private readonly deps: EngineDeps,
+    private readonly silo: ProjectService,
+    private readonly childPath: string,
+    private readonly push: PushFn,
+  ) {
+    // A crash or force-kill leaves rows stuck 'active'; nothing can genuinely
+    // be active before this manager exists, so close them out at startup.
+    const orphaned = this.deps.db.reconcileOrphanedAgentSessions();
+    if (orphaned > 0) {
+      log('warn', 'closed orphaned agent sessions from a previous run', { count: orphaned });
+    }
+  }
+
+  list(projectId: string): SessionView[] {
+    return this.deps.db.listAgentSessions(projectId).map(sessionView);
+  }
+
+  /** Live-only introspection (demo + tests). */
+  inspect(sessionId: string): { usage: UsageTotals; capabilityCalls: Array<{ name: string; refused: boolean }> } | null {
+    const entry = this.live.get(sessionId);
+    if (!entry) return null;
+    return { usage: { ...entry.usage }, capabilityCalls: [...entry.run.capabilityCalls] };
+  }
+
+  start(projectId: string, model?: string): SessionView {
+    if (this.live.size >= MAX_LIVE_SESSIONS) {
+      throw new Error(
+        `${this.live.size} sessions are already running — end one before starting another.`,
+      );
+    }
+    const project = this.deps.db.getProject(projectId);
+    if (!project) throw new Error(`Project ${projectId} not found.`);
+
     const apiKey = readApiKey();
     if (!apiKey) {
-      reject(new Error('No API key in Credential Manager (service "Contrail Desktop").'));
-      return;
+      throw new Error(
+        'No Anthropic API key found. Add one in Settings before starting a session.',
+      );
     }
 
-    const run = new AgentSessionRun(deps, spec);
-    const sessionId = deps.db.createAgentSession({
-      projectId: spec.project.id,
-      title: question.slice(0, 80),
-      model: spec.model,
-    });
-    const ctx = run.buildContext(sessionId, apiKey);
+    const bindings: SessionSpec['bindings'] = [];
+    for (const b of this.deps.db.listProjectBindings(projectId)) {
+      const connection = this.deps.db.resolveConnection(b.connectionId);
+      if (connection) bindings.push({ connection, envRole: b.envRole });
+    }
 
-    const child: UtilityProcess = utilityProcess.fork(childPath, [], { stdio: 'pipe' });
-    const events: AgentEvent[] = [];
-    let finalText: string | null = null;
-    const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0 };
-    let settled = false;
-
-    const finish = (err?: Error): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(watchdog);
-      deps.db.finishAgentSession(sessionId, usage, err ? 'error' : 'ended');
-      child.kill();
-      try {
-        fs.rmSync(ctx.cwd, { recursive: true, force: true, maxRetries: 3 });
-      } catch {
-        // The killed CLI can briefly hold the scratch cwd on Windows (EPERM).
-        // An orphaned empty temp dir is acceptable; failing the session is not.
-      }
-      if (err) reject(err);
-      else resolve({ events, finalText, usage, capabilityCalls: run.capabilityCalls });
+    const spec: SessionSpec = {
+      project,
+      bindings,
+      model: model ?? CHAT_DEFAULT_MODEL,
+      maxTurns: CHAT_MAX_TURNS,
+      maxBudgetUsd: CHAT_MAX_BUDGET_USD,
     };
 
-    const watchdog = setTimeout(
-      () => finish(new Error(`session timed out after ${timeoutMs}ms`)),
-      timeoutMs,
-    );
+    const transcriptDir = path.join(dataDir(), 'sessions');
+    fs.mkdirSync(transcriptDir, { recursive: true });
+    const sessionId = this.deps.db.createAgentSession({
+      projectId,
+      title: null,
+      model: spec.model,
+    });
+    const transcriptPath = path.join(transcriptDir, `${sessionId}.jsonl`);
+    this.deps.db.setAgentSessionTranscriptPath(sessionId, transcriptPath);
 
-    const post = (msg: ToChild): void => child.postMessage(msg);
+    const run = new AgentSessionRun(this.deps, spec, sessionId, this.silo);
+    const ctx = run.buildContext(sessionId, apiKey);
+    const child = utilityProcess.fork(this.childPath, [], { stdio: 'pipe' });
+
+    const entry: LiveSession = {
+      sessionId,
+      projectId,
+      child,
+      run,
+      ctx,
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0 },
+      status: 'active',
+      sentFirstMessage: false,
+      transcript: fs.createWriteStream(transcriptPath, { flags: 'a' }),
+      lastError: null,
+      closedWaiters: [],
+      childClosed: false,
+      ready: false,
+      pendingSends: [],
+    };
+    this.live.set(sessionId, entry);
+    entry.transcript?.on('error', (err) => {
+      // A transcript I/O failure must never take the session (or main) down.
+      log('warn', 'session transcript write failed; disabling transcript', {
+        sessionId,
+        err: String(err),
+      });
+      entry.transcript = null;
+    });
+    this.writeTranscript(entry, {
+      kind: 'session',
+      sessionId,
+      projectId,
+      project: project.name,
+      model: spec.model,
+      bindings: bindings.map((b) => ({ alias: b.connection.alias, envRole: b.envRole })),
+    });
 
     child.on('message', (raw: ToMain) => {
-      void (async () => {
-        if (raw.kind === 'ready') {
-          post({ kind: 'send', text: question });
-        } else if (raw.kind === 'capability:invoke') {
-          const result = await run.executeCapability(raw.name, raw.args);
-          post({ kind: 'capability:result', id: raw.id, result });
-        } else if (raw.kind === 'event') {
-          events.push(raw.event);
-          const ev = raw.event;
-          if (ev.type === 'usage') {
-            usage.inputTokens += ev.inputTokens;
-            usage.outputTokens += ev.outputTokens;
-            usage.cacheReadTokens += ev.cacheReadTokens;
-            usage.costUsd += ev.costUsd;
-          } else if (ev.type === 'done') {
-            finalText = ev.result;
-            finish();
-          }
-        }
-      })();
+      void this.onChildMessage(entry, raw);
     });
-
     child.on('exit', (code) => {
-      if (!settled) finish(new Error(`runtime child exited early (code ${code})`));
+      entry.childClosed = true;
+      for (const w of entry.closedWaiters) w();
+      entry.closedWaiters = [];
+      if (this.live.has(sessionId) && entry.status === 'active') {
+        // The child died without being asked to — surface it, release any
+        // waiting turn ('done'), mark the session dead, and close the row.
+        this.forward(entry, {
+          type: 'error',
+          message: `The session's runtime process exited unexpectedly (code ${code}).`,
+        });
+        this.forward(entry, { type: 'done', result: null });
+        this.push('session:event', {
+          sessionId,
+          event: { type: 'session_ended', reason: 'The session runtime crashed.' },
+        });
+        this.teardown(entry, 'error');
+      }
+    });
+    child.once('spawn', () => {
+      const init: ToChild = { kind: 'init', ctx };
+      child.postMessage(init);
     });
 
-    child.once('spawn', () => post({ kind: 'init', ctx }));
-  });
+    this.push('sessions:changed', { projectId });
+    const rec = this.deps.db.getAgentSession(sessionId);
+    if (!rec) throw new Error('session row vanished during start');
+    return sessionView(rec);
+  }
+
+  send(sessionId: string, text: string): void {
+    const entry = this.mustLive(sessionId);
+    if (!entry.sentFirstMessage) {
+      entry.sentFirstMessage = true;
+      this.deps.db.setAgentSessionTitle(sessionId, text.slice(0, 80));
+      this.push('sessions:changed', { projectId: entry.projectId });
+    }
+    // Transcript gets the text with any live confirmation code scrubbed; the
+    // child gets it verbatim (the agent legitimately relays codes to tools).
+    this.writeTranscript(entry, { kind: 'user', text: scrubCodes(text) });
+    if (!entry.ready) {
+      // The child hasn't confirmed init yet — a send posted now would arrive
+      // before the session exists. Queue it; 'ready' flushes in order.
+      entry.pendingSends.push(text);
+      return;
+    }
+    const msg: ToChild = { kind: 'send', text };
+    entry.child.postMessage(msg);
+  }
+
+  interrupt(sessionId: string): void {
+    const entry = this.mustLive(sessionId);
+    const msg: ToChild = { kind: 'interrupt' };
+    entry.child.postMessage(msg);
+  }
+
+  async end(sessionId: string): Promise<void> {
+    const entry = this.live.get(sessionId);
+    if (!entry) return; // already gone — ending twice is fine
+    entry.status = 'ending';
+    try {
+      // Interrupt first so an in-flight turn aborts instead of running to
+      // completion past the shutdown grace (the child interrupts on shutdown
+      // too — belt and suspenders, both are idempotent).
+      const interrupt: ToChild = { kind: 'interrupt' };
+      entry.child.postMessage(interrupt);
+      const shutdown: ToChild = { kind: 'shutdown' };
+      entry.child.postMessage(shutdown);
+    } catch {
+      // child already dead; teardown below handles it
+    }
+    await this.waitForChildClosed(entry, SHUTDOWN_GRACE_MS);
+    this.teardown(entry, entry.lastError ? 'error' : 'ended');
+  }
+
+  /** Ends every live session of a project — call BEFORE deleting the project. */
+  async endForProject(projectId: string): Promise<void> {
+    const ids = [...this.live.values()]
+      .filter((e) => e.projectId === projectId)
+      .map((e) => e.sessionId);
+    for (const id of ids) {
+      this.push('session:event', {
+        sessionId: id,
+        event: { type: 'session_ended', reason: 'The project was deleted.' },
+      });
+    }
+    await Promise.all(ids.map((id) => this.end(id)));
+  }
+
+  /** App-quit cleanup: close every live session, briefly but gracefully. */
+  async endAll(): Promise<void> {
+    await Promise.all([...this.live.keys()].map((id) => this.end(id)));
+  }
+
+  // ── internals ──────────────────────────────────────────────────────────
+
+  private mustLive(sessionId: string): LiveSession {
+    const entry = this.live.get(sessionId);
+    if (!entry || entry.status !== 'active') {
+      throw new Error(`Session ${sessionId} is not running.`);
+    }
+    return entry;
+  }
+
+  private waitForChildClosed(entry: LiveSession, timeoutMs: number): Promise<void> {
+    if (entry.childClosed) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        entry.child.kill();
+        resolve();
+      }, timeoutMs);
+      entry.closedWaiters.push(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
+  private teardown(entry: LiveSession, status: 'ended' | 'error'): void {
+    if (!this.live.has(entry.sessionId)) return;
+    this.live.delete(entry.sessionId);
+    this.deps.db.finishAgentSession(entry.sessionId, entry.usage, status);
+    entry.child.kill();
+    entry.transcript?.end();
+    entry.transcript = null;
+    try {
+      fs.rmSync(entry.ctx.cwd, { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      // The killed CLI can briefly hold the scratch cwd on Windows (EPERM).
+      // An orphaned empty temp dir is acceptable; failing the session is not.
+    }
+    this.push('sessions:changed', { projectId: entry.projectId });
+  }
+
+  private async onChildMessage(entry: LiveSession, raw: ToMain): Promise<void> {
+    if (raw.kind === 'capability:invoke') {
+      const result = await entry.run.executeCapability(raw.name, raw.args);
+      const reply: ToChild = { kind: 'capability:result', id: raw.id, result };
+      try {
+        entry.child.postMessage(reply);
+      } catch {
+        // Child died mid-call; nothing to deliver to.
+      }
+    } else if (raw.kind === 'event') {
+      this.onAgentEvent(entry, raw.event);
+    } else if (raw.kind === 'ready') {
+      entry.ready = true;
+      for (const text of entry.pendingSends.splice(0)) {
+        const msg: ToChild = { kind: 'send', text };
+        entry.child.postMessage(msg);
+      }
+    } else if (raw.kind === 'closed') {
+      entry.childClosed = true;
+      for (const w of entry.closedWaiters) w();
+      entry.closedWaiters = [];
+      if (entry.status === 'active' && this.live.has(entry.sessionId)) {
+        // The live query ended on its own — budget/turn cap tripped or a
+        // fatal SDK error. The child already emitted error+done; close the
+        // session out so it cannot zombie as 'active'.
+        this.push('session:event', {
+          sessionId: entry.sessionId,
+          event: {
+            type: 'session_ended',
+            reason: entry.lastError ?? 'The session reached its budget or turn limit.',
+          },
+        });
+        this.teardown(entry, entry.lastError ? 'error' : 'ended');
+      }
+    }
+  }
+
+  private onAgentEvent(entry: LiveSession, event: AgentEvent): void {
+    if (event.type === 'usage') {
+      entry.usage.inputTokens += event.inputTokens;
+      entry.usage.outputTokens += event.outputTokens;
+      entry.usage.cacheReadTokens += event.cacheReadTokens;
+      entry.usage.costUsd += event.costUsd;
+      this.deps.db.updateAgentSessionUsage(entry.sessionId, entry.usage);
+      this.writeTranscript(entry, { kind: 'usage', ...entry.usage });
+    } else if (event.type === 'text') {
+      this.writeTranscript(entry, { kind: 'assistant', text: event.text });
+    } else if (event.type === 'tool_start') {
+      this.writeTranscript(entry, {
+        kind: 'tool_start',
+        toolUseId: event.toolUseId,
+        name: event.name,
+        input: JSON.stringify(redactSensitive(event.input) ?? {}).slice(0, 2000),
+      });
+    } else if (event.type === 'tool_end') {
+      this.writeTranscript(entry, { kind: 'tool_end', toolUseId: event.toolUseId, ok: event.ok });
+    } else if (event.type === 'error') {
+      entry.lastError = event.message;
+      this.writeTranscript(entry, { kind: 'error', message: event.message });
+    } else if (event.type === 'done' && event.result !== null) {
+      // A turn completed cleanly — an earlier recovered error must not brand
+      // the whole session 'error' at teardown.
+      entry.lastError = null;
+    }
+    this.forward(entry, event);
+  }
+
+  private forward(entry: LiveSession, event: AgentEvent): void {
+    let chat: ChatEvent;
+    if (event.type === 'tool_start') {
+      // Annotate from the raw input (needs the connection value), then redact
+      // before anything crosses to the renderer.
+      const target = entry.run.annotateTarget(event.input);
+      chat = {
+        type: 'tool_start',
+        toolUseId: event.toolUseId,
+        name: event.name,
+        input: redactSensitive(event.input),
+        connection: target.connection,
+        envRole: target.envRole,
+      };
+    } else {
+      chat = event;
+    }
+    this.push('session:event', { sessionId: entry.sessionId, event: chat });
+  }
+
+  private writeTranscript(entry: LiveSession, line: Record<string, unknown>): void {
+    entry.transcript?.write(JSON.stringify({ ts: new Date().toISOString(), ...line }) + '\n');
+  }
 }

@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { allCapabilities, type Capability, type Grant, type GrantSet } from '@contrail/engine';
 import type { BindingWithGrants } from './types.js';
 
@@ -52,3 +53,57 @@ export const MCP_SERVER_NAME = 'contrail';
 export function sdkToolName(capabilityName: string): string {
   return `mcp__${MCP_SERVER_NAME}__${capabilityName}`;
 }
+
+// ── project-silo tools ───────────────────────────────────────────────────
+
+/**
+ * Tools every session gets regardless of grants: the project's own documents
+ * and notes. They carry no connection arguments and no project argument —
+ * the executor in main resolves the project FROM THE SESSION, so a session
+ * physically cannot name another project's silo. Descriptions are stable
+ * prompt assets (cache discipline applies).
+ */
+export interface ProjectToolDef {
+  name: string;
+  description: string;
+  inputSchema: Record<string, z.ZodTypeAny>;
+}
+
+export const PROJECT_TOOLS: ProjectToolDef[] = [
+  {
+    name: 'list_project_docs',
+    description:
+      'List the reference documents attached to this project (filename, type, size). ' +
+      'These are files the user added for you to consult; read one with read_project_doc.',
+    inputSchema: {},
+  },
+  {
+    name: 'read_project_doc',
+    description:
+      'Read a project reference document by filename (as listed by list_project_docs). ' +
+      'Text formats only in v1; long documents are truncated with a notice.',
+    inputSchema: {
+      filename: z.string().describe('Exact filename from list_project_docs.'),
+    },
+  },
+  {
+    name: 'list_project_notes',
+    description:
+      'List this project\'s persistent notes — durable observations recorded by you or the ' +
+      'user across sessions (decisions, org quirks, follow-ups). Check them before ' +
+      're-deriving project context.',
+    inputSchema: {},
+  },
+  {
+    name: 'add_project_note',
+    description:
+      'Record a persistent project note that future sessions will see. Use for durable ' +
+      'facts worth carrying across sessions — decisions made, org quirks discovered, ' +
+      'follow-ups promised — not for scratch reasoning.',
+    inputSchema: {
+      body: z.string().describe('The note text (plain text or markdown, max 10,000 chars).'),
+    },
+  },
+];
+
+export const PROJECT_TOOL_NAMES: readonly string[] = PROJECT_TOOLS.map((t) => t.name);

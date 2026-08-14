@@ -10,7 +10,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
-    "test": "echo no tests yet",
+    "test": "vitest run",
     "start": "electron .",
     "smoke": "electron-vite build && electron . --smoke"
   },
@@ -19,7 +19,9 @@
     "@contrail/shared": "workspace:*",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "zustand": "^5.0.15"
+    "zustand": "^5.0.15",
+    "@contrail/agent-runtime": "workspace:*",
+    "zod": "^3.24.0"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
@@ -29,6 +31,7 @@
     "electron": "^43.4.0",
     "electron-vite": "^5.0.0",
     "typescript": "^5.9.3",
-    "vite": "^8.2.1"
+    "vite": "^8.2.1",
+    "vitest": "^3.0.0"
   }
 }

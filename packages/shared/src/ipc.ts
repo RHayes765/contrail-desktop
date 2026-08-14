@@ -1,5 +1,15 @@
 import { z } from 'zod';
-import type { ConnectionView, HealthView } from './views.js';
+import type {
+  ChatEvent,
+  ConnectionView,
+  ConnectOutcomeView,
+  HealthView,
+  PingResultView,
+  ProjectDocView,
+  ProjectNoteView,
+  ProjectView,
+  SessionView,
+} from './views.js';
 
 /**
  * The typed IPC contract — the single source of truth for every channel
@@ -12,18 +22,94 @@ import type { ConnectionView, HealthView } from './views.js';
  *   - push channels (main → renderer events), declared in `PushEvents`
  */
 
+const ENV_ROLE = z.enum(['dev', 'qa', 'uat', 'prod', 'other']);
+const ID = z.string().min(1).max(128);
+
 // ── invoke channels ──────────────────────────────────────────────────────
 
 export const REQUEST_SCHEMAS = {
   'app:health': z.object({}),
+
   'connections:list': z.object({}),
+  'connections:connect': z.object({
+    login: z.string().max(300).optional(),
+    label: z.string().max(120).optional(),
+  }),
+  'connections:remove': z.object({ id: ID }),
+  'connections:ping': z.object({ id: ID }),
+
+  'projects:list': z.object({}),
+  'projects:create': z.object({
+    name: z.string().min(1).max(120),
+    description: z.string().max(2000).optional(),
+  }),
+  'projects:update': z.object({
+    id: ID,
+    name: z.string().min(1).max(120).optional(),
+    description: z.string().max(2000).nullable().optional(),
+    instructions: z.string().max(20_000).nullable().optional(),
+  }),
+  'projects:delete': z.object({ id: ID }),
+  'projects:bind': z.object({ projectId: ID, connectionId: ID, envRole: ENV_ROLE }),
+  'projects:unbind': z.object({ projectId: ID, connectionId: ID }),
+
+  'projects:docs:list': z.object({ projectId: ID }),
+  'projects:docs:add': z.object({ projectId: ID }),
+  'projects:docs:remove': z.object({ projectId: ID, docId: ID }),
+
+  'projects:notes:list': z.object({ projectId: ID }),
+  'projects:notes:add': z.object({ projectId: ID, body: z.string().min(1).max(10_000) }),
+
+  'sessions:list': z.object({ projectId: ID }),
+  'sessions:start': z.object({ projectId: ID, model: z.string().max(80).optional() }),
+  'sessions:send': z.object({ sessionId: ID, text: z.string().min(1).max(50_000) }),
+  'sessions:interrupt': z.object({ sessionId: ID }),
+  'sessions:end': z.object({ sessionId: ID }),
 } as const;
 
 export type Channel = keyof typeof REQUEST_SCHEMAS;
 
 export interface Contracts {
   'app:health': { req: Record<string, never>; res: HealthView };
+
   'connections:list': { req: Record<string, never>; res: ConnectionView[] };
+  'connections:connect': {
+    req: { login?: string; label?: string };
+    res: ConnectOutcomeView;
+  };
+  'connections:remove': { req: { id: string }; res: { ok: boolean; detail: string | null } };
+  'connections:ping': { req: { id: string }; res: PingResultView };
+
+  'projects:list': { req: Record<string, never>; res: ProjectView[] };
+  'projects:create': { req: { name: string; description?: string }; res: ProjectView };
+  'projects:update': {
+    req: {
+      id: string;
+      name?: string;
+      description?: string | null;
+      instructions?: string | null;
+    };
+    res: ProjectView;
+  };
+  'projects:delete': { req: { id: string }; res: { ok: boolean } };
+  'projects:bind': {
+    req: { projectId: string; connectionId: string; envRole: 'dev' | 'qa' | 'uat' | 'prod' | 'other' };
+    res: ProjectView;
+  };
+  'projects:unbind': { req: { projectId: string; connectionId: string }; res: ProjectView };
+
+  'projects:docs:list': { req: { projectId: string }; res: ProjectDocView[] };
+  'projects:docs:add': { req: { projectId: string }; res: { added: ProjectDocView[] } };
+  'projects:docs:remove': { req: { projectId: string; docId: string }; res: { ok: boolean } };
+
+  'projects:notes:list': { req: { projectId: string }; res: ProjectNoteView[] };
+  'projects:notes:add': { req: { projectId: string; body: string }; res: ProjectNoteView };
+
+  'sessions:list': { req: { projectId: string }; res: SessionView[] };
+  'sessions:start': { req: { projectId: string; model?: string }; res: SessionView };
+  'sessions:send': { req: { sessionId: string; text: string }; res: { ok: boolean } };
+  'sessions:interrupt': { req: { sessionId: string }; res: { ok: boolean } };
+  'sessions:end': { req: { sessionId: string }; res: { ok: boolean } };
 }
 
 // Compile-time check: every contract has a schema and vice versa.
@@ -36,6 +122,10 @@ void _covered;
 
 export interface PushEvents {
   'connections:changed': { reason: 'connected' | 'updated' | 'removed' };
+  /** Streamed agent events for a live session. */
+  'session:event': { sessionId: string; event: ChatEvent };
+  /** A session started or ended — session lists for this project are stale. */
+  'sessions:changed': { projectId: string };
 }
 
 export type PushChannel = keyof PushEvents;

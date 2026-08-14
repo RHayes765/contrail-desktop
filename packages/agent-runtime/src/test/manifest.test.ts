@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { buildSessionOptions } from '../options.js';
-import { grantUnion, mintableCapabilities, SESSION_EXCLUDED_CAPABILITIES } from '../mint.js';
+import {
+  grantUnion,
+  mintableCapabilities,
+  PROJECT_TOOL_NAMES,
+  PROJECT_TOOLS,
+  SESSION_EXCLUDED_CAPABILITIES,
+} from '../mint.js';
 import type { BindingWithGrants, SessionContext } from '../types.js';
 
 /**
@@ -143,6 +149,43 @@ describe('tool manifest (THE isolation snapshot)', () => {
     const allowed = options.allowedTools ?? [];
     for (const writeTool of ['validate_deploy', 'execute_deploy', 'dml_propose', 'dml_execute', 'deactivate_flow']) {
       expect(allowed).not.toContain(`mcp__contrail__${writeTool}`);
+    }
+  });
+
+  it('project-silo tools mint into EVERY session — even with zero grants', () => {
+    expect([...PROJECT_TOOL_NAMES].sort()).toEqual([
+      'add_project_note',
+      'list_project_docs',
+      'list_project_notes',
+      'read_project_doc',
+    ]);
+    const noGrants: BindingWithGrants = {
+      ...READ_ONLY,
+      grants: {
+        metadata_read: false,
+        metadata_write: false,
+        diagnostics_read: false,
+        data_read: false,
+        data_write: false,
+      },
+    };
+    for (const bindings of [[FULL], [noGrants], []]) {
+      const allowed = buildSessionOptions(ctxWith(bindings), invoke).allowedTools ?? [];
+      for (const name of PROJECT_TOOL_NAMES) {
+        expect(allowed).toContain(`mcp__contrail__${name}`);
+      }
+    }
+  });
+
+  it('project tools never carry a project or connection argument (silo identity is server-side)', () => {
+    // The whole point: the agent cannot NAME a project — main resolves it
+    // from the session. A schema key like project_id would break that.
+    for (const def of PROJECT_TOOLS) {
+      const keys = Object.keys(def.inputSchema);
+      expect(keys).not.toContain('project');
+      expect(keys).not.toContain('project_id');
+      expect(keys).not.toContain('projectId');
+      expect(keys).not.toContain('connection');
     }
   });
 

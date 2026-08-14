@@ -33,7 +33,7 @@ export interface EngineOverrides {
   db?: ContrailDb;
   tokens?: TokenStore;
   config?: ContrailConfig;
-  flowOps?: FlowOps;
+  flowOps?: Partial<FlowOps>;
   store?: SnapshotStore;
   approvals?: ApprovalPresenter;
   deploysDir?: string;
