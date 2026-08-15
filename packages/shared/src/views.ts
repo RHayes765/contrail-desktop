@@ -406,38 +406,55 @@ export interface CustomMcpServerView {
 }
 
 export interface ConnectorPresetView {
-  kind: 'slack' | 'jira' | 'google';
+  kind: 'slack' | 'jira' | 'gmail' | 'gdrive' | 'gcalendar';
   label: string;
   transport: 'http' | 'sse';
-  /** Prefill only where the endpoint is well-known; the form stays editable. */
+  /** Official endpoint where one exists; the form stays editable. */
   urlSuggestion: string | null;
   note: string;
 }
 
 /**
- * Presets prefill the custom-server form — v1 external auth is header-based
- * (paste a token); browser OAuth flows are not supported headlessly.
+ * Presets prefill the custom-server form with the vendors' OFFICIAL remote
+ * MCP endpoints. v1 external auth is header-based (paste a token); browser
+ * OAuth flows are not supported, and each note says honestly whether the
+ * endpoint works that way. Google is one preset per product — mirroring how
+ * Claude's own connectors split Gmail / Drive / Calendar.
  */
 export const CONNECTOR_PRESETS: ConnectorPresetView[] = [
   {
     kind: 'slack',
     label: 'Slack',
     transport: 'http',
-    urlSuggestion: null,
-    note: 'Enter your Slack MCP endpoint and an Authorization header token.',
+    urlSuggestion: 'https://mcp.slack.com/mcp',
+    note: 'Slack’s official remote MCP server. OAuth-native — v1 supports header tokens only, so this needs a token your org can issue for header auth; browser OAuth is not supported yet.',
   },
   {
     kind: 'jira',
     label: 'Jira (Atlassian)',
-    transport: 'sse',
-    urlSuggestion: 'https://mcp.atlassian.com/v1/sse',
-    note: 'Atlassian Remote MCP Server. Header-based auth; OAuth flows are not supported in v1.',
+    transport: 'http',
+    urlSuggestion: 'https://mcp.atlassian.com/v1/mcp',
+    note: 'Atlassian Rovo MCP Server — works with v1 header auth if your org admin enables API tokens: Authorization=Basic base64(email:api_token), or Authorization=Bearer <service-account key>.',
   },
   {
-    kind: 'google',
-    label: 'Google Workspace',
+    kind: 'gmail',
+    label: 'Gmail',
     transport: 'http',
-    urlSuggestion: null,
-    note: 'Enter your Google Workspace MCP endpoint and auth header.',
+    urlSuggestion: 'https://gmailmcp.googleapis.com/mcp/v1',
+    note: 'Google’s official Gmail MCP server. OAuth 2.0 only per Google’s docs — not usable with v1 header auth until Contrail supports OAuth flows.',
+  },
+  {
+    kind: 'gdrive',
+    label: 'Google Drive',
+    transport: 'http',
+    urlSuggestion: 'https://drivemcp.googleapis.com/mcp/v1',
+    note: 'Google’s official Drive MCP server. OAuth 2.0 only per Google’s docs — not usable with v1 header auth until Contrail supports OAuth flows.',
+  },
+  {
+    kind: 'gcalendar',
+    label: 'Google Calendar',
+    transport: 'http',
+    urlSuggestion: 'https://calendarmcp.googleapis.com/mcp/v1',
+    note: 'Google’s official Calendar MCP server. OAuth 2.0 only per Google’s docs — not usable with v1 header auth until Contrail supports OAuth flows.',
   },
 ];

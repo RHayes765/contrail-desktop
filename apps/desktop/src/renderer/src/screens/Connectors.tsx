@@ -43,11 +43,13 @@ function AddServerForm({ onDone }: { onDone: () => void }) {
   const [envText, setEnvText] = useState('');
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [presetNote, setPresetNote] = useState<string | null>(null);
 
   const applyPreset = (p: ConnectorPresetView) => {
     setName(p.label);
     setTransport(p.transport);
     setUrlOrCommand(p.urlSuggestion ?? '');
+    setPresetNote(p.note);
   };
 
   const submit = async () => {
@@ -86,7 +88,7 @@ function AddServerForm({ onDone }: { onDone: () => void }) {
   return (
     <div className="panel connect-form">
       <div className="form-row">
-        <label>Presets</label>
+        <label>Presets (official endpoints)</label>
         <div className="seg">
           {CONNECTOR_PRESETS.map((p) => (
             <button key={p.kind} onClick={() => applyPreset(p)}>
@@ -95,6 +97,7 @@ function AddServerForm({ onDone }: { onDone: () => void }) {
           ))}
         </div>
       </div>
+      {presetNote && <p className="hint">{presetNote}</p>}
       <div className="form-row">
         <label>Name</label>
         <input placeholder="slack" value={name} onChange={(e) => setName(e.target.value)} />
