@@ -3,10 +3,12 @@ import {
   parseFlowGraph,
   parsePermissionSet,
   queryDependencies,
+  semanticDiff,
   type EngineDeps,
 } from '@contrail/engine';
 import type {
   ArtifactDetailView,
+  ArtifactDiffView,
   ArtifactRowView,
   DiffEntryView,
   DiffScopeView,
@@ -158,13 +160,93 @@ interface DiffCacheEntry {
   view: DiffScopeView;
 }
 
+const DIFF_CONTENT_CAP = 100_000;
+
 export class DiffService {
   private cache: DiffCacheEntry | null = null;
 
   constructor(
     private readonly deps: EngineDeps,
     private readonly worker: SnapshotWorkerBridge,
+    private readonly metadata: MetadataService,
   ) {}
+
+  /**
+   * Per-artifact drill-in: both sides' content (child-block aware) + the
+   * full semantic diff. One artifact is milliseconds — no worker needed.
+   */
+  diffArtifact(
+    connectionA: string,
+    connectionB: string,
+    type: string,
+    apiName: string,
+  ): ArtifactDiffView {
+    const a = this.deps.db.resolveConnection(connectionA);
+    const b = this.deps.db.resolveConnection(connectionB);
+    if (!a || !b) throw new Error('Both connections must exist.');
+
+    // Presence comes from the INDEX — "only in X" is an org-absence claim a
+    // consultant may act on, and a locked/deleted snapshot file must never
+    // fabricate it. Unreadable content gets its own flags instead.
+    const recA = this.deps.db.getArtifact(a.id, type, apiName);
+    const recB = this.deps.db.getArtifact(b.id, type, apiName);
+    if (!recA && !recB) {
+      throw new Error(`${type} ${apiName} is not in either org's snapshot index.`);
+    }
+    const readSide = (connId: string, present: boolean): string | null => {
+      if (!present) return null;
+      try {
+        return this.metadata.artifact(connId, type, apiName).content;
+      } catch {
+        return null; // indexed but unreadable — flagged below, never "absent"
+      }
+    };
+    const contentA = readSide(a.id, recA != null);
+    const contentB = readSide(b.id, recB != null);
+    const unreadableA = recA != null && contentA == null;
+    const unreadableB = recB != null && contentB == null;
+
+    const cap = (text: string | null): string | null =>
+      text && text.length > DIFF_CONTENT_CAP
+        ? text.slice(0, DIFF_CONTENT_CAP) + '\n[truncated]'
+        : text;
+
+    const base: ArtifactDiffView = {
+      type,
+      apiName,
+      aliasA: a.alias,
+      aliasB: b.alias,
+      presence: recA && recB ? 'both' : recA ? 'a-only' : 'b-only',
+      unreadableA,
+      unreadableB,
+      identical: false,
+      format: null,
+      changes: null,
+      changesTruncated: false,
+      hunks: null,
+      hunksTruncated: false,
+      countsOnly: false,
+      linesAdded: 0,
+      linesRemoved: 0,
+      contentA: cap(contentA),
+      contentB: cap(contentB),
+    };
+    if (contentA == null || contentB == null) return base;
+
+    const diff = semanticDiff(contentA, contentB);
+    return {
+      ...base,
+      identical: diff.identical,
+      format: diff.format,
+      changes: diff.xml?.changes ?? null,
+      changesTruncated: diff.xml?.truncated ?? false,
+      hunks: diff.text?.hunks ?? null,
+      hunksTruncated: diff.text?.hunks_truncated ?? false,
+      countsOnly: diff.text?.counts_only ?? false,
+      linesAdded: diff.text?.lines_added ?? 0,
+      linesRemoved: diff.text?.lines_removed ?? 0,
+    };
+  }
 
   async diffScope(
     connectionA: string,

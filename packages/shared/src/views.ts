@@ -242,6 +242,51 @@ export interface DiffScopeView {
   uncoveredTypes: Array<{ type: string; missingIn: 'A' | 'B'; countInOther: number }>;
 }
 
+/** Structural mirror of the engine's semantic diff (shared stays engine-free). */
+export type SemanticChangeView =
+  | { kind: 'scalar'; path: string; a: unknown; b: unknown }
+  | { kind: 'added'; path: string; key: string }
+  | { kind: 'removed'; path: string; key: string }
+  | { kind: 'unkeyed'; path: string; note: string };
+
+export interface TextHunkView {
+  a_line: number;
+  b_line: number;
+  removed: string[];
+  added: string[];
+  removed_truncated?: boolean;
+  added_truncated?: boolean;
+}
+
+export interface ArtifactDiffView {
+  type: string;
+  apiName: string;
+  aliasA: string;
+  aliasB: string;
+  /**
+   * INDEX presence — 'a-only'/'b-only' assert real org absence, never a
+   * read failure (those set the unreadable flags instead).
+   */
+  presence: 'both' | 'a-only' | 'b-only';
+  /** Indexed on that side, but its snapshot file could not be read. */
+  unreadableA: boolean;
+  unreadableB: boolean;
+  identical: boolean;
+  format: 'xml' | 'text' | null;
+  /** XML semantic changes (present when format is xml and both sides exist). */
+  changes: SemanticChangeView[] | null;
+  changesTruncated: boolean;
+  /** Text hunks (present when format is text and both sides exist). */
+  hunks: TextHunkView[] | null;
+  hunksTruncated: boolean;
+  /** Text diff too large for hunk extraction — line counts only. */
+  countsOnly: boolean;
+  linesAdded: number;
+  linesRemoved: number;
+  contentA: string | null;
+  contentB: string | null;
+}
+
 // ── agent sessions ───────────────────────────────────────────────────────
 
 export interface SessionView {

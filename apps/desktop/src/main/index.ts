@@ -75,13 +75,16 @@ const summarizeDemoArg = process.argv.find((a) => a.startsWith('--summarize-demo
 const SUMMARIZE_DEMO = summarizeDemoArg
   ? summarizeDemoArg.slice('--summarize-demo='.length)
   : null;
+const narrateDemoArg = process.argv.find((a) => a.startsWith('--narrate-demo='));
+const NARRATE_DEMO = narrateDemoArg ? narrateDemoArg.slice('--narrate-demo='.length) : null;
 
 const HEADLESS =
   SMOKE ||
   AGENT_DEMO !== null ||
   SNAPSHOT_DEMO !== null ||
   DIFF_DEMO !== null ||
-  SUMMARIZE_DEMO !== null;
+  SUMMARIZE_DEMO !== null ||
+  NARRATE_DEMO !== null;
 
 function smokeWrite(payload: unknown): void {
   const text = JSON.stringify(payload, null, 2) + '\n';
@@ -411,6 +414,88 @@ app.whenReady().then(async () => {
     return;
   }
 
+  if (NARRATE_DEMO !== null) {
+    // The M3 verify: an agent narrating diff_orgs across BOTH bound orgs.
+    // The conquest binding is DEMO-ONLY state in the shared Dev Sandbox
+    // project — it must be removed afterwards, or every future session's
+    // silo silently widens to include a client org.
+    let conquestId: string | null = null;
+    let projectId: string | null = null;
+    const cleanupBinding = (): void => {
+      if (projectId && conquestId) {
+        try {
+          boot?.deps.db.removeProjectBinding(projectId, conquestId);
+        } catch {
+          /* best effort */
+        }
+      }
+    };
+    try {
+      if (!NARRATE_DEMO.trim()) throw new Error('--narrate-demo requires a question');
+      const projects = new ProjectService(boot.deps);
+      const devOrg = boot.deps.db.resolveConnection('dev-org');
+      const conquest = boot.deps.db.resolveConnection('conquest-full');
+      if (!devOrg || !conquest) throw new Error('need dev-org and conquest-full connections');
+      const project =
+        boot.deps.db.findProjectByName('Dev Sandbox') ??
+        boot.deps.db.createProject({ name: 'Dev Sandbox' });
+      projectId = project.id;
+      conquestId = conquest.id;
+      boot.deps.db.removeProjectBinding(project.id, devOrg.id);
+      boot.deps.db.addProjectBinding(project.id, devOrg.id, 'dev');
+      boot.deps.db.removeProjectBinding(project.id, conquest.id);
+      boot.deps.db.addProjectBinding(project.id, conquest.id, 'other');
+
+      const events: Array<{ sessionId: string; event: ChatEvent }> = [];
+      const errors: string[] = [];
+      let turnResolve: (() => void) | null = null;
+      const push = <C extends PushChannel>(channel: C, payload: PushEvents[C]): void => {
+        if (channel === 'session:event') {
+          const p = payload as PushEvents['session:event'];
+          events.push(p);
+          if (p.event.type === 'error') errors.push(p.event.message);
+          if (p.event.type === 'session_ended') errors.push(`session ended: ${p.event.reason}`);
+          if ((p.event.type === 'done' || p.event.type === 'session_ended') && turnResolve) {
+            const r = turnResolve;
+            turnResolve = null;
+            r();
+          }
+        }
+      };
+      const manager = new AgentSessionManager(boot.deps, projects, runtimeChildPath(), push);
+      sessionManager = manager;
+      const view = manager.start(project.id);
+      const turn = new Promise<void>((resolve, reject) => {
+        turnResolve = resolve;
+        setTimeout(() => reject(new Error('narration turn timed out')), 180_000);
+      });
+      manager.send(view.id, NARRATE_DEMO);
+      await turn;
+      const inspection = manager.inspect(view.id);
+      await manager.end(view.id);
+      cleanupBinding();
+      const narration = events
+        .filter((e) => e.event.type === 'text')
+        .map((e) => (e.event as { text: string }).text)
+        .join('\n');
+      const ok = errors.length === 0 && narration.length > 0;
+      smokeWrite({
+        ok,
+        narration,
+        errors,
+        capability_calls: inspection?.capabilityCalls ?? [],
+        usage: inspection?.usage ?? null,
+      });
+      app.exit(ok ? 0 : 1);
+    } catch (err) {
+      cleanupBinding();
+      smokeWrite({ ok: false, error: String(err) });
+      if (sessionManager) await sessionManager.endAll().catch(() => undefined);
+      app.exit(1);
+    }
+    return;
+  }
+
   if (SUMMARIZE_DEMO !== null) {
     // Arg: "alias:Type:ApiName" — one direct Haiku call on local content.
     try {
@@ -454,10 +539,19 @@ app.whenReady().then(async () => {
       const connA = boot.deps.db.resolveConnection(refA);
       const connB = boot.deps.db.resolveConnection(refB);
       if (!connA || !connB) throw new Error('both aliases must resolve to connections');
-      const diff = new DiffService(boot.deps, new SnapshotWorkerBridge(snapshotWorkerPath()));
+      const diff = new DiffService(
+        boot.deps,
+        new SnapshotWorkerBridge(snapshotWorkerPath()),
+        new MetadataService(boot.deps),
+      );
       const started = Date.now();
       const scope = await diff.diffScope(connA.id, connB.id);
       const again = await diff.diffScope(connA.id, connB.id); // cache check
+      // Drill-in leg: the first changed entry's full semantic detail.
+      const firstChanged = scope.entries.find((e) => e.status === 'changed');
+      const drill = firstChanged
+        ? diff.diffArtifact(connA.id, connB.id, firstChanged.type, firstChanged.apiName)
+        : null;
       smokeWrite({
         ok: true,
         aliases: [scope.aliasA, scope.aliasB],
@@ -468,6 +562,14 @@ app.whenReady().then(async () => {
         sample_changed: scope.entries.filter((e) => e.status === 'changed').slice(0, 5),
         duration_ms: Date.now() - started,
         second_call_cached: again.cached,
+        drill: drill
+          ? {
+              artifact: `${drill.type}:${drill.apiName}`,
+              format: drill.format,
+              change_count: drill.changes?.length ?? drill.hunks?.length ?? 0,
+              sample_changes: (drill.changes ?? []).slice(0, 4),
+            }
+          : null,
       });
       app.exit(0);
     } catch (err) {
@@ -503,7 +605,7 @@ app.whenReady().then(async () => {
   const metadata = new MetadataService(boot.deps);
   // Diffs get their OWN worker process: the sync pipeline's lane stays free,
   // and a diff timeout can never kill an in-flight snapshot stage.
-  const diff = new DiffService(boot.deps, new SnapshotWorkerBridge(snapshotWorkerPath()));
+  const diff = new DiffService(boot.deps, new SnapshotWorkerBridge(snapshotWorkerPath()), metadata);
   const connections = new ConnectionService(
     boot.deps,
     (reason) => push('connections:changed', { reason }),

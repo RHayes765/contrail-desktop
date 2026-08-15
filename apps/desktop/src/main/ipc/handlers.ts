@@ -70,6 +70,10 @@ export function makeHandlers(health: HealthView, services: MainServices) {
       _deps: EngineDeps,
       req: { connectionA: string; connectionB: string; types?: string[] },
     ) => diff.diffScope(req.connectionA, req.connectionB, req.types),
+    'diff:artifact': (
+      _deps: EngineDeps,
+      req: { connectionA: string; connectionB: string; type: string; apiName: string },
+    ) => diff.diffArtifact(req.connectionA, req.connectionB, req.type, req.apiName),
 
     'projects:list': () => projects.list(),
     'projects:create': (_deps: EngineDeps, req: { name: string; description?: string }) =>

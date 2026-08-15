@@ -9,6 +9,7 @@ import { ProjectDetailScreen } from './screens/ProjectDetail.js';
 import { ChatScreen } from './screens/Chat.js';
 import { SessionViewerScreen } from './screens/SessionViewer.js';
 import { MetadataScreen } from './screens/Metadata.js';
+import { DiffScreen } from './screens/Diff.js';
 
 export function App() {
   const [health, setHealth] = useState<HealthView | null>(null);
@@ -52,6 +53,12 @@ export function App() {
         >
           Metadata
         </button>
+        <button
+          className={screen === 'diff' ? 'active' : ''}
+          onClick={() => useNav.setState({ screen: 'diff', sessionId: null })}
+        >
+          Diff
+        </button>
       </nav>
       <main className={`content${fullBleed ? ' content-chat' : ''}`}>
         {error ? (
@@ -68,6 +75,8 @@ export function App() {
           <SessionViewerScreen projectId={projectId} sessionId={sessionId} />
         ) : screen === 'metadata' ? (
           <MetadataScreen />
+        ) : screen === 'diff' ? (
+          <DiffScreen />
         ) : (
           <ProjectsScreen />
         )}

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type {
   ArtifactDetailView,
+  ArtifactDiffView,
   ArtifactRowView,
   ChatEvent,
   ConnectionView,
@@ -81,6 +82,12 @@ export const REQUEST_SCHEMAS = {
     connectionB: ID,
     types: z.array(z.string().min(1).max(80)).max(20).optional(),
   }),
+  'diff:artifact': z.object({
+    connectionA: ID,
+    connectionB: ID,
+    type: z.string().min(1).max(80),
+    apiName: z.string().min(1).max(300),
+  }),
 
   'projects:list': z.object({}),
   'projects:create': z.object({
@@ -160,6 +167,10 @@ export interface Contracts {
   'diff:scope': {
     req: { connectionA: string; connectionB: string; types?: string[] };
     res: DiffScopeView;
+  };
+  'diff:artifact': {
+    req: { connectionA: string; connectionB: string; type: string; apiName: string };
+    res: ArtifactDiffView;
   };
 
   'projects:list': { req: Record<string, never>; res: ProjectView[] };
