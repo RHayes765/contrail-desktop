@@ -165,3 +165,17 @@ describe('snapshot status', () => {
     expect(after.lastRun?.artifactCount).toBe(42);
   });
 });
+
+describe('v8: sync duration history', () => {
+  it('records per-run durations and reports the median of the last three', () => {
+    expect(db.getSnapshotStatus('c-t').typicalDurationMs).toBeNull();
+    for (const d of [120_000, 30_000, 60_000]) {
+      db.insertMetadataSnapshot({ connectionId: 'c-t', kind: 'refresh', types: ['Flow'], artifactCount: 1, durationMs: d });
+    }
+    // Median of [30s, 60s, 120s] = 60s — one slow outlier doesn't skew the estimate.
+    expect(db.getSnapshotStatus('c-t').typicalDurationMs).toBe(60_000);
+    // Runs without a duration (older rows, 'gone' completions) don't poison it.
+    db.insertMetadataSnapshot({ connectionId: 'c-t', kind: 'refresh', types: ['Flow'], artifactCount: 1 });
+    expect(db.getSnapshotStatus('c-t').typicalDurationMs).toBe(60_000);
+  });
+});

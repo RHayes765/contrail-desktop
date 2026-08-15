@@ -124,6 +124,10 @@ export interface SnapshotStatusView {
   syncing: boolean;
   /** Live progress line while syncing. */
   progress: string | null;
+  /** Milliseconds since this sync started (present only while syncing). */
+  syncElapsedMs: number | null;
+  /** Median duration of recent syncs — "typically ~Xm"; null before the first. */
+  typicalDurationMs: number | null;
   /** Synced, but past the freshness threshold. */
   stale: boolean;
 }

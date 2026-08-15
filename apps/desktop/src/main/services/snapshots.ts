@@ -137,6 +137,8 @@ export class SnapshotService {
       lastIndexedAt: s.lastIndexedAt,
       syncing: activeSync != null,
       progress: activeSync?.progress ?? null,
+      syncElapsedMs: activeSync ? Date.now() - activeSync.startedAt : null,
+      typicalDurationMs: s.typicalDurationMs,
       stale,
     };
   }
@@ -237,7 +239,14 @@ export class SnapshotService {
     connectionId: string,
     kind: 'baseline' | 'refresh',
     result:
-      | { status: 'complete'; summary: { types: string[]; artifact_counts: Record<string, number> } }
+      | {
+          status: 'complete';
+          summary: {
+            types: string[];
+            artifact_counts: Record<string, number>;
+            duration_ms: number;
+          };
+        }
       | { status: 'failed'; error: string },
   ): void {
     if (result.status === 'failed') {
@@ -250,11 +259,19 @@ export class SnapshotService {
       kind,
       types: result.summary.types,
       artifactCount,
+      durationMs: result.summary.duration_ms,
     });
     this.emit(connectionId, `synced ${artifactCount} artifacts`, true, null);
   }
 
   private emit(connectionId: string, progress: string, done: boolean, error: string | null): void {
-    this.push('metadata:progress', { connectionId, progress, done, error });
+    const entry = this.active.get(connectionId);
+    this.push('metadata:progress', {
+      connectionId,
+      progress,
+      elapsedMs: entry ? Date.now() - entry.startedAt : 0,
+      done,
+      error,
+    });
   }
 }

@@ -134,7 +134,7 @@ ipc.subscribe('connections:changed', () => {
 
 // Live sync progress: patch the status inline; on done, re-fetch the real one
 // and surface any failure — a silent revert reads as "nothing happened".
-ipc.subscribe('metadata:progress', ({ connectionId, progress, done, error }) => {
+ipc.subscribe('metadata:progress', ({ connectionId, progress, elapsedMs, done, error }) => {
   const state = useConnections.getState();
   if (done) {
     if (error) {
@@ -150,7 +150,7 @@ ipc.subscribe('metadata:progress', ({ connectionId, progress, done, error }) => 
     snapshots: {
       ...state.snapshots,
       [connectionId]: existing
-        ? { ...existing, syncing: true, progress }
+        ? { ...existing, syncing: true, progress, syncElapsedMs: elapsedMs }
         : {
             connectionId,
             artifactCount: 0,
@@ -158,6 +158,8 @@ ipc.subscribe('metadata:progress', ({ connectionId, progress, done, error }) => 
             lastIndexedAt: null,
             syncing: true,
             progress,
+            syncElapsedMs: elapsedMs,
+            typicalDurationMs: null,
             stale: false,
           },
     },

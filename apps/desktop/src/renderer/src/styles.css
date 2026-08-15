@@ -776,3 +776,23 @@ button.danger {
   text-overflow: ellipsis;
   max-width: 48ch;
 }
+
+/* ── S5.1: sync elapsed/typical progress ─────────────────────────────── */
+
+.sync-bar {
+  display: inline-block;
+  width: 90px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  margin-left: 8px;
+  vertical-align: middle;
+  overflow: hidden;
+}
+
+.sync-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 1.2s linear;
+}

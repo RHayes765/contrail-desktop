@@ -15,7 +15,7 @@ import type {
   ProjectRecord,
 } from './types.js';
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 /**
  * Local SQLite store: connection metadata and the audit log (P0.1); the
@@ -286,6 +286,11 @@ export class ContrailDb {
           ALTER TABLE sessions ADD COLUMN sdk_session_id TEXT;
           ALTER TABLE sessions ADD COLUMN effort TEXT;
         `);
+      }
+      if (current < 8) {
+        // v8 (desktop-owned): per-run sync duration — the basis for the
+        // "typically takes ~Xm" estimate on the Connections screen.
+        this.db.exec(`ALTER TABLE metadata_snapshots ADD COLUMN duration_ms INTEGER;`);
       }
       this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     });
@@ -702,11 +707,12 @@ export class ContrailDb {
     kind: 'baseline' | 'refresh';
     types: string[];
     artifactCount: number;
+    durationMs?: number | null;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO metadata_snapshots (id, workspace_id, connection_id, taken_at, kind, types_json, artifact_count)
-         VALUES (?, 'default', ?, ?, ?, ?, ?)`,
+        `INSERT INTO metadata_snapshots (id, workspace_id, connection_id, taken_at, kind, types_json, artifact_count, duration_ms)
+         VALUES (?, 'default', ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         randomUUID(),
@@ -715,6 +721,7 @@ export class ContrailDb {
         input.kind,
         JSON.stringify(input.types),
         input.artifactCount,
+        input.durationMs ?? null,
       );
   }
 
@@ -728,6 +735,8 @@ export class ContrailDb {
     edgeCount: number;
     lastIndexedAt: string | null;
     lastRun: { takenAt: string; kind: string; artifactCount: number | null } | null;
+    /** Median duration of the last three recorded runs — the "typically ~Xm" basis. */
+    typicalDurationMs: number | null;
   } {
     const artifacts = this.db
       .prepare(
@@ -745,6 +754,19 @@ export class ContrailDb {
       .get(connectionId) as
       | { taken_at: string; kind: string; artifact_count: number | null }
       | undefined;
+    const durations = (
+      this.db
+        .prepare(
+          `SELECT duration_ms FROM metadata_snapshots
+           WHERE connection_id = ? AND duration_ms IS NOT NULL
+           ORDER BY taken_at DESC LIMIT 3`,
+        )
+        .all(connectionId) as Array<{ duration_ms: number }>
+    )
+      .map((r) => r.duration_ms)
+      .sort((a, b) => a - b);
+    const typicalDurationMs =
+      durations.length > 0 ? (durations[Math.floor(durations.length / 2)] ?? null) : null;
     return {
       artifactCount: artifacts.n,
       edgeCount: edges.n,
@@ -752,6 +774,7 @@ export class ContrailDb {
       lastRun: lastRun
         ? { takenAt: lastRun.taken_at, kind: lastRun.kind, artifactCount: lastRun.artifact_count }
         : null,
+      typicalDurationMs,
     };
   }
 

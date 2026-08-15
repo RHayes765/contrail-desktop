@@ -164,6 +164,18 @@ function agoLabel(iso: string): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+function durationLabel(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${s % 60}s`;
+}
+
+/** "retrieving (poll 35, status InProgress)" → "retrieving" — the counter is noise. */
+function cleanPhase(progress: string): string {
+  return progress.replace(/\s*\(poll \d+[^)]*\)/, '');
+}
+
 export function ConnectionsScreen() {
   const {
     connections,
@@ -244,7 +256,23 @@ export function ConnectionsScreen() {
                       return (
                         <div className="snap-line">
                           {snap?.syncing ? (
-                            <span className="snap-syncing">syncing — {snap.progress ?? '…'}</span>
+                            <span className="snap-syncing">
+                              syncing — {cleanPhase(snap.progress ?? '…')}
+                              {snap.syncElapsedMs != null &&
+                                ` · ${durationLabel(snap.syncElapsedMs)}`}
+                              {snap.typicalDurationMs != null &&
+                                ` of ~${durationLabel(snap.typicalDurationMs)} typical`}
+                              {snap.typicalDurationMs != null && snap.syncElapsedMs != null && (
+                                <span className="sync-bar">
+                                  <span
+                                    className="sync-bar-fill"
+                                    style={{
+                                      width: `${Math.min(95, Math.round((snap.syncElapsedMs / snap.typicalDurationMs) * 100))}%`,
+                                    }}
+                                  />
+                                </span>
+                              )}
+                            </span>
                           ) : snap?.lastIndexedAt ? (
                             <>
                               <span>

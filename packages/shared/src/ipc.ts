@@ -164,6 +164,7 @@ export interface PushEvents {
   'metadata:progress': {
     connectionId: string;
     progress: string;
+    elapsedMs: number;
     done: boolean;
     error: string | null;
   };
