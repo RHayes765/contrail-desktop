@@ -20,24 +20,36 @@ const PILL_H = 20;
 const LABEL_STEP = 20;
 const MAX_NODES = 120;
 
+/**
+ * Salesforce Flow Builder's own grouping: internal logic orange, data
+ * operations pink, external actions/interaction blue, start green.
+ */
+const SF_ORANGE = '#dd7a01';
+const SF_PINK = '#ff538a';
+const SF_BLUE = '#1b96ff';
+const SF_GREEN = '#2e844a';
+
 const KIND_COLORS: Record<string, string> = {
-  start: 'var(--env-sandbox)',
-  decision: 'var(--env-developer)',
-  action: 'var(--accent)',
-  subflow: 'var(--accent)',
-  recordLookup: 'var(--env-scratch)',
-  recordCreate: 'var(--env-scratch)',
-  recordUpdate: 'var(--env-scratch)',
-  recordDelete: 'var(--env-production)',
-  screen: '#3dd6c3',
-  loop: '#d6b43d',
-  wait: '#d6b43d',
-  assignment: 'var(--env-other)',
-  transform: 'var(--env-other)',
-  collection: 'var(--env-other)',
-  customError: 'var(--env-production)',
-  rollback: 'var(--env-production)',
-  stage: 'var(--env-developer)',
+  start: SF_GREEN,
+  // internal logic
+  decision: SF_ORANGE,
+  assignment: SF_ORANGE,
+  transform: SF_ORANGE,
+  loop: SF_ORANGE,
+  collection: SF_ORANGE,
+  wait: SF_ORANGE,
+  customError: SF_ORANGE,
+  stage: SF_ORANGE,
+  // data operations
+  recordLookup: SF_PINK,
+  recordCreate: SF_PINK,
+  recordUpdate: SF_PINK,
+  recordDelete: SF_PINK,
+  rollback: SF_PINK,
+  // external actions & interaction
+  action: SF_BLUE,
+  subflow: SF_BLUE,
+  screen: SF_BLUE,
 };
 
 const KIND_LABELS: Record<string, string> = {
