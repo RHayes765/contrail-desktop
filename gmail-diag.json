@@ -1,0 +1,35 @@
+{
+  "ok": true,
+  "server": "Gmail",
+  "token_present": true,
+  "granted_scopes": [
+    "https://mail.google.com/",
+    "https://www.googleapis.com/auth/gmail.compose",
+    "https://www.googleapis.com/auth/gmail.metadata",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.readonly"
+  ],
+  "init_status": 200,
+  "server_info": {
+    "name": "StatelessServer",
+    "version": "ESF"
+  },
+  "tool_count": 21,
+  "call": {
+    "tool": "label_thread",
+    "http_status": 200,
+    "body": {
+      "id": 3,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "The caller does not have permission",
+            "type": "text"
+          }
+        ],
+        "isError": true
+      }
+    }
+  }
+}

@@ -584,11 +584,14 @@ async function runMcpCallDiag(b: Bootstrap, serverName: string): Promise<void> {
     result?: { tools?: Array<{ name: string }> };
   } | null;
   const tools = listBody?.result?.tools ?? [];
-  // A profile/label-style read returns account facts, never message content.
+  // STRICTLY read-shaped tools only (list_/get_/search_ prefix, no write
+  // verbs) — a labels listing returns label names, never message content.
+  const writeVerb = /send|create|delete|trash|modify|label_|draft|insert|update|batch/i;
   const target =
+    tools.find((t) => /^(list|get)_?labels?/i.test(t.name)) ??
     tools.find((t) => /profile/i.test(t.name)) ??
-    tools.find((t) => /label/i.test(t.name)) ??
-    tools[0];
+    tools.find((t) => /^(list|get|search)_/i.test(t.name) && !writeVerb.test(t.name)) ??
+    null;
   let call: unknown = null;
   if (target) {
     const callRes = await post(
@@ -597,6 +600,31 @@ async function runMcpCallDiag(b: Bootstrap, serverName: string): Promise<void> {
     );
     call = { tool: target.name, http_status: callRes.status, body: await parse(callRes) };
   }
+
+  // The MCP proxy flattens backend errors to one sentence. Hitting the
+  // product REST API directly with the SAME bearer returns Google's full
+  // error JSON — SERVICE_DISABLED vs insufficient-scope, with the project
+  // named. Labels only: label names, no message content.
+  let restCheck: unknown = null;
+  if (bearer && /gmailmcp\.googleapis\.com/.test(server.urlOrCommand)) {
+    try {
+      const restRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/labels', {
+        headers: { Authorization: bearer },
+      });
+      const restBody = (await restRes.json().catch(() => null)) as {
+        labels?: Array<{ name?: string }>;
+        error?: unknown;
+      } | null;
+      restCheck = {
+        http_status: restRes.status,
+        label_count: restBody?.labels?.length ?? null,
+        error: restBody?.error ?? null,
+      };
+    } catch (err) {
+      restCheck = { failed: String(err).slice(0, 200) };
+    }
+  }
+
   smokeWrite({
     ok: true,
     server: server.name,
@@ -605,7 +633,9 @@ async function runMcpCallDiag(b: Bootstrap, serverName: string): Promise<void> {
     init_status: initRes.status,
     server_info: initBody?.result?.serverInfo ?? null,
     tool_count: tools.length,
+    tool_names: tools.map((t) => t.name),
     call,
+    gmail_rest_check: restCheck,
   });
 }
 
