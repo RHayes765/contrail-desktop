@@ -15,8 +15,9 @@ import type { FlowGraphView } from '@contrail/shared';
 const NODE_W = 176;
 const NODE_H = 50;
 const GAP_X = 208;
-const GAP_Y = 128;
+const MIN_ROW_GAP = 78; // clear space between a node's bottom and the next row
 const PILL_H = 20;
+const LABEL_STEP = 20;
 const MAX_NODES = 120;
 
 const KIND_COLORS: Record<string, string> = {
@@ -68,7 +69,28 @@ interface Placed {
   y: number;
 }
 
-function layout(graph: FlowGraphView): { placed: Map<string, Placed>; width: number; height: number } {
+/** Per-source attachment stack: go-to pills first, then branch labels. */
+interface SourceStack {
+  gotoCount: number;
+  labeledCount: number;
+  /** Pixel depth of everything hanging under the node. */
+  stackPx: number;
+}
+
+function stackFor(gotoCount: number, labeledCount: number): number {
+  const pills = gotoCount > 0 ? 6 + gotoCount * (PILL_H + 3) : 6;
+  const labels = labeledCount > 0 ? 14 + labeledCount * LABEL_STEP : 0;
+  return pills + labels;
+}
+
+function layout(graph: FlowGraphView): {
+  placed: Map<string, Placed>;
+  width: number;
+  height: number;
+  depth: Map<string, number>;
+  stacks: Map<string, SourceStack>;
+  rowGap: number;
+} {
   const depth = new Map<string, number>();
   const bfs = (root: string, startDepth: number): void => {
     const queue: Array<{ name: string; d: number }> = [{ name: root, d: startDepth }];
@@ -94,6 +116,24 @@ function layout(graph: FlowGraphView): { placed: Map<string, Placed>; width: num
     if (!root) break;
     bfs(root.name, Math.max(0, ...depth.values()) + 1);
   }
+
+  // Classify per-source BEFORE pixel placement: a drawable edge targets the
+  // next row down; everything else becomes a go-to pill. The deepest
+  // attachment stack sets the row gap, so labels can never collide with the
+  // next row no matter how many branches a decision has.
+  const stacks = new Map<string, SourceStack>();
+  let maxStack = 0;
+  for (const node of graph.nodes) {
+    const out = graph.edges.filter((e) => e.from === node.name);
+    const drawable = out.filter((e) => (depth.get(e.to) ?? -99) === (depth.get(node.name) ?? 0) + 1);
+    const gotoCount = out.length - drawable.length;
+    const labeledCount = drawable.filter((e) => e.label).length;
+    const stackPx = stackFor(gotoCount, labeledCount);
+    stacks.set(node.name, { gotoCount, labeledCount, stackPx });
+    maxStack = Math.max(maxStack, stackPx);
+  }
+  const rowGap = Math.max(MIN_ROW_GAP, maxStack + 40);
+  const gapY = NODE_H + rowGap;
 
   const rows = new Map<number, string[]>();
   for (const node of graph.nodes) {
@@ -138,22 +178,15 @@ function layout(graph: FlowGraphView): { placed: Map<string, Placed>; width: num
     const idx = row.indexOf(node.name);
     const rowWidth = row.length * GAP_X;
     const x = (canvasWidth - rowWidth) / 2 + idx * GAP_X + (GAP_X - NODE_W) / 2;
-    const y = 20 + d * GAP_Y;
+    const y = 20 + d * gapY;
     placed.set(node.name, { ...node, x, y });
     height = Math.max(height, y + NODE_H + 20);
   }
-  return { placed, width: canvasWidth, height };
+  return { placed, width: canvasWidth, height, depth, stacks, rowGap };
 }
 
 function truncate(text: string, max: number): string {
   return text.length > max ? text.slice(0, max - 1) + '…' : text;
-}
-
-/** Straight right-angle connector: down, across at the midpoint, down. */
-function orthogonalPath(x1: number, y1: number, x2: number, y2: number): string {
-  if (Math.abs(x1 - x2) < 2) return `M ${x1} ${y1} L ${x2} ${y2}`;
-  const midY = (y1 + y2) / 2;
-  return `M ${x1} ${y1} L ${x1} ${midY} L ${x2} ${midY} L ${x2} ${y2}`;
 }
 
 interface DrawnEdge {
@@ -175,10 +208,11 @@ interface GoToPill {
 function planEdges(
   graph: FlowGraphView,
   placed: Map<string, Placed>,
+  depth: Map<string, number>,
+  stacks: Map<string, SourceStack>,
 ): { drawn: DrawnEdge[]; pills: GoToPill[] } {
   const drawn: DrawnEdge[] = [];
   const pills: GoToPill[] = [];
-  // Group out-edges per source so drops and pills spread instead of stacking.
   const bySource = new Map<string, typeof graph.edges>();
   for (const edge of graph.edges) {
     const list = bySource.get(edge.from) ?? [];
@@ -188,12 +222,29 @@ function planEdges(
   for (const [from, edges] of bySource) {
     const a = placed.get(from);
     if (!a) continue;
-    // Drawable = target exactly one row below (the Flow Builder rule of thumb).
-    const drawable = edges.filter((e) => {
-      const b = placed.get(e.to);
-      return b != null && b.y > a.y && b.y - a.y <= GAP_Y + NODE_H;
-    });
+    // Same classification the layout sized the rows for: next row = drawable.
+    const drawable = edges.filter(
+      (e) => (depth.get(e.to) ?? -99) === (depth.get(from) ?? 0) + 1,
+    );
     const gotos = edges.filter((e) => !drawable.includes(e));
+
+    // Attachment stack under the node: go-to pills first, then branch
+    // labels — each on its OWN line, so nothing can overlap horizontally.
+    const pillsBase = a.y + NODE_H + 6;
+    gotos.forEach((edge, i) => {
+      const target = placed.get(edge.to);
+      pills.push({
+        x: a.x,
+        y: pillsBase + i * (PILL_H + 3),
+        text: `${edge.label ? edge.label + ' ' : ''}→ ${truncate(target?.label ?? edge.to, 20)}`,
+        target: edge.to,
+        fault: edge.kind === 'fault',
+      });
+    });
+    const labelsBase = pillsBase + gotos.length * (PILL_H + 3) + 14;
+    // The horizontal jog runs BELOW the whole attachment stack.
+    const stackPx = stacks.get(from)?.stackPx ?? 0;
+    let labelSlot = 0;
 
     drawable.forEach((edge, i) => {
       const b = placed.get(edge.to) as Placed;
@@ -202,24 +253,16 @@ function planEdges(
       const y1 = a.y + NODE_H;
       const x2 = b.x + NODE_W / 2;
       const y2 = b.y;
+      const jogY = Math.min(y2 - 10, y1 + stackPx + 18);
       drawn.push({
-        path: orthogonalPath(x1, y1, x2, y2),
+        path:
+          Math.abs(x1 - x2) < 2
+            ? `M ${x1} ${y1} L ${x2} ${y2}`
+            : `M ${x1} ${y1} L ${x1} ${jogY} L ${x2} ${jogY} L ${x2} ${y2}`,
         fault: edge.kind === 'fault',
         label: edge.label,
-        // Branch labels sit on the vertical drop just under the source —
-        // spread with the drop so parallel branches never collide.
         labelX: x1,
-        labelY: y1 + 26,
-      });
-    });
-    gotos.forEach((edge, i) => {
-      const target = placed.get(edge.to);
-      pills.push({
-        x: a.x,
-        y: a.y + NODE_H + 6 + i * (PILL_H + 3),
-        text: `${edge.label ? edge.label + ' ' : ''}→ ${truncate(target?.label ?? edge.to, 20)}`,
-        target: edge.to,
-        fault: edge.kind === 'fault',
+        labelY: edge.label ? labelsBase + labelSlot++ * LABEL_STEP : 0,
       });
     });
   }
@@ -233,8 +276,11 @@ function Canvas({
   graph: FlowGraphView;
   onJump: (name: string) => void;
 }) {
-  const { placed, width, height } = useMemo(() => layout(graph), [graph]);
-  const { drawn, pills } = useMemo(() => planEdges(graph, placed), [graph, placed]);
+  const { placed, width, height, depth, stacks } = useMemo(() => layout(graph), [graph]);
+  const { drawn, pills } = useMemo(
+    () => planEdges(graph, placed, depth, stacks),
+    [graph, placed, depth, stacks],
+  );
   // Pills extend below nodes — pad the canvas.
   const fullHeight = height + 60;
 
