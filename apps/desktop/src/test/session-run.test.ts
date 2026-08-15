@@ -196,3 +196,51 @@ describe('tool-card annotation', () => {
     expect(target.envRole).toBe('prod');
   });
 });
+
+describe('transcript replay (readTranscript)', () => {
+  it('parses well-formed lines, skips torn ones, and reports missing files honestly', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { AgentSessionManager } = await import('../main/services/agentRuntime.js');
+
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'contrail-transcript-'));
+    const transcriptPath = path.join(tmp, 't.jsonl');
+    fs.writeFileSync(
+      transcriptPath,
+      [
+        JSON.stringify({ ts: 't', kind: 'session', sessionId: 's1' }),
+        JSON.stringify({ ts: 't', kind: 'user', text: 'hello' }),
+        JSON.stringify({ ts: 't', kind: 'tool_start', toolUseId: 'tu1', name: 'soql_query', input: '{"connection":"dev"}' }),
+        JSON.stringify({ ts: 't', kind: 'tool_end', toolUseId: 'tu1', ok: true }),
+        '{"ts":"t","kind":"assistant","text":"thirt', // torn line (crash mid-write)
+        JSON.stringify({ ts: 't', kind: 'assistant', text: '13' }),
+        JSON.stringify({ ts: 't', kind: 'usage', costUsd: 0.01 }),
+      ].join('\n') + '\n',
+    );
+
+    const row = {
+      id: 's1', projectId: 'p1', title: 'q', status: 'ended', transcriptPath,
+      model: 'claude-haiku-4-5', inputTokens: 1, outputTokens: 2, cacheReadTokens: 3,
+      costUsd: 0.01, createdAt: 'now', endedAt: 'now',
+    };
+    const deps = {
+      db: {
+        reconcileOrphanedAgentSessions: () => 0,
+        getAgentSession: (id: string) => (id === 's1' ? row : null),
+      },
+    } as never;
+    const manager = new AgentSessionManager(deps, {} as never, 'unused', () => undefined);
+
+    const t = manager.readTranscript('s1');
+    expect(t.missing).toBe(false);
+    expect(t.entries.map((e) => e.kind)).toEqual(['user', 'tool_start', 'tool_end', 'assistant']);
+    expect(t.entries[1]).toMatchObject({ name: 'soql_query' });
+
+    // No transcript on disk → honest 'missing', never a throw.
+    fs.rmSync(transcriptPath);
+    expect(manager.readTranscript('s1').missing).toBe(true);
+    expect(() => manager.readTranscript('nope')).toThrow(/not found/);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+});

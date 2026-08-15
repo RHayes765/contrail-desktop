@@ -129,6 +129,27 @@ export interface SessionView {
 }
 
 /**
+ * One line of a persisted session transcript, shaped for read-only replay.
+ * Parsed main-side from the session's JSONL file (which is already
+ * redaction-scrubbed at write time — nothing here can carry codes/tokens).
+ */
+export type TranscriptEntryView =
+  | { kind: 'user'; text: string }
+  | { kind: 'assistant'; text: string }
+  | { kind: 'tool_start'; toolUseId: string; name: string; input: string }
+  | { kind: 'tool_end'; toolUseId: string; ok: boolean }
+  | { kind: 'error'; message: string };
+
+export interface TranscriptView {
+  session: SessionView;
+  entries: TranscriptEntryView[];
+  /** True when the transcript was cut off at the parse cap (very long sessions). */
+  truncated: boolean;
+  /** Set when no transcript file exists (pre-transcript rows, cleaned disk). */
+  missing: boolean;
+}
+
+/**
  * One streamed chat event, forwarded from the agent runtime. `tool_start` is
  * annotated by main with the resolved target connection + env role so the
  * renderer can color tool cards without ever resolving connections itself.

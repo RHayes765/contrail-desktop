@@ -7,11 +7,12 @@ import { ConnectionsScreen } from './screens/Connections.js';
 import { ProjectsScreen } from './screens/Projects.js';
 import { ProjectDetailScreen } from './screens/ProjectDetail.js';
 import { ChatScreen } from './screens/Chat.js';
+import { SessionViewerScreen } from './screens/SessionViewer.js';
 
 export function App() {
   const [health, setHealth] = useState<HealthView | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const { screen, projectId, goConnections, goProjects } = useNav();
+  const { screen, projectId, sessionId, goConnections, goProjects } = useNav();
 
   useEffect(() => {
     ipc
@@ -30,7 +31,9 @@ export function App() {
     prevScreen.current = screen;
   }, [screen]);
 
-  const inProjects = screen === 'projects' || screen === 'project' || screen === 'chat';
+  const inProjects =
+    screen === 'projects' || screen === 'project' || screen === 'chat' || screen === 'session';
+  const fullBleed = screen === 'chat' || screen === 'session';
 
   return (
     <div className="shell">
@@ -43,7 +46,7 @@ export function App() {
           Projects
         </button>
       </nav>
-      <main className={`content${screen === 'chat' ? ' content-chat' : ''}`}>
+      <main className={`content${fullBleed ? ' content-chat' : ''}`}>
         {error ? (
           <div className="empty">Engine error: {error}</div>
         ) : screen === 'connections' ? (
@@ -54,11 +57,13 @@ export function App() {
           <ProjectDetailScreen projectId={projectId} />
         ) : screen === 'chat' && projectId ? (
           <ChatScreen projectId={projectId} />
+        ) : screen === 'session' && projectId && sessionId ? (
+          <SessionViewerScreen projectId={projectId} sessionId={sessionId} />
         ) : (
           <ProjectsScreen />
         )}
       </main>
-      {health && screen !== 'chat' && (
+      {health && !fullBleed && (
         <footer className="statusbar">
           <span>Contrail {health.appVersion}</span>
           <span>engine ok · schema v{health.schemaVersion}</span>

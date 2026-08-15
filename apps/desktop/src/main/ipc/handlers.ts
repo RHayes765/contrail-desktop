@@ -86,5 +86,7 @@ export function makeHandlers(health: HealthView, services: MainServices) {
       await sessions.end(req.sessionId);
       return { ok: true };
     },
+    'sessions:transcript': (_deps: EngineDeps, req: { sessionId: string }) =>
+      sessions.readTranscript(req.sessionId),
   };
 }

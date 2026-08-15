@@ -26,7 +26,7 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
     clearError,
   } = useProjects();
   const { connections, refresh: refreshConnections } = useConnections();
-  const { goProjects, openChat } = useNav();
+  const { goProjects, openChat, openSession } = useNav();
 
   const project = useMemo(
     () => (projects ?? []).find((p) => p.id === projectId) ?? null,
@@ -95,7 +95,15 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
             <div className="empty">No sessions yet. Start one with “New session”.</div>
           ) : (
             sessions.map((s) => (
-              <div className="row-card" key={s.id}>
+              <div
+                className="row-card clickable"
+                key={s.id}
+                onClick={() =>
+                  // The live session goes back to its chat; everything else
+                  // opens the read-only transcript.
+                  s.status === 'active' ? openChat(project.id) : openSession(project.id, s.id)
+                }
+              >
                 <div className="conn-main">
                   <div className="conn-alias">{s.title ?? 'untitled session'}</div>
                   <div className="conn-detail">
@@ -103,6 +111,7 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
                     {new Date(s.createdAt).toLocaleString()}
                   </div>
                 </div>
+                <span className="row-open">{s.status === 'active' ? 'resume →' : 'view →'}</span>
               </div>
             ))
           )}

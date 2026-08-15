@@ -28,6 +28,8 @@ import {
   type PushChannel,
   type PushEvents,
   type SessionView,
+  type TranscriptEntryView,
+  type TranscriptView,
 } from '@contrail/shared';
 import type { ProjectService } from './projects.js';
 
@@ -382,6 +384,83 @@ export class AgentSessionManager {
 
   list(projectId: string): SessionView[] {
     return this.deps.db.listAgentSessions(projectId).map(sessionView);
+  }
+
+  /** Read-only replay of a persisted session transcript. */
+  readTranscript(sessionId: string): TranscriptView {
+    const rec = this.deps.db.getAgentSession(sessionId);
+    if (!rec) throw new Error(`Session ${sessionId} not found.`);
+    const view = sessionView(rec);
+    if (!rec.transcriptPath || !fs.existsSync(rec.transcriptPath)) {
+      return { session: view, entries: [], truncated: false, missing: true };
+    }
+
+    const MAX_BYTES = 5 * 1024 * 1024;
+    const MAX_ENTRIES = 5000;
+    let raw: string;
+    try {
+      const stat = fs.statSync(rec.transcriptPath);
+      const fd = fs.openSync(rec.transcriptPath, 'r');
+      try {
+        // Very long transcripts: keep the TAIL (the recent conversation),
+        // dropping the possibly-partial first line after the seek.
+        const start = Math.max(0, stat.size - MAX_BYTES);
+        const buffer = Buffer.alloc(Math.min(stat.size, MAX_BYTES));
+        fs.readSync(fd, buffer, 0, buffer.length, start);
+        raw = buffer.toString('utf8');
+        if (start > 0) raw = raw.slice(raw.indexOf('\n') + 1);
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch (err) {
+      log('warn', 'transcript unreadable', { sessionId, err: String(err) });
+      return { session: view, entries: [], truncated: false, missing: true };
+    }
+
+    const entries: TranscriptEntryView[] = [];
+    let truncated = false;
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      if (entries.length >= MAX_ENTRIES) {
+        truncated = true;
+        break;
+      }
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        continue; // torn line (crash mid-write) — skip, keep the rest
+      }
+      switch (parsed.kind) {
+        case 'user':
+          entries.push({ kind: 'user', text: String(parsed.text ?? '') });
+          break;
+        case 'assistant':
+          entries.push({ kind: 'assistant', text: String(parsed.text ?? '') });
+          break;
+        case 'tool_start':
+          entries.push({
+            kind: 'tool_start',
+            toolUseId: String(parsed.toolUseId ?? ''),
+            name: String(parsed.name ?? ''),
+            input: String(parsed.input ?? '{}'),
+          });
+          break;
+        case 'tool_end':
+          entries.push({
+            kind: 'tool_end',
+            toolUseId: String(parsed.toolUseId ?? ''),
+            ok: parsed.ok === true,
+          });
+          break;
+        case 'error':
+          entries.push({ kind: 'error', message: String(parsed.message ?? '') });
+          break;
+        default:
+          break; // session/usage metadata lines — the row already carries totals
+      }
+    }
+    return { session: view, entries, truncated: truncated || raw.length >= MAX_BYTES, missing: false };
   }
 
   /** Live-only introspection (demo + tests). */

@@ -10,6 +10,7 @@ import type {
   ProjectNoteView,
   ProjectView,
   SessionView,
+  TranscriptView,
 } from './views.js';
 
 /**
@@ -70,6 +71,7 @@ export const REQUEST_SCHEMAS = {
   'sessions:send': z.object({ sessionId: ID, text: z.string().min(1).max(50_000) }),
   'sessions:interrupt': z.object({ sessionId: ID }),
   'sessions:end': z.object({ sessionId: ID }),
+  'sessions:transcript': z.object({ sessionId: ID }),
 } as const;
 
 export type Channel = keyof typeof REQUEST_SCHEMAS;
@@ -118,6 +120,7 @@ export interface Contracts {
   'sessions:send': { req: { sessionId: string; text: string }; res: { ok: boolean } };
   'sessions:interrupt': { req: { sessionId: string }; res: { ok: boolean } };
   'sessions:end': { req: { sessionId: string }; res: { ok: boolean } };
+  'sessions:transcript': { req: { sessionId: string }; res: TranscriptView };
 }
 
 // Compile-time check: every contract has a schema and vice versa.

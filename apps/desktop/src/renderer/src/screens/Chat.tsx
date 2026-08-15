@@ -1,10 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { useEffect, useRef, useState } from 'react';
 import { CHAT_MODELS, type ChatModelId, type EffortLevel } from '@contrail/shared';
-import { useChat, type ToolCard } from '../stores/chat.js';
+import { useChat } from '../stores/chat.js';
 import { useProjects } from '../stores/projects.js';
 import { useNav } from '../stores/nav.js';
+import { Md, ToolCardView } from '../components/thread.js';
 
 /**
  * The chat screen: markdown-rendered streamed text, tool cards color-coded by
@@ -13,51 +12,6 @@ import { useNav } from '../stores/nav.js';
  */
 
 const EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
-
-function Md({ text }: { text: string }) {
-  return (
-    <div className="msg-md">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          // target=_blank routes every model-emitted link through main's
-          // window-open handler: https opens in the system browser, all other
-          // schemes are denied. Without it, a localhost/file link would
-          // navigate the app window itself (will-navigate lets those pass).
-          a: (props) => <a {...props} target="_blank" rel="noopener noreferrer" />,
-        }}
-      >
-        {text}
-      </ReactMarkdown>
-    </div>
-  );
-}
-
-function ToolCardView({ card }: { card: ToolCard }) {
-  const [open, setOpen] = useState(false);
-  const role = card.envRole ?? 'other';
-  const inputPreview = useMemo(() => {
-    try {
-      return JSON.stringify(card.input, null, 2);
-    } catch {
-      return String(card.input);
-    }
-  }, [card.input]);
-  return (
-    <div className={`tool-card env-${card.connection ? role : 'none'}`}>
-      <button className="tool-head" onClick={() => setOpen((v) => !v)}>
-        <span className="tool-status">{card.ok === null ? '…' : card.ok ? '✓' : '✗'}</span>
-        <span className="tool-name">{card.name}</span>
-        {card.connection && (
-          <span className={`env-chip ${role}`}>
-            {card.connection} · {role}
-          </span>
-        )}
-      </button>
-      {open && <pre className="tool-input">{inputPreview}</pre>}
-    </div>
-  );
-}
 
 export function ChatScreen({ projectId }: { projectId: string }) {
   const {
