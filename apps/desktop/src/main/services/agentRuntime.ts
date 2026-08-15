@@ -1,4 +1,4 @@
-import { utilityProcess, type UtilityProcess } from 'electron';
+import { shell, utilityProcess, type UtilityProcess } from 'electron';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -107,6 +107,20 @@ export interface UsageTotals {
 
 function refuse(message: string): BridgeToolResult {
   return { content: [{ type: 'text', text: message }], isError: true };
+}
+
+/** OAuth elicitation URLs: https anywhere, http only on loopback. */
+export function isSafeAuthUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    if (url.protocol === 'https:') return true;
+    if (url.protocol === 'http:') {
+      return ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 function okJson(payload: unknown): BridgeToolResult {
@@ -996,6 +1010,36 @@ export class AgentSessionManager {
       } catch {
         // Child died mid-call; nothing to deliver to.
       }
+    } else if (raw.kind === 'elicitation') {
+      // External-server OAuth: the child forwards the auth URL; MAIN decides.
+      // Only web URLs ever reach the browser — an MCP server that elicits a
+      // file:/javascript: URL gets declined, not opened.
+      const accept = isSafeAuthUrl(raw.url);
+      if (accept) {
+        void shell.openExternal(raw.url);
+        this.deps.audit.record('mcp.oauth_browser_opened', {
+          tool: 'agent_session',
+          outcome: 'success',
+          detail: { sessionId: entry.sessionId, server: raw.serverName },
+        });
+      } else {
+        this.deps.audit.record('mcp.oauth_url_refused', {
+          tool: 'agent_session',
+          outcome: 'refused',
+          detail: { sessionId: entry.sessionId, server: raw.serverName },
+        });
+      }
+      this.onAgentEvent(entry, {
+        type: 'external_auth',
+        server: raw.serverName,
+        status: accept ? 'browser_opened' : 'declined',
+      });
+      const reply: ToChild = { kind: 'elicitation:result', id: raw.id, accept };
+      try {
+        entry.child.postMessage(reply);
+      } catch {
+        // Child died mid-elicitation; nothing to deliver to.
+      }
     } else if (raw.kind === 'event') {
       this.onAgentEvent(entry, raw.event);
     } else if (raw.kind === 'ready') {
@@ -1052,6 +1096,12 @@ export class AgentSessionManager {
       });
     } else if (event.type === 'tool_end') {
       this.writeTranscript(entry, { kind: 'tool_end', toolUseId: event.toolUseId, ok: event.ok });
+    } else if (event.type === 'external_auth') {
+      this.writeTranscript(entry, {
+        kind: 'external_auth',
+        server: event.server,
+        status: event.status,
+      });
     } else if (event.type === 'error') {
       entry.lastError = event.message;
       this.writeTranscript(entry, { kind: 'error', message: event.message });

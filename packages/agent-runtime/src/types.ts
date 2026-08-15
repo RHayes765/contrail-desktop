@@ -85,6 +85,12 @@ export type AgentEvent =
     }
   | { type: 'error'; message: string }
   | { type: 'done'; result: string | null }
+  /** External MCP server OAuth progress (browser opened by MAIN, never here). */
+  | {
+      type: 'external_auth';
+      server: string;
+      status: 'browser_opened' | 'completed' | 'declined';
+    }
   /** The SDK announced its session id (init) — main stores it as the resume handle. */
   | { type: 'sdk_session'; sdkSessionId: string };
 
@@ -95,6 +101,8 @@ export type ToChild =
   | { kind: 'init'; ctx: SessionContext }
   | { kind: 'send'; text: string }
   | { kind: 'capability:result'; id: number; result: BridgeToolResult }
+  /** Main's verdict on a url-mode elicitation (it opened the browser, or refused). */
+  | { kind: 'elicitation:result'; id: number; accept: boolean }
   | { kind: 'interrupt' }
   /**
    * Graceful teardown: close the input stream so the live query (and its CLI
@@ -109,6 +117,11 @@ export type ToChild =
 export type ToMain =
   | { kind: 'ready' }
   | { kind: 'capability:invoke'; id: number; name: string; args: unknown }
+  /**
+   * A url-mode MCP elicitation (OAuth). The child NEVER opens URLs — main
+   * validates the scheme and opens the system browser itself.
+   */
+  | { kind: 'elicitation'; id: number; serverName: string; message: string; url: string }
   | { kind: 'event'; event: AgentEvent }
   /** The live query has fully ended (input closed or fatal error); safe to kill this process. */
   | { kind: 'closed' };

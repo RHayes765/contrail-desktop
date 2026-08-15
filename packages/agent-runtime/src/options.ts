@@ -2,6 +2,7 @@ import {
   createSdkMcpServer,
   tool,
   type McpServerConfig,
+  type OnElicitation,
   type Options,
   type SdkMcpToolDefinition,
 } from '@anthropic-ai/claude-agent-sdk';
@@ -49,10 +50,14 @@ function externalServerEntries(
     // Object.hasOwn, not `in`: a server named "Constructor" slugs to a
     // prototype key and `in` would silently drop it.
     if (!spec.key || spec.key === MCP_SERVER_NAME || Object.hasOwn(entries, spec.key)) continue;
+    // alwaysLoad: connect at query startup rather than on first tool use —
+    // a needs-auth server then raises its OAuth elicitation at session
+    // start (the predictable moment), not mid-conversation.
     if (spec.transport === 'stdio') {
       entries[spec.key] = {
         type: 'stdio',
         command: spec.urlOrCommand,
+        alwaysLoad: true,
         ...(spec.args ? { args: spec.args } : {}),
         ...(spec.env ? { env: spec.env } : {}),
       };
@@ -60,6 +65,7 @@ function externalServerEntries(
       entries[spec.key] = {
         type: spec.transport,
         url: spec.urlOrCommand,
+        alwaysLoad: true,
         ...(spec.headers ? { headers: spec.headers } : {}),
       };
     }
@@ -70,6 +76,12 @@ function externalServerEntries(
 export function buildSessionOptions(
   ctx: SessionContext,
   invoke: CapabilityInvoker,
+  /**
+   * MCP url-mode elicitation handler (external-server OAuth). The child
+   * forwards these to main, which validates and opens the browser; without
+   * a handler the SDK auto-declines and needs-auth servers stay tool-less.
+   */
+  onElicitation?: OnElicitation,
 ): Options {
   const caps = mintableCapabilities(ctx.bindings, ctx.disabledCatalogKeys ?? []);
 
@@ -132,6 +144,7 @@ export function buildSessionOptions(
       ...external,
     },
     allowedTools: allowed,
+    ...(onElicitation ? { onElicitation } : {}),
     maxTurns: ctx.maxTurns,
     maxBudgetUsd: ctx.maxBudgetUsd,
     env: {

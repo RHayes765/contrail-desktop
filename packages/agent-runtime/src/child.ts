@@ -1,4 +1,10 @@
-import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import {
+  query,
+  type ElicitationRequest,
+  type ElicitationResult,
+  type Query,
+  type SDKUserMessage,
+} from '@anthropic-ai/claude-agent-sdk';
 import type {
   AgentEvent,
   BridgeToolResult,
@@ -54,6 +60,34 @@ function invokeViaBridge(name: string, args: unknown): Promise<BridgeToolResult>
     pendingInvokes.set(id, resolve);
     send({ kind: 'capability:invoke', id, name, args });
   });
+}
+
+// ── MCP elicitation bridge (external-server OAuth) ───────────────────────
+
+let nextElicitationId = 1;
+const pendingElicitations = new Map<number, (accept: boolean) => void>();
+
+/**
+ * url-mode only: main validates the URL and opens the system browser; this
+ * process never opens anything. Per the SDK contract, accept is returned
+ * immediately after the browser opens — the CLI detects auth completion
+ * itself and emits an elicitation_complete system message. form-mode is
+ * declined outright (no v1 surface for arbitrary structured input).
+ */
+async function handleElicitation(request: ElicitationRequest): Promise<ElicitationResult | null> {
+  if (request.mode !== 'url' || !request.url) return null;
+  const accepted = await new Promise<boolean>((resolve) => {
+    const id = nextElicitationId++;
+    pendingElicitations.set(id, resolve);
+    send({
+      kind: 'elicitation',
+      id,
+      serverName: request.serverName,
+      message: request.message,
+      url: request.url as string,
+    });
+  });
+  return accepted ? ({ action: 'accept' } as ElicitationResult) : null;
 }
 
 // ── the session's input stream ───────────────────────────────────────────
@@ -134,6 +168,14 @@ async function pumpEvents(q: Query): Promise<void> {
         if (sid) emit({ type: 'sdk_session', sdkSessionId: sid });
         continue;
       }
+      if (msg.type === 'system' && (msg as { subtype?: string }).subtype === 'elicitation_complete') {
+        emit({
+          type: 'external_auth',
+          server: (msg as { mcp_server_name?: string }).mcp_server_name ?? 'unknown',
+          status: 'completed',
+        });
+        continue;
+      }
       if (msg.type === 'stream_event') {
         const ev = (msg as { event?: { type?: string; delta?: { type?: string; text?: string } } })
           .event;
@@ -200,7 +242,7 @@ async function pumpEvents(q: Query): Promise<void> {
 }
 
 function startSession(sessionCtx: SessionContext): void {
-  const options = buildSessionOptions(sessionCtx, invokeViaBridge);
+  const options = buildSessionOptions(sessionCtx, invokeViaBridge, handleElicitation);
   options.includePartialMessages = true;
   // The query starts now and idles until the first user message arrives —
   // the CLI handshake is local, so an untouched session costs nothing.
@@ -229,6 +271,14 @@ parentPort.on('message', (e) => {
       if (resolve) {
         pendingInvokes.delete(msg.id);
         resolve(msg.result);
+      }
+      break;
+    }
+    case 'elicitation:result': {
+      const resolve = pendingElicitations.get(msg.id);
+      if (resolve) {
+        pendingElicitations.delete(msg.id);
+        resolve(msg.accept);
       }
       break;
     }

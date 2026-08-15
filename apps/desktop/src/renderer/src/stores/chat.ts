@@ -49,6 +49,8 @@ interface ChatState {
   starting: boolean;
   usage: UsageTotals;
   error: string | null;
+  /** Neutral status line (external-server OAuth progress) — not an error. */
+  notice: string | null;
   /** Model/effort the user WANTS (persisted). The live session may lag during a swap. */
   model: ChatModelId;
   effort: EffortLevel | null;
@@ -147,6 +149,7 @@ export const useChat = create<ChatState>((set, get) => ({
   starting: false,
   usage: { ...ZERO_USAGE },
   error: null,
+  notice: null,
   sessionModel: null,
   sessionEffort: null,
   ...loadPrefs(),
@@ -347,6 +350,16 @@ function onEvent(event: ChatEvent): void {
           cacheReadTokens: state.usage.cacheReadTokens + event.cacheReadTokens,
           costUsd: state.usage.costUsd + event.costUsd,
         },
+      });
+      break;
+    case 'external_auth':
+      useChat.setState({
+        notice:
+          event.status === 'browser_opened'
+            ? `Opening your browser to authorize “${event.server}”… Finish the login there, then keep chatting.`
+            : event.status === 'completed'
+              ? `“${event.server}” authorized — its tools are now available in this session.`
+              : `Refused to open the authorization URL “${event.server}” sent (unsafe scheme).`,
       });
       break;
     case 'error':

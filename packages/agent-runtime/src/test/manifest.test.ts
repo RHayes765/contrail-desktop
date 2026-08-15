@@ -227,6 +227,24 @@ describe('tool manifest (THE isolation snapshot)', () => {
     expect(Object.keys(options.mcpServers ?? {})).toEqual(['contrail']);
   });
 
+  it('external servers connect at startup (alwaysLoad) and the elicitation handler rides along', () => {
+    const onElicitation = async () => null;
+    const options = buildSessionOptions(
+      {
+        ...ctxWith([FULL]),
+        externalServers: [{ key: 'echo', transport: 'stdio', urlOrCommand: 'node' }],
+      },
+      invoke,
+      onElicitation,
+    );
+    const servers = options.mcpServers as Record<string, { alwaysLoad?: boolean }>;
+    expect(servers.echo.alwaysLoad).toBe(true);
+    expect(options.onElicitation).toBe(onElicitation);
+    // Without a handler the option is absent entirely, not undefined-set.
+    const bare = buildSessionOptions(ctxWith([FULL]), invoke);
+    expect('onElicitation' in bare).toBe(false);
+  });
+
   it('a server whose slug collides with a prototype key still mints (hasOwn, not `in`)', () => {
     const options = buildSessionOptions(
       {

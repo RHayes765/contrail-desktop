@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ConnectionRecord, EngineDeps } from '@contrail/engine';
 import {
   AgentSessionRun,
+  isSafeAuthUrl,
   redactSensitive,
   scrubCodes,
   type SessionSpec,
@@ -69,6 +70,23 @@ function makeRun(world: ReturnType<typeof fakeWorld>, silo?: Partial<ProjectServ
   };
   return new AgentSessionRun(world.deps, spec, 'session-1', (silo ?? {}) as ProjectService);
 }
+
+describe('OAuth elicitation URL guard (main opens browsers, never blindly)', () => {
+  it('allows https anywhere and http only on loopback', () => {
+    expect(isSafeAuthUrl('https://slack.com/oauth/authorize?x=1')).toBe(true);
+    expect(isSafeAuthUrl('http://localhost:33418/callback')).toBe(true);
+    expect(isSafeAuthUrl('http://127.0.0.1:8080/auth')).toBe(true);
+    expect(isSafeAuthUrl('http://evil.example.com/auth')).toBe(false);
+  });
+
+  it('refuses non-web schemes and garbage outright', () => {
+    expect(isSafeAuthUrl('javascript:alert(1)')).toBe(false);
+    expect(isSafeAuthUrl('file:///C:/Windows/System32/calc.exe')).toBe(false);
+    expect(isSafeAuthUrl('vbscript:x')).toBe(false);
+    expect(isSafeAuthUrl('not a url')).toBe(false);
+    expect(isSafeAuthUrl('')).toBe(false);
+  });
+});
 
 describe('catalog toggle gate reads LIVE toggles (minting is UX, the gate is law)', () => {
   it('a family toggled off is refused even though its tools were minted', async () => {

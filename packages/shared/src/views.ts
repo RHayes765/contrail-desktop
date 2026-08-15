@@ -356,6 +356,12 @@ export type ChatEvent =
     }
   | { type: 'error'; message: string }
   | { type: 'done'; result: string | null }
+  /** External MCP server OAuth: browser opened / auth completed / declined. */
+  | {
+      type: 'external_auth';
+      server: string;
+      status: 'browser_opened' | 'completed' | 'declined';
+    }
   /**
    * Synthesized by main when the session is over for good (budget/turn cap
    * tripped, fatal error, runtime died) — the renderer must stop treating it

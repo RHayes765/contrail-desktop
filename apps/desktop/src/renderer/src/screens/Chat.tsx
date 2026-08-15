@@ -21,6 +21,7 @@ export function ChatScreen({ projectId }: { projectId: string }) {
     busy,
     usage,
     error,
+    notice,
     model,
     effort,
     sessionModel,
@@ -152,6 +153,15 @@ export function ChatScreen({ projectId }: { projectId: string }) {
         ))}
       </div>
 
+      {notice && (
+        <div
+          className="notice"
+          onClick={() => useChat.setState({ notice: null })}
+          title="Dismiss"
+        >
+          {notice}
+        </div>
+      )}
       {error && (
         <div className="notice" onClick={clearError}>
           {error}
