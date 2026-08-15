@@ -8,11 +8,11 @@ import type { FlowGraphView } from '@contrail/shared';
  * to XML above the node cap rather than rendering soup).
  */
 
-const NODE_W = 172;
+const NODE_W = 176;
 const NODE_H = 50;
-const GAP_X = 230;
-const GAP_Y = 78;
-const MAX_NODES = 80;
+const GAP_X = 208;
+const GAP_Y = 118;
+const MAX_NODES = 120;
 
 const KIND_COLORS: Record<string, string> = {
   start: 'var(--env-sandbox)',
@@ -27,6 +27,11 @@ const KIND_COLORS: Record<string, string> = {
   loop: '#d6b43d',
   wait: '#d6b43d',
   assignment: 'var(--env-other)',
+  transform: 'var(--env-other)',
+  collection: 'var(--env-other)',
+  customError: 'var(--env-production)',
+  rollback: 'var(--env-production)',
+  stage: 'var(--env-developer)',
 };
 
 const KIND_LABELS: Record<string, string> = {
@@ -41,6 +46,11 @@ const KIND_LABELS: Record<string, string> = {
   screen: 'Screen',
   loop: 'Loop',
   wait: 'Wait',
+  transform: 'Transform',
+  collection: 'Collection',
+  customError: 'Custom Error',
+  rollback: 'Roll Back Records',
+  stage: 'Stage',
   start: '',
 };
 
@@ -53,61 +63,106 @@ interface Placed {
   y: number;
 }
 
+/**
+ * Top-to-bottom layered layout, Salesforce-auto-layout style:
+ *   - BFS depth from Start = row (unreached chains re-root below the graph
+ *     instead of piling into one wall of nodes);
+ *   - within each row, nodes order by the average position of their parents
+ *     (one barycenter sweep — kills most edge crossings);
+ *   - rows are centered relative to the widest row.
+ */
 function layout(graph: FlowGraphView): { placed: Map<string, Placed>; width: number; height: number } {
-  // BFS depth from __start = column; loop-back/visited edges don't advance.
   const depth = new Map<string, number>();
-  const queue: Array<{ name: string; d: number }> = [{ name: '__start', d: 0 }];
-  depth.set('__start', 0);
-  while (queue.length > 0) {
-    const { name, d } = queue.shift() as { name: string; d: number };
-    for (const edge of graph.edges) {
-      if (edge.from !== name || depth.has(edge.to)) continue;
-      depth.set(edge.to, d + 1);
-      queue.push({ name: edge.to, d: d + 1 });
+  const bfs = (root: string, startDepth: number): void => {
+    const queue: Array<{ name: string; d: number }> = [{ name: root, d: startDepth }];
+    depth.set(root, startDepth);
+    while (queue.length > 0) {
+      const { name, d } = queue.shift() as { name: string; d: number };
+      for (const edge of graph.edges) {
+        if (edge.from !== name || depth.has(edge.to)) continue;
+        depth.set(edge.to, d + 1);
+        queue.push({ name: edge.to, d: d + 1 });
+      }
     }
-  }
-  // Orphans (unreached nodes) go in a trailing column.
-  const maxDepth = Math.max(0, ...depth.values());
-  for (const node of graph.nodes) {
-    if (!depth.has(node.name)) depth.set(node.name, maxDepth + 1);
+  };
+  bfs('__start', 0);
+  // Re-root unreached chains (elements only wired via targets we could not
+  // resolve, or genuinely disconnected) below the main graph, preserving
+  // their internal structure.
+  for (;;) {
+    const unplaced = graph.nodes.filter((n) => !depth.has(n.name));
+    if (unplaced.length === 0) break;
+    const unplacedNames = new Set(unplaced.map((n) => n.name));
+    const root =
+      unplaced.find(
+        (n) => !graph.edges.some((e) => e.to === n.name && unplacedNames.has(e.from)),
+      ) ?? unplaced[0];
+    if (!root) break;
+    bfs(root.name, Math.max(0, ...depth.values()) + 1);
   }
 
-  const columns = new Map<number, string[]>();
+  const rows = new Map<number, string[]>();
   for (const node of graph.nodes) {
     const d = depth.get(node.name) ?? 0;
-    const col = columns.get(d) ?? [];
-    col.push(node.name);
-    columns.set(d, col);
+    const row = rows.get(d) ?? [];
+    row.push(node.name);
+    rows.set(d, row);
   }
 
+  // Barycenter sweep: order each row by mean parent index in the row above.
+  const rowIndex = new Map<string, number>();
+  const orderedDepths = [...rows.keys()].sort((a, b) => a - b);
+  for (const d of orderedDepths) {
+    const row = rows.get(d) ?? [];
+    if (d === orderedDepths[0]) {
+      row.forEach((name, i) => rowIndex.set(name, i));
+      continue;
+    }
+    const scored = row.map((name) => {
+      const parents = graph.edges
+        .filter((e) => e.to === name && rowIndex.has(e.from))
+        .map((e) => rowIndex.get(e.from) as number);
+      const score =
+        parents.length > 0 ? parents.reduce((a, b) => a + b, 0) / parents.length : Number.MAX_SAFE_INTEGER;
+      return { name, score };
+    });
+    scored.sort((a, b) => a.score - b.score);
+    scored.forEach((s, i) => rowIndex.set(s.name, i));
+    rows.set(
+      d,
+      scored.map((s) => s.name),
+    );
+  }
+
+  const widest = Math.max(...[...rows.values()].map((r) => r.length));
+  const canvasWidth = 40 + widest * GAP_X;
   const placed = new Map<string, Placed>();
-  let width = 0;
   let height = 0;
   for (const node of graph.nodes) {
     const d = depth.get(node.name) ?? 0;
-    const col = columns.get(d) ?? [];
-    const row = col.indexOf(node.name);
-    const x = 20 + d * GAP_X;
-    const y = 20 + row * GAP_Y;
+    const row = rows.get(d) ?? [];
+    const idx = row.indexOf(node.name);
+    const rowWidth = row.length * GAP_X;
+    const x = (canvasWidth - rowWidth) / 2 + idx * GAP_X + (GAP_X - NODE_W) / 2;
+    const y = 20 + d * GAP_Y;
     placed.set(node.name, { ...node, x, y });
-    width = Math.max(width, x + NODE_W + 20);
     height = Math.max(height, y + NODE_H + 20);
   }
-  return { placed, width, height };
+  return { placed, width: canvasWidth, height };
 }
 
 function edgePath(a: Placed, b: Placed): string {
-  const x1 = a.x + NODE_W;
-  const y1 = a.y + NODE_H / 2;
-  const x2 = b.x;
-  const y2 = b.y + NODE_H / 2;
-  if (x2 > x1) {
-    const mid = (x1 + x2) / 2;
-    return `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`;
+  const x1 = a.x + NODE_W / 2;
+  const y1 = a.y + NODE_H;
+  const x2 = b.x + NODE_W / 2;
+  const y2 = b.y;
+  if (y2 > y1) {
+    const mid = (y1 + y2) / 2;
+    return `M ${x1} ${y1} C ${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2}`;
   }
-  // Back-edge (loop): route under both nodes.
-  const drop = Math.max(y1, y2) + NODE_H;
-  return `M ${x1} ${y1} C ${x1 + 40} ${drop}, ${x2 - 40} ${drop}, ${x2} ${y2}`;
+  // Back-edge (loop): swing out to the side of both nodes.
+  const side = Math.max(x1, x2) + NODE_W;
+  return `M ${x1} ${y1} C ${side} ${y1 + 30}, ${side} ${y2 - 30}, ${x2} ${y2}`;
 }
 
 function truncate(text: string, max: number): string {

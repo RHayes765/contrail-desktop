@@ -20,6 +20,11 @@ export type FlowNodeKind =
   | 'subflow'
   | 'action'
   | 'wait'
+  | 'transform'
+  | 'collection'
+  | 'customError'
+  | 'rollback'
+  | 'stage'
   | 'end';
 
 export interface FlowGraphNode {
@@ -63,7 +68,13 @@ const ELEMENT_KINDS: Array<[string, FlowNodeKind]> = [
   ['loops', 'loop'],
   ['subflows', 'subflow'],
   ['actionCalls', 'action'],
+  ['apexPluginCalls', 'action'],
   ['waits', 'wait'],
+  ['transforms', 'transform'],
+  ['collectionProcessors', 'collection'],
+  ['customErrors', 'customError'],
+  ['recordRollbacks', 'rollback'],
+  ['orchestratedStages', 'stage'],
 ];
 
 function tagValue(block: string, tag: string): string | null {
@@ -100,9 +111,11 @@ export function parseFlowGraph(xml: string): FlowGraph {
       if (!name) continue;
       defined.add(name);
       let detail: string | null = null;
-      if (kind === 'action') detail = tagValue(block, 'actionName');
-      else if (kind.startsWith('record')) detail = tagValue(block, 'object');
+      if (kind === 'action') detail = tagValue(block, 'actionName') ?? tagValue(block, 'apexClass');
+      else if (kind === 'recordLookup' || kind === 'recordCreate' || kind === 'recordUpdate' || kind === 'recordDelete')
+        detail = tagValue(block, 'object');
       else if (kind === 'subflow') detail = tagValue(block, 'flowName');
+      else if (kind === 'collection') detail = tagValue(block, 'collectionProcessorType');
       nodes.push({ name, label: tagValue(block, 'label') ?? name, kind, detail });
 
       if (kind === 'decision') {

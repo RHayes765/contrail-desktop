@@ -67,16 +67,21 @@ describe('parseFlowGraph', () => {
     expect(g.unresolved).toEqual([]);
   });
 
-  it('parses every real dev-org flow without unresolved targets', () => {
-    const flowsDir = path.join(
-      process.env.LOCALAPPDATA ?? '',
-      'Contrail/snapshots/97ed71a0-40b4-44e3-83b5-3ffd5eccf856/current/flows',
-    );
-    if (!fs.existsSync(flowsDir)) return; // machine without the shared snapshot
-    for (const file of fs.readdirSync(flowsDir)) {
-      const g = parseFlowGraph(fs.readFileSync(path.join(flowsDir, file), 'utf8'));
-      expect(g.nodes.length, file).toBeGreaterThan(0);
-      expect(g.unresolved, file).toEqual([]);
+  it('parses every flow in every local snapshot without unresolved targets', () => {
+    const snapshotsDir = path.join(process.env.LOCALAPPDATA ?? '', 'Contrail/snapshots');
+    if (!fs.existsSync(snapshotsDir)) return; // machine without the shared data dir
+    let checked = 0;
+    for (const conn of fs.readdirSync(snapshotsDir)) {
+      const flowsDir = path.join(snapshotsDir, conn, 'current', 'flows');
+      if (!fs.existsSync(flowsDir)) continue;
+      for (const file of fs.readdirSync(flowsDir)) {
+        if (!file.endsWith('.flow')) continue;
+        const g = parseFlowGraph(fs.readFileSync(path.join(flowsDir, file), 'utf8'));
+        expect(g.nodes.length, `${conn}/${file}`).toBeGreaterThan(0);
+        expect(g.unresolved, `${conn}/${file}`).toEqual([]);
+        checked += 1;
+      }
     }
+    expect(checked).toBeGreaterThan(0);
   });
 });
