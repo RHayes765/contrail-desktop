@@ -19,7 +19,16 @@ import type {
   ToChild,
   ToMain,
 } from '@contrail/agent-runtime';
-import type { ChatEvent, EnvRole, PushChannel, PushEvents, SessionView } from '@contrail/shared';
+import {
+  CHAT_MODELS,
+  type ChatEvent,
+  type ChatModelId,
+  type EffortLevel,
+  type EnvRole,
+  type PushChannel,
+  type PushEvents,
+  type SessionView,
+} from '@contrail/shared';
 import type { ProjectService } from './projects.js';
 
 /**
@@ -42,9 +51,8 @@ export function readApiKey(): string | null {
 }
 
 /** Interactive chat defaults — conservative while the key runs on a small budget. */
-export const CHAT_DEFAULT_MODEL = 'claude-haiku-4-5';
+export const CHAT_DEFAULT_MODEL: ChatModelId = 'claude-haiku-4-5';
 export const CHAT_MAX_TURNS = 50;
-export const CHAT_MAX_BUDGET_USD = 0.5;
 /** Live utilityProcess cap — each holds a CLI subprocess, and budget is real money. */
 const MAX_LIVE_SESSIONS = 4;
 /**
@@ -73,6 +81,7 @@ export interface SessionSpec {
   project: { id: string; name: string; description: string | null; instructions: string | null };
   bindings: Array<{ connection: ConnectionRecord; envRole: string }>;
   model: string;
+  effort?: EffortLevel;
   maxTurns: number;
   maxBudgetUsd: number;
 }
@@ -307,6 +316,7 @@ export class AgentSessionRun {
       project: this.spec.project,
       bindings,
       model: this.spec.model,
+      effort: this.spec.effort,
       maxTurns: this.spec.maxTurns,
       maxBudgetUsd: this.spec.maxBudgetUsd,
       cwd,
@@ -381,7 +391,7 @@ export class AgentSessionManager {
     return { usage: { ...entry.usage }, capabilityCalls: [...entry.run.capabilityCalls] };
   }
 
-  start(projectId: string, model?: string): SessionView {
+  start(projectId: string, model?: string, effort?: EffortLevel): SessionView {
     if (this.live.size >= MAX_LIVE_SESSIONS) {
       throw new Error(
         `${this.live.size} sessions are already running — end one before starting another.`,
@@ -389,6 +399,16 @@ export class AgentSessionManager {
     }
     const project = this.deps.db.getProject(projectId);
     if (!project) throw new Error(`Project ${projectId} not found.`);
+
+    const modelId = (model ?? CHAT_DEFAULT_MODEL) as ChatModelId;
+    // Own-property check: a bare index would resolve prototype keys like
+    // "toString" to a truthy value and mint a session with NO budget cap.
+    if (!Object.hasOwn(CHAT_MODELS, modelId)) {
+      throw new Error(
+        `Unknown model "${model}". Available: ${Object.keys(CHAT_MODELS).join(', ')}.`,
+      );
+    }
+    const catalog = CHAT_MODELS[modelId];
 
     const apiKey = readApiKey();
     if (!apiKey) {
@@ -406,9 +426,11 @@ export class AgentSessionManager {
     const spec: SessionSpec = {
       project,
       bindings,
-      model: model ?? CHAT_DEFAULT_MODEL,
+      model: modelId,
+      effort,
       maxTurns: CHAT_MAX_TURNS,
-      maxBudgetUsd: CHAT_MAX_BUDGET_USD,
+      // Budget scales with the model: a Fable turn costs what a Haiku session does.
+      maxBudgetUsd: catalog.maxBudgetUsd,
     };
 
     const transcriptDir = path.join(dataDir(), 'sessions');

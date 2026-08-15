@@ -562,3 +562,112 @@ button.danger {
   font-size: 14px;
   resize: none;
 }
+
+/* ── S4.1: markdown rendering + model picker ─────────────────────────── */
+
+.model-picker {
+  display: flex;
+  gap: 6px;
+}
+
+.model-picker select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 4px 8px;
+  font-size: 12.5px;
+}
+
+.model-picker select:disabled {
+  opacity: 0.55;
+}
+
+.msg-md > :first-child { margin-top: 0; }
+.msg-md > :last-child { margin-bottom: 0; }
+
+.msg-md p { margin: 0 0 10px; line-height: 1.55; }
+.msg-md ul, .msg-md ol { margin: 0 0 10px; padding-left: 22px; }
+.msg-md li { margin: 3px 0; }
+.msg-md h1, .msg-md h2, .msg-md h3, .msg-md h4 {
+  margin: 14px 0 8px;
+  line-height: 1.3;
+}
+.msg-md h1 { font-size: 17px; }
+.msg-md h2 { font-size: 15.5px; }
+.msg-md h3, .msg-md h4 { font-size: 14px; }
+
+.msg-md code {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-family: Consolas, 'Cascadia Mono', monospace;
+  font-size: 12.5px;
+}
+
+.msg-md pre {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  margin: 0 0 10px;
+}
+
+.msg-md pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.msg-md blockquote {
+  margin: 0 0 10px;
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--border);
+  color: var(--text-dim);
+}
+
+.msg-md table {
+  border-collapse: collapse;
+  margin: 0 0 10px;
+  font-size: 13px;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.msg-md th, .msg-md td {
+  border: 1px solid var(--border);
+  padding: 5px 10px;
+  text-align: left;
+}
+
+.msg-md th {
+  background: var(--bg-raised);
+  font-weight: 600;
+}
+
+.msg-md hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
+}
+
+.msg-md a { color: var(--accent); }
+
+/* Streaming cursor rides the last rendered markdown element. */
+.msg-text.streaming .msg-md > :last-child::after {
+  content: '▌';
+  color: var(--accent);
+  animation: blink 1s steps(1) infinite;
+}
+
+/* The pre-markdown cursor rule would double up — the .msg-md rule owns it now. */
+.msg-text.streaming::after { content: none; }
+
+/* Markdown lays out its own blocks; inherited pre-wrap would render the
+   renderer's inter-block newline text nodes as blank lines. */
+.msg-md { white-space: normal; }

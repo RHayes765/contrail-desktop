@@ -1,5 +1,5 @@
 import type { BrowserWindow } from 'electron';
-import type { HealthView } from '@contrail/shared';
+import type { EffortLevel, HealthView } from '@contrail/shared';
 import type { EngineDeps } from '@contrail/engine';
 import { ConnectionService } from '../services/connections.js';
 import { docView, noteView, ProjectService } from '../services/projects.js';
@@ -70,8 +70,10 @@ export function makeHandlers(health: HealthView, services: MainServices) {
       noteView(projects.addNote(req.projectId, req.body, 'user', null)),
 
     'sessions:list': (_deps: EngineDeps, req: { projectId: string }) => sessions.list(req.projectId),
-    'sessions:start': (_deps: EngineDeps, req: { projectId: string; model?: string }) =>
-      sessions.start(req.projectId, req.model),
+    'sessions:start': (
+      _deps: EngineDeps,
+      req: { projectId: string; model?: string; effort?: EffortLevel },
+    ) => sessions.start(req.projectId, req.model, req.effort),
     'sessions:send': (_deps: EngineDeps, req: { sessionId: string; text: string }) => {
       sessions.send(req.sessionId, req.text);
       return { ok: true };

@@ -1,12 +1,37 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { CHAT_MODELS, type ChatModelId, type EffortLevel } from '@contrail/shared';
 import { useChat, type ToolCard } from '../stores/chat.js';
 import { useProjects } from '../stores/projects.js';
 import { useNav } from '../stores/nav.js';
 
 /**
- * The chat screen: streamed text, tool cards color-coded by env role, and a
+ * The chat screen: markdown-rendered streamed text, tool cards color-coded by
+ * env role, model/effort pickers (locked once the conversation starts), and a
  * cost meter that ticks per turn. One live session at a time (v1).
  */
+
+const EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+function Md({ text }: { text: string }) {
+  return (
+    <div className="msg-md">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          // target=_blank routes every model-emitted link through main's
+          // window-open handler: https opens in the system browser, all other
+          // schemes are denied. Without it, a localhost/file link would
+          // navigate the app window itself (will-navigate lets those pass).
+          a: (props) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
 
 function ToolCardView({ card }: { card: ToolCard }) {
   const [open, setOpen] = useState(false);
@@ -35,8 +60,22 @@ function ToolCardView({ card }: { card: ToolCard }) {
 }
 
 export function ChatScreen({ projectId }: { projectId: string }) {
-  const { sessionId, projectId: chatProjectId, messages, streaming, busy, usage, error, start, send, interrupt, end, clearError } =
-    useChat();
+  const {
+    sessionId,
+    messages,
+    streaming,
+    busy,
+    usage,
+    error,
+    model,
+    effort,
+    start,
+    configure,
+    send,
+    interrupt,
+    end,
+    clearError,
+  } = useChat();
   const { projects } = useProjects();
   const { openProject } = useNav();
   const [draft, setDraft] = useState('');
@@ -73,6 +112,33 @@ export function ChatScreen({ projectId }: { projectId: string }) {
         <button className="crumb" onClick={leave}>
           ← {project?.name ?? 'Project'}
         </button>
+        <div className="model-picker" title={messages.length > 0 ? 'Model is fixed for a running conversation — start a new session to change it' : 'Model and reasoning effort for this session'}>
+          <select
+            value={model}
+            disabled={messages.length > 0}
+            onChange={(e) => void configure(e.target.value as ChatModelId, effort)}
+          >
+            {(Object.keys(CHAT_MODELS) as ChatModelId[]).map((id) => (
+              <option key={id} value={id}>
+                {CHAT_MODELS[id].label}
+              </option>
+            ))}
+          </select>
+          <select
+            value={effort ?? ''}
+            disabled={messages.length > 0}
+            onChange={(e) =>
+              void configure(model, (e.target.value || null) as EffortLevel | null)
+            }
+          >
+            <option value="">default effort</option>
+            {EFFORT_LEVELS.map((lvl) => (
+              <option key={lvl} value={lvl}>
+                {lvl}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="meter" title="input / output tokens · cache reads">
           <span>${usage.costUsd.toFixed(4)}</span>
           <span className="meter-dim">
@@ -101,15 +167,24 @@ export function ChatScreen({ projectId }: { projectId: string }) {
           <div key={i} className={`msg ${m.role}`}>
             {m.parts.map((p, j) =>
               p.kind === 'text' ? (
-                <div key={j} className="msg-text">
-                  {p.text}
-                </div>
+                m.role === 'assistant' ? (
+                  <div key={j} className="msg-text">
+                    <Md text={p.text} />
+                  </div>
+                ) : (
+                  // User text stays literal — pasted SOQL/XML must not re-render.
+                  <div key={j} className="msg-text">
+                    {p.text}
+                  </div>
+                )
               ) : (
                 <ToolCardView key={j} card={p.card} />
               ),
             )}
             {m.role === 'assistant' && i === messages.length - 1 && streaming && (
-              <div className="msg-text streaming">{streaming}</div>
+              <div className="msg-text streaming">
+                <Md text={streaming} />
+              </div>
             )}
           </div>
         ))}

@@ -3,6 +3,7 @@ import type {
   ChatEvent,
   ConnectionView,
   ConnectOutcomeView,
+  EffortLevel,
   HealthView,
   PingResultView,
   ProjectDocView,
@@ -61,7 +62,11 @@ export const REQUEST_SCHEMAS = {
   'projects:notes:add': z.object({ projectId: ID, body: z.string().min(1).max(10_000) }),
 
   'sessions:list': z.object({ projectId: ID }),
-  'sessions:start': z.object({ projectId: ID, model: z.string().max(80).optional() }),
+  'sessions:start': z.object({
+    projectId: ID,
+    model: z.string().max(80).optional(),
+    effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+  }),
   'sessions:send': z.object({ sessionId: ID, text: z.string().min(1).max(50_000) }),
   'sessions:interrupt': z.object({ sessionId: ID }),
   'sessions:end': z.object({ sessionId: ID }),
@@ -106,7 +111,10 @@ export interface Contracts {
   'projects:notes:add': { req: { projectId: string; body: string }; res: ProjectNoteView };
 
   'sessions:list': { req: { projectId: string }; res: SessionView[] };
-  'sessions:start': { req: { projectId: string; model?: string }; res: SessionView };
+  'sessions:start': {
+    req: { projectId: string; model?: string; effort?: EffortLevel };
+    res: SessionView;
+  };
   'sessions:send': { req: { sessionId: string; text: string }; res: { ok: boolean } };
   'sessions:interrupt': { req: { sessionId: string }; res: { ok: boolean } };
   'sessions:end': { req: { sessionId: string }; res: { ok: boolean } };

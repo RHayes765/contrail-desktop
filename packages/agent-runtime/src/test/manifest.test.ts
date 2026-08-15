@@ -189,6 +189,13 @@ describe('tool manifest (THE isolation snapshot)', () => {
     }
   });
 
+  it('effort passes through to SDK options only when set', () => {
+    const withEffort = buildSessionOptions({ ...ctxWith([FULL]), effort: 'high' }, invoke);
+    expect((withEffort as { effort?: string }).effort).toBe('high');
+    const without = buildSessionOptions(ctxWith([FULL]), invoke);
+    expect('effort' in without).toBe(false);
+  });
+
   it('system prompt is stable across calls (prompt-cache invariant)', () => {
     const a = buildSessionOptions(ctxWith([FULL]), invoke).systemPrompt;
     const b = buildSessionOptions(ctxWith([FULL]), invoke).systemPrompt;

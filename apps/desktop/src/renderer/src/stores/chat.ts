@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ChatEvent, EnvRole } from '@contrail/shared';
+import { CHAT_MODELS, type ChatEvent, type ChatModelId, type EffortLevel, type EnvRole } from '@contrail/shared';
 import { ipc } from '../lib/ipc.js';
 
 /**
@@ -42,8 +42,16 @@ interface ChatState {
   starting: boolean;
   usage: UsageTotals;
   error: string | null;
+  /** Model/effort the user WANTS (persisted). The live session may lag during a swap. */
+  model: ChatModelId;
+  effort: EffortLevel | null;
+  /** What the LIVE session actually runs — reconciliation target for configure(). */
+  sessionModel: ChatModelId | null;
+  sessionEffort: EffortLevel | null;
 
-  start: (projectId: string, model?: string) => Promise<void>;
+  start: (projectId: string) => Promise<void>;
+  /** Change model/effort — restarts the session (only offered before the first message). */
+  configure: (model: ChatModelId, effort: EffortLevel | null) => Promise<void>;
   send: (text: string) => Promise<void>;
   interrupt: () => Promise<void>;
   end: () => Promise<void>;
@@ -51,6 +59,28 @@ interface ChatState {
 }
 
 const ZERO_USAGE: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0 };
+
+const PREFS_KEY = 'contrail.chat.prefs';
+
+function loadPrefs(): { model: ChatModelId; effort: EffortLevel | null } {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Record<string, unknown>;
+    const model =
+      typeof raw.model === 'string' && Object.hasOwn(CHAT_MODELS, raw.model)
+        ? (raw.model as ChatModelId)
+        : 'claude-haiku-4-5';
+    const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(raw.effort as string)
+      ? (raw.effort as EffortLevel)
+      : null;
+    return { model, effort };
+  } catch {
+    return { model: 'claude-haiku-4-5', effort: null };
+  }
+}
+
+function savePrefs(model: ChatModelId, effort: EffortLevel | null): void {
+  localStorage.setItem(PREFS_KEY, JSON.stringify({ model, effort }));
+}
 
 function lastAssistant(messages: ChatMessage[]): ChatMessage | null {
   const last = messages[messages.length - 1];
@@ -66,8 +96,11 @@ export const useChat = create<ChatState>((set, get) => ({
   starting: false,
   usage: { ...ZERO_USAGE },
   error: null,
+  sessionModel: null,
+  sessionEffort: null,
+  ...loadPrefs(),
 
-  start: async (projectId, model) => {
+  start: async (projectId) => {
     const state = get();
     // Re-entering the same project's live chat resumes it; a start already in
     // flight (StrictMode double-effect) is never doubled.
@@ -80,7 +113,12 @@ export const useChat = create<ChatState>((set, get) => ({
       if (prev) {
         await ipc.invoke('sessions:end', { sessionId: prev }).catch(() => undefined);
       }
-      const view = await ipc.invoke('sessions:start', { projectId, model });
+      const { model, effort } = get();
+      const view = await ipc.invoke('sessions:start', {
+        projectId,
+        model,
+        effort: effort ?? undefined,
+      });
       set({
         sessionId: view.id,
         projectId,
@@ -89,11 +127,36 @@ export const useChat = create<ChatState>((set, get) => ({
         busy: false,
         usage: { ...ZERO_USAGE },
         error: null,
+        // Record what this session ACTUALLY runs — if the picker moved while
+        // the start was in flight, configure() reconciles against these.
+        sessionModel: model,
+        sessionEffort: effort,
       });
     } catch (err) {
       set({ sessionId: null, projectId, error: String(err) });
     } finally {
       set({ starting: false });
+    }
+  },
+
+  configure: async (model, effort) => {
+    savePrefs(model, effort);
+    set({ model, effort });
+    // Wait out any in-flight start so the check below sees the real session —
+    // otherwise a mid-spawn picker change would be silently dropped and the
+    // conversation would run (and bill) on a model the header doesn't show.
+    while (get().starting) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const s = get();
+    const matches = s.sessionModel === s.model && s.sessionEffort === s.effort;
+    // Before the first message the session is just an idle process — swap it
+    // for one on the new config. After that, the picker is disabled in the UI.
+    if (s.projectId && s.messages.length === 0 && !matches) {
+      const prev = s.sessionId;
+      set({ sessionId: null });
+      if (prev) await ipc.invoke('sessions:end', { sessionId: prev }).catch(() => undefined);
+      await get().start(s.projectId);
     }
   },
 

@@ -15,13 +15,15 @@
     "smoke": "electron-vite build && electron . --smoke"
   },
   "dependencies": {
+    "@contrail/agent-runtime": "workspace:*",
     "@contrail/engine": "workspace:*",
     "@contrail/shared": "workspace:*",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "zustand": "^5.0.15",
-    "@contrail/agent-runtime": "workspace:*",
-    "zod": "^3.24.0"
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "zod": "^3.24.0",
+    "zustand": "^5.0.15"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",

@@ -9,6 +9,19 @@ export type OrgType = 'production' | 'sandbox' | 'developer' | 'scratch' | strin
 
 export type EnvRole = 'dev' | 'qa' | 'uat' | 'prod' | 'other';
 
+/** Reasoning-effort levels (mirrors the Agent SDK; models without effort support ignore it). */
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+/** The chat model catalog: id → display label + per-session budget cap. */
+export const CHAT_MODELS = {
+  'claude-haiku-4-5': { label: 'Haiku 4.5', maxBudgetUsd: 0.5 },
+  'claude-sonnet-5': { label: 'Sonnet 5', maxBudgetUsd: 2 },
+  'claude-opus-5': { label: 'Opus 5', maxBudgetUsd: 5 },
+  'claude-fable-5': { label: 'Fable 5', maxBudgetUsd: 5 },
+} as const;
+
+export type ChatModelId = keyof typeof CHAT_MODELS;
+
 export interface GrantSetView {
   metadata_read: boolean;
   metadata_write: boolean;

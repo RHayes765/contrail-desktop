@@ -69,6 +69,7 @@ export function buildSessionOptions(
   return {
     cwd: ctx.cwd,
     model: ctx.model,
+    ...(ctx.effort ? { effort: ctx.effort } : {}),
     systemPrompt: buildSystemPrompt(ctx),
     tools: [],
     settingSources: [],

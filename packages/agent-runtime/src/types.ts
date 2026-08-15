@@ -22,6 +22,8 @@ export interface SessionContext {
   };
   bindings: BindingWithGrants[];
   model: string;
+  /** Reasoning effort; models without effort support silently ignore it. */
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   maxTurns: number;
   maxBudgetUsd: number;
   /** Per-session scratch working directory (never the user's real folders). */
