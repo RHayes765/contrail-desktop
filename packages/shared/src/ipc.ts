@@ -7,6 +7,7 @@ import type {
   ConnectionView,
   ConnectOutcomeView,
   CustomMcpServerView,
+  DeployRequestView,
   DiffScopeView,
   McpServerTestView,
   EffortLevel,
@@ -163,6 +164,11 @@ export const REQUEST_SCHEMAS = {
   'mcp:servers:remove': z.object({ id: ID }),
   'mcp:servers:test': z.object({ id: ID }),
   'mcp:servers:authorize': z.object({ id: ID }),
+
+  'deploys:list': z.object({ connectionId: ID.optional() }),
+  'deploys:get': z.object({ id: ID }),
+  'deploys:approve': z.object({ id: ID, comment: z.string().max(1000).optional() }),
+  'deploys:reject': z.object({ id: ID, comment: z.string().max(1000).optional() }),
 } as const;
 
 export type Channel = keyof typeof REQUEST_SCHEMAS;
@@ -298,6 +304,11 @@ export interface Contracts {
     req: { id: string };
     res: { ok: boolean; detail: string; test: McpServerTestView | null };
   };
+
+  'deploys:list': { req: { connectionId?: string }; res: DeployRequestView[] };
+  'deploys:get': { req: { id: string }; res: DeployRequestView };
+  'deploys:approve': { req: { id: string; comment?: string }; res: DeployRequestView };
+  'deploys:reject': { req: { id: string; comment?: string }; res: DeployRequestView };
 }
 
 // Compile-time check: every contract has a schema and vice versa.
@@ -322,6 +333,8 @@ export interface PushEvents {
   'session:event': { sessionId: string; event: ChatEvent };
   /** A session started or ended — session lists for this project are stale. */
   'sessions:changed': { projectId: string };
+  /** A deploy request appeared or changed state — Deploys screens are stale. */
+  'deploys:changed': { requestId: string | null };
 }
 
 export type PushChannel = keyof PushEvents;

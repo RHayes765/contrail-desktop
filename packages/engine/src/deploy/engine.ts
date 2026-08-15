@@ -163,6 +163,10 @@ export class DeployEngine {
       }
     }
 
+    // v2: check_rules hook — a project constitution evaluates here, after
+    // changes/destructive/blast/permCoverage exist and BEFORE the org
+    // round-trip, so a locally-refusable deploy never burns a validation.
+
     if (job) job.progress = 'validating with Salesforce (checkOnly)';
     const soap = new MetadataSoapClient(this.tokenMgr, conn, this.config.salesforce.apiVersion);
     const validationId = await soap.deploy(built.zip, {
@@ -928,8 +932,20 @@ export class DeployEngine {
  */
 function approvalForAgent(
   kind: 'deploy' | 'dml',
-  approval: { opened: boolean; url: string | null },
+  approval: { opened: boolean; url: string | null; mode?: 'page' | 'native' },
 ): Record<string, unknown> {
+  if (approval.mode === 'native') {
+    // Desktop app: the human approves in the Deploy Review screen — there
+    // is no page and no code for the agent to ask about.
+    return {
+      opened: true,
+      mode: 'native',
+      note:
+        `The user sees this ${kind === 'deploy' ? 'deploy' : 'data change'} in the app's ` +
+        'Deploy Review screen. Call the execute tool WITHOUT a confirmation code — it will ' +
+        'wait for the user’s decision and return the outcome. Do not ask the user for a code.',
+    };
+  }
   if (approval.opened) return { opened: true };
   log(
     'warn',

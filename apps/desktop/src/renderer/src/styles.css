@@ -1106,3 +1106,95 @@ button.danger {
 .flow-legend-swatch.changed { border: 2px dashed var(--env-scratch); }
 .flow-legend-swatch.added { border: 2px solid var(--env-sandbox); }
 .flow-legend-swatch.removed { border: 2px solid var(--env-production); }
+
+/* ── Deploy Review (S9) ─────────────────────────────────────────────── */
+
+.deploy-target {
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin-bottom: 14px;
+  border: 2px solid;
+}
+.deploy-target.env-prod {
+  background: rgba(214, 57, 57, 0.12);
+  border-color: #d63939;
+}
+.deploy-target.env-dev {
+  background: rgba(46, 132, 74, 0.12);
+  border-color: #2e844a;
+}
+.deploy-target.env-other {
+  background: rgba(221, 122, 1, 0.12);
+  border-color: #dd7a01;
+}
+.deploy-target-alias {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+.deploy-target-org {
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+.deploy-section {
+  margin: 14px 0;
+  padding: 10px 14px;
+  border: 1px solid var(--border, #2a3138);
+  border-radius: 8px;
+}
+.deploy-section h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-dim);
+}
+.deploy-destructive {
+  border-color: #d63939;
+  background: rgba(214, 57, 57, 0.07);
+}
+.deploy-destructive h3 {
+  color: #ff8080;
+}
+.deploy-row {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12.5px;
+  padding: 3px 0;
+  overflow-wrap: anywhere;
+}
+.deploy-warning {
+  color: #e8a33d;
+  font-size: 12px;
+  padding-left: 14px;
+}
+.deploy-result {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 13px;
+  padding: 2px 0;
+}
+.deploy-result.bad {
+  color: #ff8080;
+}
+
+.approval-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 8px 16px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  border: 2px solid #2e844a;
+  background: rgba(46, 132, 74, 0.12);
+}
+.approval-banner.env-prod {
+  border-color: #d63939;
+  background: rgba(214, 57, 57, 0.12);
+}
+
+.env-badge.env-prod { background: var(--env-production); }
+.env-badge.env-dev { background: var(--env-sandbox); }
+.env-badge.env-other { background: var(--env-other); }

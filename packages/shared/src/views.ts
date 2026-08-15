@@ -364,6 +364,20 @@ export type ChatEvent =
       server: string;
       status: 'browser_opened' | 'completed' | 'declined';
     }
+  /** A write awaits the human's decision in Deploy Review. Never carries a code. */
+  | {
+      type: 'approval_required';
+      requestId: string;
+      kind: 'deploy' | 'dml';
+      connection: string;
+      orgType: string;
+    }
+  /** The human decided; the agent's held call resolved with the outcome. */
+  | {
+      type: 'approval_resolved';
+      requestId: string;
+      outcome: 'executed' | 'execution_failed' | 'rejected' | 'timeout';
+    }
   /** Connection state of external MCP servers (surfaced so failures are never silent). */
   | {
       type: 'mcp_status';
@@ -493,4 +507,59 @@ export interface McpServerTestView {
   status: 'connected' | 'needs_auth' | 'failed';
   detail: string | null;
   tools: string[];
+}
+
+// ── deploys & native approval (S9) ───────────────────────────────────────
+
+/** One component in a deploy, structured (from the validation summary). */
+export interface DeployChangeView {
+  type: string;
+  apiName: string;
+  change: 'add' | 'modify' | 'unchanged_content' | 'delete';
+  warnings: string[];
+}
+
+/**
+ * A deploy/DML request as the Deploy Review screen sees it. CODE-FREE BY
+ * CONSTRUCTION: the confirmation code never appears in any view — approval
+ * happens by renderer decision, and main alone reads the code from the row.
+ */
+export interface DeployRequestView {
+  id: string;
+  kind: 'deploy' | 'dml';
+  connectionId: string;
+  alias: string;
+  orgName: string | null;
+  orgType: string;
+  instanceUrl: string;
+  /** Legacy engine state machine (shared with the v5 plugin). */
+  status:
+    | 'validated'
+    | 'executing'
+    | 'executed'
+    | 'expired'
+    | 'superseded'
+    | 'execution_failed'
+    | 'locked';
+  /** Native-approval lifecycle: awaiting_approval | approved | rejected | null (plugin rows). */
+  desktopState: string | null;
+  origin: string | null;
+  sessionId: string | null;
+  createdAt: string;
+  expiresAt: string;
+  executedAt: string | null;
+  approvedAt: string | null;
+  approvedComment: string | null;
+  /** Structured components (parsed from the stored validation summary). */
+  changes: DeployChangeView[];
+  destructive: DeployChangeView[];
+  /** Flattened display rows from the approval view (DML previews use these). */
+  changeRows: Array<{ label: string; warnings: string[] }>;
+  destructiveRows: Array<{ label: string; warnings: string[] }>;
+  /** Validation/test result lines (label/value, bad = red). */
+  results: Array<{ label: string; value: string; bad?: boolean }>;
+  blast: string[];
+  warnings: string[];
+  /** Human summary of the terminal outcome; null while pending. */
+  resultSummary: string | null;
 }

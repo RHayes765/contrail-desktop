@@ -18,7 +18,7 @@ import type {
   ServerToggleRecord,
 } from './types.js';
 
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 /**
  * Local SQLite store: connection metadata and the audit log (P0.1); the
@@ -302,6 +302,13 @@ export class ContrailDb {
         // v8 (desktop-owned): per-run sync duration — the basis for the
         // "typically takes ~Xm" estimate on the Connections screen.
         this.db.exec(`ALTER TABLE metadata_snapshots ADD COLUMN duration_ms INTEGER;`);
+      }
+      if (current < 9) {
+        // v9 (nullable column on the shared table — freeze-contract legal,
+        // same as the v6 additions): the CODE-FREE review model the native
+        // approval presenter persists for the Deploy Review screen. The
+        // confirmation code NEVER appears in this JSON.
+        this.db.exec(`ALTER TABLE deploy_requests ADD COLUMN review_json TEXT;`);
       }
       this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     });
@@ -1334,6 +1341,13 @@ export class ContrailDb {
       summaryJson: input.summaryJson,
       validationId: input.validationId ?? null,
       resultJson: null,
+      sessionId: null,
+      sourceConnectionId: null,
+      approvedAt: null,
+      approvedComment: null,
+      desktopState: null,
+      origin: null,
+      reviewJson: null,
     };
     this.db
       .prepare(
@@ -1385,6 +1399,68 @@ export class ContrailDb {
       )
       .get(connectionId, kind, code.trim());
     return row ? rowToDeployRequest(row as DeployRequestRow) : null;
+  }
+
+  /** Single request by id — the Deploy Review screen's loader. */
+  getDeployRequest(id: string): DeployRequestRecord | null {
+    const row = this.db.prepare(`SELECT * FROM deploy_requests WHERE id = ?`).get(id) as
+      | DeployRequestRow
+      | undefined;
+    return row ? rowToDeployRequest(row) : null;
+  }
+
+  /** Newest-first request list for the Deploys screen. */
+  listDeployRequests(opts?: { connectionId?: string; limit?: number }): DeployRequestRecord[] {
+    const limit = Math.min(Math.max(opts?.limit ?? 50, 1), 200);
+    const rows = (
+      opts?.connectionId
+        ? this.db
+            .prepare(
+              `SELECT * FROM deploy_requests WHERE connection_id = ? ORDER BY created_at DESC LIMIT ?`,
+            )
+            .all(opts.connectionId, limit)
+        : this.db
+            .prepare(`SELECT * FROM deploy_requests ORDER BY created_at DESC LIMIT ?`)
+            .all(limit)
+    ) as DeployRequestRow[];
+    return rows.map(rowToDeployRequest);
+  }
+
+  /** Presenter-time stamps: who asked, from where, and the code-free review model. */
+  setDeployRequestDesktopFields(
+    id: string,
+    fields: {
+      sessionId?: string | null;
+      origin?: string;
+      desktopState?: string;
+      reviewJson?: string;
+    },
+  ): void {
+    const current = this.getDeployRequest(id);
+    if (!current) return;
+    this.db
+      .prepare(
+        `UPDATE deploy_requests SET session_id = ?, origin = ?, desktop_state = ?, review_json = ? WHERE id = ?`,
+      )
+      .run(
+        fields.sessionId !== undefined ? fields.sessionId : current.sessionId,
+        fields.origin ?? current.origin,
+        fields.desktopState ?? current.desktopState,
+        fields.reviewJson ?? current.reviewJson,
+        id,
+      );
+  }
+
+  /**
+   * The human decision. Approval only marks the row — execution still goes
+   * through claimRequestForExecution, so the single-use guarantee is intact.
+   */
+  recordDeployDecision(id: string, decision: 'approved' | 'rejected', comment: string | null): void {
+    this.db
+      .prepare(
+        `UPDATE deploy_requests SET desktop_state = ?, approved_at = ?, approved_comment = ? WHERE id = ?`,
+      )
+      .run(decision, new Date().toISOString(), comment, id);
   }
 
   /**
@@ -1693,6 +1769,13 @@ interface DeployRequestRow {
   summary_json: string;
   validation_id: string | null;
   result_json: string | null;
+  session_id?: string | null;
+  source_connection_id?: string | null;
+  approved_at?: string | null;
+  approved_comment?: string | null;
+  desktop_state?: string | null;
+  origin?: string | null;
+  review_json?: string | null;
 }
 
 function rowToDeployRequest(row: DeployRequestRow): DeployRequestRecord {
@@ -1711,6 +1794,13 @@ function rowToDeployRequest(row: DeployRequestRow): DeployRequestRecord {
     summaryJson: row.summary_json,
     validationId: row.validation_id,
     resultJson: row.result_json,
+    sessionId: row.session_id ?? null,
+    sourceConnectionId: row.source_connection_id ?? null,
+    approvedAt: row.approved_at ?? null,
+    approvedComment: row.approved_comment ?? null,
+    desktopState: row.desktop_state ?? null,
+    origin: row.origin ?? null,
+    reviewJson: row.review_json ?? null,
   };
 }
 

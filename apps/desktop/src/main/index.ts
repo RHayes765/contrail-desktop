@@ -13,6 +13,7 @@ import { SnapshotService, SnapshotWorkerBridge } from './services/snapshots.js';
 import { DiffService, MetadataService } from './services/metadata.js';
 import { SummaryService } from './services/summaries.js';
 import { McpConfigService, resolveSessionMcp } from './services/mcpConfig.js';
+import { DeployService, type DeployAlert } from './services/deploys.js';
 
 /** The snapshot CPU worker bundle (built as a second main entry). */
 function snapshotWorkerPath(): string {
@@ -83,6 +84,7 @@ const mcpAuthDemoArg = process.argv.find((a) => a.startsWith('--mcp-auth-demo=')
 const MCP_AUTH_DEMO = mcpAuthDemoArg ? mcpAuthDemoArg.slice('--mcp-auth-demo='.length) : null;
 const mcpCallDiagArg = process.argv.find((a) => a.startsWith('--mcp-call-diag='));
 const MCP_CALL_DIAG = mcpCallDiagArg ? mcpCallDiagArg.slice('--mcp-call-diag='.length) : null;
+const APPROVE_DEMO = process.argv.includes('--approve-demo');
 
 const HEADLESS =
   SMOKE ||
@@ -93,7 +95,8 @@ const HEADLESS =
   NARRATE_DEMO !== null ||
   MCP_DEMO ||
   MCP_AUTH_DEMO !== null ||
-  MCP_CALL_DIAG !== null;
+  MCP_CALL_DIAG !== null ||
+  APPROVE_DEMO;
 
 function smokeWrite(payload: unknown): void {
   const text = JSON.stringify(payload, null, 2) + '\n';
@@ -640,6 +643,108 @@ async function runMcpCallDiag(b: Bootstrap, serverName: string): Promise<void> {
 }
 
 /**
+ * Session 9 live demo: a REAL agent-driven deploy to dev-org through the
+ * NATIVE approval gate. The agent validates + calls execute with no code;
+ * the executor holds the call; this harness plays the human (approves via
+ * DeployService, exactly the IPC path the renderer uses); the held call
+ * resolves and the deploy actually lands in dev-org. The transcript of
+ * every event is asserted CODE-FREE.
+ */
+async function runApproveDemo(b: Bootstrap): Promise<void> {
+  const projects = new ProjectService(b.deps);
+  const devOrg = b.deps.db.resolveConnection('dev-org');
+  if (!devOrg) throw new Error('dev-org connection not found');
+  const project =
+    b.deps.db.findProjectByName('Dev Sandbox') ??
+    b.deps.db.createProject({ name: 'Dev Sandbox' });
+  b.deps.db.removeProjectBinding(project.id, devOrg.id);
+  b.deps.db.addProjectBinding(project.id, devOrg.id, 'dev');
+
+  const events: Array<{ sessionId: string; event: ChatEvent }> = [];
+  const errors: string[] = [];
+  let approvalRequestId: string | null = null;
+  let turnResolve: (() => void) | null = null;
+  const deployServiceRef: { current: DeployService | null } = { current: null };
+  const push = <C extends PushChannel>(channel: C, payload: PushEvents[C]): void => {
+    if (channel === 'session:event') {
+      const p = payload as PushEvents['session:event'];
+      events.push(p);
+      if (p.event.type === 'error') errors.push(p.event.message);
+      if (p.event.type === 'approval_required' && !approvalRequestId) {
+        approvalRequestId = p.event.requestId;
+        // The human decides — after a beat, approve through the SAME path
+        // the renderer's Approve button uses.
+        setTimeout(() => {
+          void deployServiceRef.current
+            ?.approve(p.event.type === 'approval_required' ? p.event.requestId : '', 'S9 demo approval')
+            .catch((err) => errors.push(`approve failed: ${String(err)}`));
+        }, 1_500);
+      }
+      if ((p.event.type === 'done' || p.event.type === 'session_ended') && turnResolve) {
+        const r = turnResolve;
+        turnResolve = null;
+        r();
+      }
+    }
+  };
+
+  const manager = new AgentSessionManager(b.deps, projects, runtimeChildPath(), push);
+  sessionManager = manager;
+  const deployService = new DeployService(b.deps, push);
+  deployServiceRef.current = deployService;
+  boot!.approvals.attach(deployService);
+  deployService.attachSessions(manager);
+  manager.setDeployService(deployService);
+
+  const view = await manager.start(project.id, 'claude-haiku-4-5');
+  const turn = new Promise<void>((resolve, reject) => {
+    turnResolve = resolve;
+    setTimeout(() => reject(new Error('approve demo timed out')), 420_000);
+  });
+  manager.send(
+    view.id,
+    'Deploy a CustomLabel named Contrail_S9_Demo with value "native approval works" to dev-org: ' +
+      'call validate_deploy with that one component, then call execute_deploy (no confirmation code — ' +
+      'approval happens on my side). Report the outcome. Do not ask me questions.',
+  );
+  await turn;
+
+  // The approve() execution loop may still be polling Salesforce — wait for
+  // the request to reach a terminal state before sampling (max 3 min).
+  if (approvalRequestId) {
+    const deadline = Date.now() + 180_000;
+    for (;;) {
+      const r = b.deps.db.getDeployRequest(approvalRequestId);
+      if (!r || r.status === 'executed' || r.status === 'execution_failed') break;
+      if (Date.now() > deadline) break;
+      await new Promise((res) => setTimeout(res, 2_000));
+    }
+  }
+  await manager.end(view.id);
+
+  const texts = events
+    .filter((e) => e.event.type === 'text')
+    .map((e) => (e.event as { text: string }).text);
+  const req = approvalRequestId ? b.deps.db.getDeployRequest(approvalRequestId) : null;
+  const eventsJson = JSON.stringify(events);
+  smokeWrite({
+    ok:
+      errors.length === 0 &&
+      approvalRequestId !== null &&
+      req?.status === 'executed' &&
+      req?.desktopState === 'approved',
+    errors,
+    approval_card_seen: approvalRequestId !== null,
+    request_status: req?.status ?? null,
+    desktop_state: req?.desktopState ?? null,
+    approved_comment: req?.approvedComment ?? null,
+    resolved_event_seen: events.some((e) => e.event.type === 'approval_resolved'),
+    events_code_free: !/\b[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}\b/.test(eventsJson),
+    final_texts: texts.slice(-2),
+  });
+}
+
+/**
  * Session 5 demo: a REAL snapshot sync of dev-org through the worker seam
  * (live Salesforce retrieve), then a chat session answering a dependency
  * question FROM THE LOCAL GRAPH (get_dependencies — no further org reads
@@ -775,6 +880,17 @@ app.whenReady().then(async () => {
   if (MCP_CALL_DIAG) {
     try {
       await runMcpCallDiag(boot, MCP_CALL_DIAG);
+      app.exit(0);
+    } catch (err) {
+      smokeWrite({ ok: false, error: String(err) });
+      app.exit(1);
+    }
+    return;
+  }
+
+  if (APPROVE_DEMO) {
+    try {
+      await runApproveDemo(boot);
       app.exit(0);
     } catch (err) {
       smokeWrite({ ok: false, error: String(err) });
@@ -1040,6 +1156,40 @@ app.whenReady().then(async () => {
     alertUser,
   );
 
+  // Native approval wiring: presenter (created at bootstrap, inside the
+  // engine) → DeployService → sessions. Approvals surface as an OS alert
+  // whenever the window isn't focused — a deploy waiting on a human is the
+  // single most important notification in the app.
+  const deployService = new DeployService(boot.deps, push, (info: DeployAlert) => {
+    const win = mainWindow;
+    if (win && !win.isDestroyed() && !win.isFocused()) {
+      win.flashFrame(true);
+      if (Notification.isSupported()) {
+        const n = new Notification({
+          title: `Approval needed — ${info.connection} (${info.orgType})`,
+          body: `A ${info.kind === 'deploy' ? 'metadata deploy' : 'data change'} is waiting in Deploy Review.`,
+        });
+        n.on('click', () => {
+          const w = mainWindow;
+          if (!w || w.isDestroyed()) return;
+          if (w.isMinimized()) w.restore();
+          w.show();
+          w.focus();
+        });
+        n.show();
+      }
+    }
+  });
+  boot.approvals.attach(deployService);
+  deployService.attachSessions(sessionManager);
+  sessionManager.setDeployService(deployService);
+  // A previous run may have died mid-execution — never leave a row stuck
+  // "executing" with no way forward.
+  const stranded = deployService.reconcileStrandedExecutions();
+  if (stranded > 0) {
+    log('warn', 'closed deploy executions stranded by a previous run', { count: stranded });
+  }
+
   const services: MainServices = {
     connections,
     projects,
@@ -1048,6 +1198,7 @@ app.whenReady().then(async () => {
     metadata,
     diff,
     summaries: new SummaryService(boot.deps, metadata, diff),
+    deploys: deployService,
     mcp: new McpConfigService(boot.deps, async (serverId, scopedProjectId) => {
       // External tools can't be gated per call — revocation ends the
       // live sessions that resolved the server (see McpConfigService).

@@ -8,6 +8,7 @@ import { SnapshotService } from '../services/snapshots.js';
 import { DiffService, MetadataService } from '../services/metadata.js';
 import { SummaryService } from '../services/summaries.js';
 import { McpConfigService } from '../services/mcpConfig.js';
+import { DeployService } from '../services/deploys.js';
 
 /**
  * The complete handler map for the typed IPC registry. Handlers are thin:
@@ -24,12 +25,14 @@ export interface MainServices {
   diff: DiffService;
   summaries: SummaryService;
   mcp: McpConfigService;
+  deploys: DeployService;
   /** The window whose native dialogs (file picker) we parent. */
   getWindow: () => BrowserWindow | null;
 }
 
 export function makeHandlers(health: HealthView, services: MainServices) {
-  const { connections, projects, sessions, snapshots, metadata, diff, summaries, mcp } = services;
+  const { connections, projects, sessions, snapshots, metadata, diff, summaries, mcp, deploys } =
+    services;
   return {
     'app:health': (deps: EngineDeps): HealthView => ({
       ...health,
@@ -181,5 +184,15 @@ export function makeHandlers(health: HealthView, services: MainServices) {
     'mcp:servers:test': (_deps: EngineDeps, req: { id: string }) => mcp.testServer(req.id),
     'mcp:servers:authorize': (_deps: EngineDeps, req: { id: string }) =>
       mcp.authorizeServer(req.id),
+
+    'deploys:list': (_deps: EngineDeps, req: { connectionId?: string }) =>
+      deploys.list(req.connectionId),
+    'deploys:get': (_deps: EngineDeps, req: { id: string }) => deploys.get(req.id),
+    // The ONLY execute path in the app: renderer decision → main reads the
+    // code from the row → engine claim machinery. The runtime never sees it.
+    'deploys:approve': (_deps: EngineDeps, req: { id: string; comment?: string }) =>
+      deploys.approve(req.id, req.comment),
+    'deploys:reject': (_deps: EngineDeps, req: { id: string; comment?: string }) =>
+      deploys.reject(req.id, req.comment),
   };
 }

@@ -83,6 +83,17 @@ export interface DeployRequestRecord {
   validationId: string | null;
   /** Execution outcome JSON, set once terminal, so late polls still get the result. */
   resultJson: string | null;
+  // ── desktop-owned columns (v6/v9); null on rows the v5 plugin wrote ──────
+  sessionId: string | null;
+  sourceConnectionId: string | null;
+  approvedAt: string | null;
+  approvedComment: string | null;
+  /** Native-approval lifecycle: awaiting_approval | approved | rejected. */
+  desktopState: string | null;
+  /** 'desktop' for rows created through the app; null = plugin/legacy. */
+  origin: string | null;
+  /** CODE-FREE review model persisted by the native presenter. */
+  reviewJson: string | null;
 }
 
 export interface AuditEvent {

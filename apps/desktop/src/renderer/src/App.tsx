@@ -11,6 +11,7 @@ import { SessionViewerScreen } from './screens/SessionViewer.js';
 import { MetadataScreen } from './screens/Metadata.js';
 import { DiffScreen } from './screens/Diff.js';
 import { ConnectorsScreen } from './screens/Connectors.js';
+import { DeploysScreen } from './screens/Deploys.js';
 
 export function App() {
   const [health, setHealth] = useState<HealthView | null>(null);
@@ -61,6 +62,12 @@ export function App() {
           Diff
         </button>
         <button
+          className={screen === 'deploys' ? 'active' : ''}
+          onClick={() => useNav.setState({ screen: 'deploys', sessionId: null, deployId: null })}
+        >
+          Deploys
+        </button>
+        <button
           className={screen === 'connectors' ? 'active' : ''}
           onClick={() => useNav.setState({ screen: 'connectors', sessionId: null })}
         >
@@ -86,6 +93,8 @@ export function App() {
           <DiffScreen />
         ) : screen === 'connectors' ? (
           <ConnectorsScreen />
+        ) : screen === 'deploys' ? (
+          <DeploysScreen />
         ) : (
           <ProjectsScreen />
         )}

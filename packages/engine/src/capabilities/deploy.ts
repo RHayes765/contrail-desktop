@@ -171,22 +171,36 @@ export const deployCapabilities: Capability[] = [
     name: 'execute_deploy',
     title: 'Execute a validated deploy',
     description:
-      'Execute the deploy that the given confirmation code approves. The code exists only ' +
-      'on the human\'s approval page: never guess, never fabricate, never reuse one — only ' +
-      'pass a code the human just gave you. Codes are single-use, expire in ~1h, and are ' +
-      'invalidated by any new validation on the same connection.',
+      'Execute the most recently validated deploy. Approval flow depends on the surface: in ' +
+      'the desktop app, call WITHOUT a confirmation code — the user approves in Deploy Review ' +
+      'and this call waits for their decision. With the localhost approval page, pass the code ' +
+      'the human read from the page. Never guess, fabricate, or reuse a code; codes are ' +
+      'single-use, expire in ~1h, and any new validation on the connection replaces them.',
     grant: 'metadata_write',
     writeClass: true,
     inputSchema: {
       connection: z.string().describe('Target connection alias (or id).'),
       confirmation_code: z
         .string()
-        .describe('The code the human read from the approval page (format XXXX-XXXX).'),
+        .optional()
+        .describe(
+          'Only when the human read a code from the approval page (format XXXX-XXXX). ' +
+            'Omit in the desktop app — approval is native.',
+        ),
     },
     handler: (deps, rawArgs) =>
       guarded(async () => {
-        const args = rawArgs as { connection: string; confirmation_code: string };
+        const args = rawArgs as { connection: string; confirmation_code?: string };
         const conn = requireConnection(deps, args.connection, 'execute_deploy');
+        if (!args.confirmation_code) {
+          // Codeless calls are the DESKTOP's native-approval path, which the
+          // desktop executor intercepts BEFORE the engine. Reaching here
+          // means there is nothing pending to approve.
+          return fail(
+            'No confirmation code and no pending native approval. Validate first; then in the ' +
+              'desktop app call again without a code, or with the approval page pass its code.',
+          );
+        }
         const outcome = await deps.deploys.executeDeploy(conn, args.confirmation_code);
         switch (outcome.status) {
           case 'in_progress':
@@ -267,21 +281,32 @@ export const deployCapabilities: Capability[] = [
     name: 'dml_execute',
     title: 'Execute a proposed data change',
     description:
-      'Execute the DML that the given confirmation code approves. The code exists only on ' +
-      'the human\'s approval page — only pass a code the human just gave you. Single-use, ' +
-      '~1h expiry, invalidated by a new proposal on the same connection.',
+      'Execute the most recently proposed data change. In the desktop app, call WITHOUT a ' +
+      'confirmation code — the user approves in Deploy Review and this call waits for their ' +
+      'decision. With the localhost approval page, pass the code the human read from the ' +
+      'page. Single-use, ~1h expiry, invalidated by a new proposal on the same connection.',
     grant: 'data_write',
     writeClass: true,
     inputSchema: {
       connection: z.string().describe('Target connection alias (or id).'),
       confirmation_code: z
         .string()
-        .describe('The code the human read from the approval page (format XXXX-XXXX).'),
+        .optional()
+        .describe(
+          'Only when the human read a code from the approval page (format XXXX-XXXX). ' +
+            'Omit in the desktop app — approval is native.',
+        ),
     },
     handler: (deps, rawArgs) =>
       guarded(async () => {
-        const args = rawArgs as { connection: string; confirmation_code: string };
+        const args = rawArgs as { connection: string; confirmation_code?: string };
         const conn = requireConnection(deps, args.connection, 'dml_execute');
+        if (!args.confirmation_code) {
+          return fail(
+            'No confirmation code and no pending native approval. Propose first; then in the ' +
+              'desktop app call again without a code, or with the approval page pass its code.',
+          );
+        }
         const result = await deps.deploys.executeDml(conn, args.confirmation_code);
         return ok(result);
       }),

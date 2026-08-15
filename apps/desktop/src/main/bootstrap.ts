@@ -7,6 +7,7 @@ import {
 } from '@contrail/engine';
 import type { HealthView } from '@contrail/shared';
 import { openBrowserViaShell } from './services/connections.js';
+import { NativeApprovalPresenter } from './services/deploys.js';
 
 /**
  * Main-process bootstrap: verify the two native modules load under Electron's
@@ -23,6 +24,8 @@ import { openBrowserViaShell } from './services/connections.js';
 export interface Bootstrap {
   deps: EngineDeps;
   health: HealthView;
+  /** The native approval presenter — index.ts attaches the DeployService. */
+  approvals: NativeApprovalPresenter;
 }
 
 export function bootstrap(
@@ -40,10 +43,13 @@ export function bootstrap(
     );
   }
 
-  // Electron owns the browser opener; everything else is production wiring.
+  // Electron owns the browser opener; approvals render NATIVELY (the
+  // localhost approval page never appears in the desktop app).
+  const approvals = new NativeApprovalPresenter();
   const deps = createEngineDeps({
     flowOps: { openBrowser: openBrowserViaShell },
     snapshotWork: overrides?.snapshotWork,
+    approvals,
   });
   const schemaVersion = deps.db.schemaVersion();
   const connectionCount = deps.db.listConnections().length;
@@ -65,5 +71,5 @@ export function bootstrap(
     nativeModules: { betterSqlite3: sqlite, keyring },
     connectionCount,
   };
-  return { deps, health };
+  return { deps, health, approvals };
 }

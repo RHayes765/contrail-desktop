@@ -26,8 +26,8 @@ afterEach(() => {
 });
 
 describe('schema v6', () => {
-  it('fresh databases land on user_version 8', () => {
-    expect(db.schemaVersion()).toBe(8);
+  it('fresh databases land on user_version 9', () => {
+    expect(db.schemaVersion()).toBe(9);
   });
 
   it('creates every desktop table', () => {
@@ -109,7 +109,7 @@ describe('schema v6', () => {
   it('reopening an already-v6 database is a no-op migration', () => {
     db.close();
     const again = new ContrailDb(dbPath);
-    expect(again.schemaVersion()).toBe(8);
+    expect(again.schemaVersion()).toBe(9);
     again.close();
     db = new ContrailDb(dbPath); // for afterEach
   });

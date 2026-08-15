@@ -22,6 +22,7 @@ export function ChatScreen({ projectId }: { projectId: string }) {
     usage,
     error,
     notice,
+    pendingApproval,
     model,
     effort,
     sessionModel,
@@ -153,6 +154,30 @@ export function ChatScreen({ projectId }: { projectId: string }) {
         ))}
       </div>
 
+      {pendingApproval && (
+        <div
+          className={`approval-banner env-${pendingApproval.orgType === 'production' ? 'prod' : 'dev'}`}
+        >
+          <span>
+            The agent wants to{' '}
+            {pendingApproval.kind === 'deploy' ? 'deploy metadata to' : 'change data on'}{' '}
+            <strong>{pendingApproval.connection}</strong> ({pendingApproval.orgType}). Nothing runs
+            until you decide.
+          </span>
+          <button
+            className="primary"
+            onClick={() => useNav.getState().openDeploys(pendingApproval.requestId)}
+          >
+            Review &amp; approve →
+          </button>
+          <button
+            title="Dismiss (the request stays on the Deploys screen)"
+            onClick={() => useChat.setState({ pendingApproval: null })}
+          >
+            ✕
+          </button>
+        </div>
+      )}
       {notice && (
         <div
           className="notice"

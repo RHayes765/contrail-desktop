@@ -24,6 +24,7 @@ import type {
 } from '@contrail/agent-runtime';
 import { resolveSessionMcp } from './mcpConfig.js';
 import { refreshMcpTokenIfExpired } from './mcpOauth.js';
+import type { DeployService } from './deploys.js';
 import {
   CHAT_MODELS,
   type ChatEvent,
@@ -83,6 +84,9 @@ const PROJECT_TOOL_HANDLERS = new Set([
 
 /** Argument keys that name a target connection, per capability shape. */
 const CONNECTION_ARG_KEYS = ['connection', 'connection_a', 'connection_b'] as const;
+
+/** Capabilities whose engine flow presents an approval (native presenter). */
+const APPROVAL_PRESENTING = new Set(['validate_deploy', 'dml_propose', 'deactivate_flow']);
 
 export interface SessionSpec {
   project: { id: string; name: string; description: string | null; instructions: string | null };
@@ -201,6 +205,8 @@ export class AgentSessionRun {
     private readonly spec: SessionSpec,
     private readonly sessionId: string,
     private readonly silo: ProjectService,
+    /** Late-bound native-approval service; null in tests and legacy paths. */
+    private readonly deploysRef: () => DeployService | null = () => null,
   ) {}
 
   /**
@@ -315,10 +321,40 @@ export class AgentSessionRun {
       return refuse('In a project session, get_audit_log requires a connection argument.');
     }
 
+    // Native approval interception: an agent write-execute WITHOUT a
+    // human-typed code (the vault is empty) holds on the pending validated
+    // request until the human decides in Deploy Review. With a vaulted code
+    // the classic path runs — the human already spoke the code in chat.
+    const realCode =
+      typeof a.confirmation_code === 'string' && a.confirmation_code.trim().length > 0;
+    if ((name === 'execute_deploy' || name === 'dml_execute') && !realCode &&
+      typeof a.connection === 'string'
+    ) {
+      const held = this.deploysRef()?.interceptAgentExecute(
+        this.sessionId,
+        name === 'execute_deploy' ? 'deploy' : 'dml',
+        a.connection,
+      );
+      if (held) {
+        this.capabilityCalls.push({ name, refused: false });
+        return held;
+      }
+    }
+
     this.capabilityCalls.push({ name, refused: false });
-    // Layer-2 grant gate still runs inside the handler (assertGrant) —
-    // the silo check above is in ADDITION to it, not instead of it.
-    return invokeCapability(this.deps, name, a);
+    // Approval-presenting calls pair the presentation with THIS session so
+    // the approval card lands in the right chat.
+    const presents = APPROVAL_PRESENTING.has(name);
+    if (presents && typeof a.connection === 'string') {
+      this.deploysRef()?.expectPresentation(this.sessionId, a.connection);
+    }
+    try {
+      // Layer-2 grant gate still runs inside the handler (assertGrant) —
+      // the silo check above is in ADDITION to it, not instead of it.
+      return await invokeCapability(this.deps, name, a);
+    } finally {
+      if (presents) this.deploysRef()?.clearExpectation();
+    }
   }
 
   private executeProjectTool(name: string, a: Record<string, unknown>): BridgeToolResult {
@@ -480,6 +516,26 @@ export function sessionView(rec: AgentSessionRecord): SessionView {
 
 export class AgentSessionManager {
   private readonly live = new Map<string, LiveSession>();
+
+  /** Native-approval service, attached after construction (index.ts wires it). */
+  private deployService: DeployService | null = null;
+
+  setDeployService(service: DeployService): void {
+    this.deployService = service;
+  }
+
+  /**
+   * Inject a chat event into a session from OUTSIDE the runtime (approval
+   * cards, decisions). Transcripted when the session is live; pushed either
+   * way so an open viewer updates.
+   */
+  announce(sessionId: string, event: ChatEvent): void {
+    const entry = this.live.get(sessionId);
+    if (entry) {
+      this.writeTranscript(entry, { kind: 'announce', event });
+    }
+    this.push('session:event', { sessionId, event });
+  }
 
   /** Contrail-owned SDK config dir — session history lives here, never ~/.claude. */
   private readonly claudeConfigDir: string;
@@ -817,7 +873,7 @@ export class AgentSessionManager {
     apiKey: string,
     resumeSdkSessionId?: string,
   ): LiveSession {
-    const run = new AgentSessionRun(this.deps, spec, sessionId, this.silo);
+    const run = new AgentSessionRun(this.deps, spec, sessionId, this.silo, () => this.deployService);
     const ctx = run.buildContext(sessionId, apiKey, this.claudeConfigDir, resumeSdkSessionId);
     const child = utilityProcess.fork(this.childPath, [], { stdio: 'pipe' });
 
@@ -1002,6 +1058,8 @@ export class AgentSessionManager {
 
   private teardown(entry: LiveSession, status: 'ended' | 'error'): void {
     if (!this.live.has(entry.sessionId)) return;
+    // A tool call held for approval must never outlive its session unsettled.
+    this.deployService?.releaseHeldForSession(entry.sessionId);
     this.live.delete(entry.sessionId);
     this.deps.db.finishAgentSession(entry.sessionId, entry.usage, status);
     entry.child.kill();

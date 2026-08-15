@@ -51,6 +51,13 @@ interface ChatState {
   error: string | null;
   /** Neutral status line (external-server OAuth progress) — not an error. */
   notice: string | null;
+  /** A write awaits the human's decision — Chat renders the approval banner. */
+  pendingApproval: {
+    requestId: string;
+    kind: 'deploy' | 'dml';
+    connection: string;
+    orgType: string;
+  } | null;
   /** Model/effort the user WANTS (persisted). The live session may lag during a swap. */
   model: ChatModelId;
   effort: EffortLevel | null;
@@ -150,6 +157,7 @@ export const useChat = create<ChatState>((set, get) => ({
   usage: { ...ZERO_USAGE },
   error: null,
   notice: null,
+  pendingApproval: null,
   sessionModel: null,
   sessionEffort: null,
   ...loadPrefs(),
@@ -181,6 +189,8 @@ export const useChat = create<ChatState>((set, get) => ({
         busy: false,
         usage: { ...ZERO_USAGE },
         error: null,
+        // A banner from a previous session must never bleed into this one.
+        pendingApproval: null,
         // Record what this session ACTUALLY runs — if the picker moved while
         // the start was in flight, configure() reconciles against these.
         sessionModel: model,
@@ -224,6 +234,7 @@ export const useChat = create<ChatState>((set, get) => ({
           costUsd: view.costUsd,
         },
         error: null,
+        pendingApproval: null,
         // The session's OWN model/effort (from the row) — the user's saved
         // preference is deliberately untouched; the locked picker displays
         // sessionModel, so the header tells the truth about what is running.
@@ -286,7 +297,7 @@ export const useChat = create<ChatState>((set, get) => ({
   end: async () => {
     const { sessionId } = get();
     if (sessionId) await ipc.invoke('sessions:end', { sessionId }).catch(() => undefined);
-    set({ sessionId: null, busy: false });
+    set({ sessionId: null, busy: false, pendingApproval: null });
   },
 
   clearError: () => set({ error: null }),
@@ -372,6 +383,29 @@ function onEvent(event: ChatEvent): void {
       }
       break;
     }
+    case 'approval_required':
+      useChat.setState({
+        pendingApproval: {
+          requestId: event.requestId,
+          kind: event.kind,
+          connection: event.connection,
+          orgType: event.orgType,
+        },
+      });
+      break;
+    case 'approval_resolved':
+      useChat.setState({
+        pendingApproval: null,
+        notice:
+          event.outcome === 'executed'
+            ? 'Approved — the change executed successfully.'
+            : event.outcome === 'execution_failed'
+              ? 'Approved, but execution failed — see the Deploys screen for detail.'
+              : event.outcome === 'rejected'
+                ? 'You rejected the request; the agent was told.'
+                : 'The approval hold timed out; the request stays available on the Deploys screen.',
+      });
+      break;
     case 'external_auth':
       useChat.setState({
         notice:
@@ -395,6 +429,7 @@ function onEvent(event: ChatEvent): void {
         sessionId: null,
         busy: false,
         streaming: '',
+        pendingApproval: null,
         error: `Session ended: ${event.reason}`,
       });
       break;
