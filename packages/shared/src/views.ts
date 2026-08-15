@@ -456,7 +456,7 @@ export const CONNECTOR_PRESETS: ConnectorPresetView[] = [
     label: 'Slack',
     transport: 'http',
     urlSuggestion: 'https://mcp.slack.com/mcp',
-    note: 'Slack’s official remote MCP server. Slack refuses automatic client registration: create a Slack app (api.slack.com/apps) with the user scopes you need, add the redirect URL shown in “OAuth client…”, paste its client ID + secret there, then Authorize.',
+    note: 'Slack’s official remote MCP server — verified working recipe: create a Slack app (api.slack.com/apps); OAuth & Permissions → opt into PKCE, add the redirect URL shown in “OAuth client…”, add USER Token Scopes (the server advertises its list); enable “Slack Model Context Protocol (MCP) Server” under the app’s Agents section; INSTALL the app to your workspace; then paste client ID + secret here and Authorize.',
   },
   {
     kind: 'jira',
