@@ -83,7 +83,12 @@ export {
   type ExtractIndexResult,
   type EdgeExtractionInput,
 } from './snapshot/work.js';
-export { indexSnapshotFiles, type IndexedArtifact } from './snapshot/indexer.js';
+export {
+  indexSnapshotFiles,
+  extractChildBlocks,
+  findChildBlock,
+  type IndexedArtifact,
+} from './snapshot/indexer.js';
 export { extractAllEdges, buildKnownArtifacts, type KnownArtifacts } from './deps/extract.js';
 export { queryDependencies } from './deps/graph.js';
 export { semanticDiff } from './diff/semantic.js';
@@ -97,6 +102,14 @@ export {
   CHILD_SPEC,
   type ArtifactContent,
 } from './metadata/read.js';
+
+// Metadata views
+export {
+  parsePermissionSet,
+  type PermissionSetView,
+  type ObjectPermissionView,
+  type FieldPermissionView,
+} from './metadata/profiles.js';
 
 // Deploy
 export { DeployEngine } from './deploy/engine.js';

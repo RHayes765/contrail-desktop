@@ -8,6 +8,7 @@ import { ProjectsScreen } from './screens/Projects.js';
 import { ProjectDetailScreen } from './screens/ProjectDetail.js';
 import { ChatScreen } from './screens/Chat.js';
 import { SessionViewerScreen } from './screens/SessionViewer.js';
+import { MetadataScreen } from './screens/Metadata.js';
 
 export function App() {
   const [health, setHealth] = useState<HealthView | null>(null);
@@ -45,6 +46,12 @@ export function App() {
         <button className={inProjects ? 'active' : ''} onClick={goProjects}>
           Projects
         </button>
+        <button
+          className={screen === 'metadata' ? 'active' : ''}
+          onClick={() => useNav.setState({ screen: 'metadata', sessionId: null })}
+        >
+          Metadata
+        </button>
       </nav>
       <main className={`content${fullBleed ? ' content-chat' : ''}`}>
         {error ? (
@@ -59,6 +66,8 @@ export function App() {
           <ChatScreen projectId={projectId} />
         ) : screen === 'session' && projectId && sessionId ? (
           <SessionViewerScreen projectId={projectId} sessionId={sessionId} />
+        ) : screen === 'metadata' ? (
+          <MetadataScreen />
         ) : (
           <ProjectsScreen />
         )}

@@ -132,6 +132,96 @@ export interface SnapshotStatusView {
   stale: boolean;
 }
 
+// ── metadata browsing ────────────────────────────────────────────────────
+
+export interface MetadataTypeCountView {
+  type: string;
+  count: number;
+}
+
+export interface ArtifactRowView {
+  type: string;
+  apiName: string;
+  lastModifiedDate: string | null;
+  lastModifiedBy: string | null;
+}
+
+export interface DependencyRefView {
+  type: string;
+  name: string;
+}
+
+export interface ArtifactDetailView {
+  type: string;
+  apiName: string;
+  /** Source from the local snapshot (XML or Apex); null when not on disk. */
+  content: string | null;
+  lastModifiedDate: string | null;
+  lastModifiedBy: string | null;
+  /** What this artifact references. */
+  uses: DependencyRefView[];
+  /** What references this artifact. */
+  usedBy: DependencyRefView[];
+  usesTruncated: boolean;
+  usedByTruncated: boolean;
+  /** Parsed permissions — present only for PermissionSet artifacts. */
+  permissionSet: unknown | null;
+}
+
+/** Structural mirror of the engine's parsed PermissionSet (shared stays engine-free). */
+export interface PermissionSetView {
+  label: string | null;
+  license: string | null;
+  description: string | null;
+  objectPermissions: Array<{
+    object: string;
+    read: boolean;
+    create: boolean;
+    edit: boolean;
+    delete: boolean;
+    viewAll: boolean;
+    modifyAll: boolean;
+  }>;
+  fieldPermissions: Array<{ field: string; readable: boolean; editable: boolean }>;
+  userPermissions: Array<{ name: string; enabled: boolean }>;
+  classAccesses: Array<{ name: string; enabled: boolean }>;
+  pageAccesses: Array<{ name: string; enabled: boolean }>;
+  tabSettings: Array<{ tab: string; visibility: string }>;
+  recordTypeVisibilities: Array<{ name: string; enabled: boolean }>;
+  applicationVisibilities: Array<{ name: string; enabled: boolean }>;
+}
+
+// ── cross-org diff ───────────────────────────────────────────────────────
+
+export interface DiffEntryView {
+  type: string;
+  apiName: string;
+  /** added = only in B; removed = only in A; changed = in both, different. */
+  status: 'added' | 'removed' | 'changed';
+  changeCount: number;
+  unreadable: boolean;
+}
+
+export interface DiffScopeView {
+  connectionA: string;
+  connectionB: string;
+  aliasA: string;
+  aliasB: string;
+  computedAt: string;
+  /** True when served from cache (snapshots unchanged since last compute). */
+  cached: boolean;
+  totals: { added: number; removed: number; changed: number; unchanged: number };
+  entries: DiffEntryView[];
+  /** Entry list cap applied (totals remain exact). */
+  truncated: boolean;
+  /**
+   * Types one org's snapshot simply does not cover — WITHOUT this, a
+   * partial snapshot reads as thousands of fabricated deletions. Entries
+   * for these types are omitted rather than lied about.
+   */
+  uncoveredTypes: Array<{ type: string; missingIn: 'A' | 'B'; countInOther: number }>;
+}
+
 // ── agent sessions ───────────────────────────────────────────────────────
 
 export interface SessionView {

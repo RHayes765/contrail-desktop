@@ -5,7 +5,7 @@ import { create } from 'zustand';
  * detail/chat drill-in don't earn a URL scheme in a desktop shell.
  */
 
-export type Screen = 'connections' | 'projects' | 'project' | 'chat' | 'session';
+export type Screen = 'connections' | 'projects' | 'project' | 'chat' | 'session' | 'metadata';
 
 interface NavState {
   screen: Screen;

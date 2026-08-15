@@ -5,6 +5,7 @@ import { ConnectionService } from '../services/connections.js';
 import { docView, noteView, ProjectService } from '../services/projects.js';
 import { AgentSessionManager } from '../services/agentRuntime.js';
 import { SnapshotService } from '../services/snapshots.js';
+import { DiffService, MetadataService } from '../services/metadata.js';
 
 /**
  * The complete handler map for the typed IPC registry. Handlers are thin:
@@ -17,12 +18,14 @@ export interface MainServices {
   projects: ProjectService;
   sessions: AgentSessionManager;
   snapshots: SnapshotService;
+  metadata: MetadataService;
+  diff: DiffService;
   /** The window whose native dialogs (file picker) we parent. */
   getWindow: () => BrowserWindow | null;
 }
 
 export function makeHandlers(health: HealthView, services: MainServices) {
-  const { connections, projects, sessions, snapshots } = services;
+  const { connections, projects, sessions, snapshots, metadata, diff } = services;
   return {
     'app:health': (deps: EngineDeps): HealthView => ({
       ...health,
@@ -43,6 +46,20 @@ export function makeHandlers(health: HealthView, services: MainServices) {
       snapshots.status(req.connectionId),
     'metadata:sync': (_deps: EngineDeps, req: { connectionId: string }) =>
       snapshots.sync(req.connectionId, 'refresh'),
+    'metadata:types': (_deps: EngineDeps, req: { connectionId: string }) =>
+      metadata.types(req.connectionId),
+    'metadata:list': (
+      _deps: EngineDeps,
+      req: { connectionId: string; type: string; query?: string; limit?: number },
+    ) => metadata.list(req.connectionId, req.type, req.query, req.limit),
+    'metadata:artifact': (
+      _deps: EngineDeps,
+      req: { connectionId: string; type: string; apiName: string },
+    ) => metadata.artifact(req.connectionId, req.type, req.apiName),
+    'diff:scope': (
+      _deps: EngineDeps,
+      req: { connectionA: string; connectionB: string; types?: string[] },
+    ) => diff.diffScope(req.connectionA, req.connectionB, req.types),
 
     'projects:list': () => projects.list(),
     'projects:create': (_deps: EngineDeps, req: { name: string; description?: string }) =>

@@ -76,7 +76,10 @@ export class SnapshotWorkerBridge implements SnapshotWorkUnits {
     return worker;
   }
 
-  private call<T>(kind: 'extractAndIndex' | 'extractEdges', input: unknown): Promise<T> {
+  private call<T>(
+    kind: 'extractAndIndex' | 'extractEdges' | 'diffPairs',
+    input: unknown,
+  ): Promise<T> {
     const worker = this.ensureWorker();
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
@@ -102,6 +105,12 @@ export class SnapshotWorkerBridge implements SnapshotWorkUnits {
 
   extractEdges(input: EdgeExtractionInput): Promise<DependencyEdge[]> {
     return this.call('extractEdges', input);
+  }
+
+  diffPairs(
+    pairs: import('../workers/snapshotWorker.js').DiffPair[],
+  ): Promise<import('../workers/snapshotWorker.js').DiffPairResult[]> {
+    return this.call('diffPairs', { pairs });
   }
 
   shutdown(): void {

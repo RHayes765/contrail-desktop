@@ -10,6 +10,7 @@ import { ConnectionService } from './services/connections.js';
 import { ProjectService } from './services/projects.js';
 import { AgentSessionManager, type SessionAlert } from './services/agentRuntime.js';
 import { SnapshotService, SnapshotWorkerBridge } from './services/snapshots.js';
+import { DiffService, MetadataService } from './services/metadata.js';
 
 /** The snapshot CPU worker bundle (built as a second main entry). */
 function snapshotWorkerPath(): string {
@@ -67,8 +68,10 @@ const agentDemoArg = process.argv.find((a) => a.startsWith('--agent-demo='));
 const AGENT_DEMO = agentDemoArg ? agentDemoArg.slice('--agent-demo='.length) : null;
 const snapshotDemoArg = process.argv.find((a) => a.startsWith('--snapshot-demo='));
 const SNAPSHOT_DEMO = snapshotDemoArg ? snapshotDemoArg.slice('--snapshot-demo='.length) : null;
+const diffDemoArg = process.argv.find((a) => a.startsWith('--diff-demo='));
+const DIFF_DEMO = diffDemoArg ? diffDemoArg.slice('--diff-demo='.length) : null;
 
-const HEADLESS = SMOKE || AGENT_DEMO !== null || SNAPSHOT_DEMO !== null;
+const HEADLESS = SMOKE || AGENT_DEMO !== null || SNAPSHOT_DEMO !== null || DIFF_DEMO !== null;
 
 function smokeWrite(payload: unknown): void {
   const text = JSON.stringify(payload, null, 2) + '\n';
@@ -97,6 +100,7 @@ if (!HEADLESS && !app.requestSingleInstanceLock()) {
 let boot: Bootstrap | null = null;
 let mainWindow: BrowserWindow | null = null;
 let sessionManager: AgentSessionManager | null = null;
+let workerBridge: SnapshotWorkerBridge | null = null;
 
 /** Where the runtime child bundle lives (dev layout; packaging revisits this). */
 function runtimeChildPath(): string {
@@ -362,9 +366,8 @@ app.whenReady().then(async () => {
   try {
     // The CPU seam is worker-backed in every mode — the demo exercises the
     // same process topology the windowed app uses.
-    boot = bootstrap(app.getVersion(), {
-      snapshotWork: new SnapshotWorkerBridge(snapshotWorkerPath()),
-    });
+    workerBridge = new SnapshotWorkerBridge(snapshotWorkerPath());
+    boot = bootstrap(app.getVersion(), { snapshotWork: workerBridge });
   } catch (err) {
     log('error', 'bootstrap failed', { err: String(err) });
     if (HEADLESS) {
@@ -398,6 +401,38 @@ app.whenReady().then(async () => {
     return;
   }
 
+  if (DIFF_DEMO !== null) {
+    // Cross-org scope diff over LOCAL snapshots — zero Salesforce calls.
+    // Arg: "aliasA,aliasB" (both must have synced snapshots).
+    try {
+      const [refA, refB] = DIFF_DEMO.split(',').map((s) => s.trim());
+      if (!refA || !refB) throw new Error('--diff-demo expects "aliasA,aliasB"');
+      const connA = boot.deps.db.resolveConnection(refA);
+      const connB = boot.deps.db.resolveConnection(refB);
+      if (!connA || !connB) throw new Error('both aliases must resolve to connections');
+      const diff = new DiffService(boot.deps, new SnapshotWorkerBridge(snapshotWorkerPath()));
+      const started = Date.now();
+      const scope = await diff.diffScope(connA.id, connB.id);
+      const again = await diff.diffScope(connA.id, connB.id); // cache check
+      smokeWrite({
+        ok: true,
+        aliases: [scope.aliasA, scope.aliasB],
+        totals: scope.totals,
+        uncovered_types: scope.uncoveredTypes,
+        entry_count: scope.entries.length,
+        truncated: scope.truncated,
+        sample_changed: scope.entries.filter((e) => e.status === 'changed').slice(0, 5),
+        duration_ms: Date.now() - started,
+        second_call_cached: again.cached,
+      });
+      app.exit(0);
+    } catch (err) {
+      smokeWrite({ ok: false, error: String(err) });
+      app.exit(1);
+    }
+    return;
+  }
+
   if (SNAPSHOT_DEMO !== null) {
     try {
       if (!SNAPSHOT_DEMO.trim()) throw new Error('--snapshot-demo requires a question');
@@ -421,6 +456,10 @@ app.whenReady().then(async () => {
 
   const projects = new ProjectService(boot.deps);
   const snapshots = new SnapshotService(boot.deps, push);
+  const metadata = new MetadataService(boot.deps);
+  // Diffs get their OWN worker process: the sync pipeline's lane stays free,
+  // and a diff timeout can never kill an in-flight snapshot stage.
+  const diff = new DiffService(boot.deps, new SnapshotWorkerBridge(snapshotWorkerPath()));
   const connections = new ConnectionService(
     boot.deps,
     (reason) => push('connections:changed', { reason }),
@@ -440,6 +479,8 @@ app.whenReady().then(async () => {
     projects,
     sessions: sessionManager,
     snapshots,
+    metadata,
+    diff,
     getWindow: () => mainWindow,
   };
 

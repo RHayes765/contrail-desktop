@@ -1,11 +1,15 @@
 import { z } from 'zod';
 import type {
+  ArtifactDetailView,
+  ArtifactRowView,
   ChatEvent,
   ConnectionView,
   ConnectOutcomeView,
+  DiffScopeView,
   EffortLevel,
   GrantSetView,
   HealthView,
+  MetadataTypeCountView,
   PingResultView,
   ProjectDocView,
   ProjectNoteView,
@@ -54,6 +58,24 @@ export const REQUEST_SCHEMAS = {
 
   'metadata:status': z.object({ connectionId: ID }),
   'metadata:sync': z.object({ connectionId: ID }),
+  'metadata:types': z.object({ connectionId: ID }),
+  'metadata:list': z.object({
+    connectionId: ID,
+    type: z.string().min(1).max(80),
+    query: z.string().max(200).optional(),
+    limit: z.number().int().min(1).max(500).optional(),
+  }),
+  'metadata:artifact': z.object({
+    connectionId: ID,
+    type: z.string().min(1).max(80),
+    apiName: z.string().min(1).max(300),
+  }),
+
+  'diff:scope': z.object({
+    connectionA: ID,
+    connectionB: ID,
+    types: z.array(z.string().min(1).max(80)).max(20).optional(),
+  }),
 
   'projects:list': z.object({}),
   'projects:create': z.object({
@@ -111,6 +133,20 @@ export interface Contracts {
   'metadata:sync': {
     req: { connectionId: string };
     res: { status: 'started' | 'already_syncing' | 'locked' };
+  };
+  'metadata:types': { req: { connectionId: string }; res: MetadataTypeCountView[] };
+  'metadata:list': {
+    req: { connectionId: string; type: string; query?: string; limit?: number };
+    res: ArtifactRowView[];
+  };
+  'metadata:artifact': {
+    req: { connectionId: string; type: string; apiName: string };
+    res: ArtifactDetailView;
+  };
+
+  'diff:scope': {
+    req: { connectionA: string; connectionB: string; types?: string[] };
+    res: DiffScopeView;
   };
 
   'projects:list': { req: Record<string, never>; res: ProjectView[] };
