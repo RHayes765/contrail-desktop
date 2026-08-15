@@ -250,7 +250,7 @@ export class DeployService {
         detail: { requestId: id, required: needed },
       });
       throw new Error(
-        `${conn.alias} no longer grants ${needed} — re-enable it on the Connections screen, ` +
+        `${conn.alias} no longer grants ${needed} — re-enable it on the SF Orgs screen, ` +
           'then re-validate.',
       );
     }

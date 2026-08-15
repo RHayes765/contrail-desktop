@@ -201,7 +201,7 @@ export function ConnectionsScreen() {
     <>
       <div className="screen-head">
         <div>
-          <h1>Connections</h1>
+          <h1>SF Orgs</h1>
           <p className="subtitle">
             Orgs this machine is authorized against. Grants are set by you on the connection page —
             never by the agent.

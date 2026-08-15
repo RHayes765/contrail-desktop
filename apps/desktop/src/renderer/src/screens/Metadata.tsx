@@ -209,7 +209,7 @@ export function MetadataScreen() {
       <div className="meta-panes">
         <div className="meta-types">
           {connections !== null && connections.length === 0 ? (
-            <div className="empty">No orgs connected — add one on the Connections screen.</div>
+            <div className="empty">No orgs connected — add one on the SF Orgs screen.</div>
           ) : types === null ? (
             <div className="empty">Loading…</div>
           ) : types.length === 0 ? (

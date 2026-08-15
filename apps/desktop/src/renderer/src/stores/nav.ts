@@ -34,7 +34,8 @@ interface NavState {
 }
 
 export const useNav = create<NavState>((set) => ({
-  screen: 'connections',
+  // Projects is the landing screen — the work, not the plumbing.
+  screen: 'projects',
   projectId: null,
   sessionId: null,
   deployId: null,

@@ -43,9 +43,7 @@ export function App() {
     <div className="shell">
       <nav className="sidebar">
         <div className="brand">Contrail</div>
-        <button className={screen === 'connections' ? 'active' : ''} onClick={goConnections}>
-          Connections
-        </button>
+        {/* Work-first ordering: what you do, then what you configure. */}
         <button className={inProjects ? 'active' : ''} onClick={goProjects}>
           Projects
         </button>
@@ -66,6 +64,9 @@ export function App() {
           onClick={() => useNav.setState({ screen: 'deploys', sessionId: null, deployId: null })}
         >
           Deploys
+        </button>
+        <button className={screen === 'connections' ? 'active' : ''} onClick={goConnections}>
+          SF Orgs
         </button>
         <button
           className={screen === 'connectors' ? 'active' : ''}
