@@ -9,6 +9,12 @@ import { makeHandlers, type MainServices } from './ipc/handlers.js';
 import { ConnectionService } from './services/connections.js';
 import { ProjectService } from './services/projects.js';
 import { AgentSessionManager, type SessionAlert } from './services/agentRuntime.js';
+import { SnapshotService, SnapshotWorkerBridge } from './services/snapshots.js';
+
+/** The snapshot CPU worker bundle (built as a second main entry). */
+function snapshotWorkerPath(): string {
+  return path.join(import.meta.dirname, 'snapshotWorker.js');
+}
 
 // Windows toasts need an AppUserModelID; unpackaged dev builds borrow the
 // executable's so notifications display instead of silently dropping.
@@ -59,8 +65,10 @@ const smokeOutArg = process.argv.find((a) => a.startsWith('--smoke-out='));
 const SMOKE_OUT = smokeOutArg ? smokeOutArg.slice('--smoke-out='.length) : null;
 const agentDemoArg = process.argv.find((a) => a.startsWith('--agent-demo='));
 const AGENT_DEMO = agentDemoArg ? agentDemoArg.slice('--agent-demo='.length) : null;
+const snapshotDemoArg = process.argv.find((a) => a.startsWith('--snapshot-demo='));
+const SNAPSHOT_DEMO = snapshotDemoArg ? snapshotDemoArg.slice('--snapshot-demo='.length) : null;
 
-const HEADLESS = SMOKE || AGENT_DEMO !== null;
+const HEADLESS = SMOKE || AGENT_DEMO !== null || SNAPSHOT_DEMO !== null;
 
 function smokeWrite(payload: unknown): void {
   const text = JSON.stringify(payload, null, 2) + '\n';
@@ -267,9 +275,96 @@ async function runAgentDemo(b: Bootstrap, question: string): Promise<void> {
   });
 }
 
+/**
+ * Session 5 demo: a REAL snapshot sync of dev-org through the worker seam
+ * (live Salesforce retrieve), then a chat session answering a dependency
+ * question FROM THE LOCAL GRAPH (get_dependencies — no further org reads
+ * required for the answer's structure).
+ */
+async function runSnapshotDemo(b: Bootstrap, question: string): Promise<void> {
+  const devOrg = b.deps.db.resolveConnection('dev-org');
+  if (!devOrg) throw new Error('dev-org connection not found in shared DB');
+
+  const progressLines: string[] = [];
+  const events: Array<{ sessionId: string; event: ChatEvent }> = [];
+  let syncResolve: ((error: string | null) => void) | null = null;
+  let turnResolve: (() => void) | null = null;
+  const push = <C extends PushChannel>(channel: C, payload: PushEvents[C]): void => {
+    if (channel === 'metadata:progress') {
+      const p = payload as PushEvents['metadata:progress'];
+      progressLines.push(p.progress);
+      if (p.done && syncResolve) {
+        const r = syncResolve;
+        syncResolve = null;
+        r(p.error);
+      }
+    } else if (channel === 'session:event') {
+      const p = payload as PushEvents['session:event'];
+      events.push(p);
+      if (p.event.type === 'done' && turnResolve) {
+        const r = turnResolve;
+        turnResolve = null;
+        r();
+      }
+    }
+  };
+
+  const snapshots = new SnapshotService(b.deps, push);
+  const syncDone = new Promise<string | null>((resolve, reject) => {
+    syncResolve = resolve;
+    setTimeout(() => reject(new Error('sync timed out after 10 minutes')), 10 * 60 * 1000);
+  });
+  const started = snapshots.sync(devOrg.id, 'refresh');
+  if (started.status !== 'started') throw new Error(`sync did not start: ${started.status}`);
+  const syncError = await syncDone;
+  if (syncError) throw new Error(`sync failed: ${syncError}`);
+  const status = snapshots.status(devOrg.id);
+
+  // Now the agent leg: dependency question from the local graph.
+  const projects = new ProjectService(b.deps);
+  const project =
+    b.deps.db.findProjectByName('Dev Sandbox') ??
+    b.deps.db.createProject({ name: 'Dev Sandbox' });
+  b.deps.db.removeProjectBinding(project.id, devOrg.id);
+  b.deps.db.addProjectBinding(project.id, devOrg.id, 'dev');
+
+  const manager = new AgentSessionManager(b.deps, projects, runtimeChildPath(), push);
+  sessionManager = manager;
+  const view = manager.start(project.id);
+  const turn = new Promise<void>((resolve, reject) => {
+    turnResolve = resolve;
+    setTimeout(() => reject(new Error('agent turn timed out')), 120_000);
+  });
+  manager.send(view.id, question);
+  await turn;
+  const inspection = manager.inspect(view.id);
+  await manager.end(view.id);
+
+  smokeWrite({
+    ok: true,
+    sync: {
+      progress_lines: progressLines,
+      artifact_count: status.artifactCount,
+      edge_count: status.edgeCount,
+      last_indexed_at: status.lastIndexedAt,
+    },
+    agent: {
+      final_texts: events
+        .filter((e) => e.event.type === 'text')
+        .map((e) => (e.event as { text: string }).text),
+      capability_calls: inspection?.capabilityCalls ?? [],
+      usage: inspection?.usage ?? null,
+    },
+  });
+}
+
 app.whenReady().then(async () => {
   try {
-    boot = bootstrap(app.getVersion());
+    // The CPU seam is worker-backed in every mode — the demo exercises the
+    // same process topology the windowed app uses.
+    boot = bootstrap(app.getVersion(), {
+      snapshotWork: new SnapshotWorkerBridge(snapshotWorkerPath()),
+    });
   } catch (err) {
     log('error', 'bootstrap failed', { err: String(err) });
     if (HEADLESS) {
@@ -303,6 +398,20 @@ app.whenReady().then(async () => {
     return;
   }
 
+  if (SNAPSHOT_DEMO !== null) {
+    try {
+      if (!SNAPSHOT_DEMO.trim()) throw new Error('--snapshot-demo requires a question');
+      await runSnapshotDemo(boot, SNAPSHOT_DEMO);
+      app.exit(0);
+    } catch (err) {
+      smokeWrite({ ok: false, error: String(err) });
+      // A live session may still hold a CLI subprocess — never orphan it.
+      if (sessionManager) await sessionManager.endAll().catch(() => undefined);
+      app.exit(1);
+    }
+    return;
+  }
+
   // ── windowed app ───────────────────────────────────────────────────────
 
   const push = <C extends PushChannel>(channel: C, payload: PushEvents[C]): void => {
@@ -311,8 +420,12 @@ app.whenReady().then(async () => {
   };
 
   const projects = new ProjectService(boot.deps);
-  const connections = new ConnectionService(boot.deps, (reason) =>
-    push('connections:changed', { reason }),
+  const snapshots = new SnapshotService(boot.deps, push);
+  const connections = new ConnectionService(
+    boot.deps,
+    (reason) => push('connections:changed', { reason }),
+    // Fresh connects baseline themselves; re-auths skip (artifacts exist).
+    (connectionId) => snapshots.maybeAutoBaseline(connectionId),
   );
   sessionManager = new AgentSessionManager(
     boot.deps,
@@ -326,6 +439,7 @@ app.whenReady().then(async () => {
     connections,
     projects,
     sessions: sessionManager,
+    snapshots,
     getWindow: () => mainWindow,
   };
 

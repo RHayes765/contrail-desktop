@@ -46,6 +46,8 @@ export class ConnectionService {
   constructor(
     private readonly deps: EngineDeps,
     private readonly notify: (reason: 'connected' | 'updated' | 'removed') => void,
+    /** Fired for every completed connect (fresh or re-auth) — auto-baseline hook. */
+    private readonly onConnected: (connectionId: string) => void = () => undefined,
   ) {}
 
   list(): ConnectionView[] {
@@ -70,6 +72,7 @@ export class ConnectionService {
 
     if (outcome.status === 'connected') {
       this.notify('connected');
+      this.onConnected(outcome.connection.id);
       const dupe = this.duplicatesOf(outcome.connection)[0];
       const dupeNote = dupe
         ? ` Note: this is the same org and user as existing connection "${dupe.alias}".`
@@ -87,7 +90,10 @@ export class ConnectionService {
       const final = this.deps.flows.activeConnectOutcome();
       if (final) {
         void final.then((o) => {
-          if (o.status === 'connected') this.notify('connected');
+          if (o.status === 'connected') {
+            this.notify('connected');
+            this.onConnected(o.connection.id);
+          }
         });
       }
       return {

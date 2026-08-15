@@ -416,6 +416,14 @@ export const metadataCapabilities: Capability[] = [
               'Refresh is still running. Call refresh_snapshot again with the same ' +
                 'connection to check progress or collect the result.',
             );
+          case 'locked':
+            return fail(
+              'Another Contrail process is already refreshing this connection. ' +
+                'Wait for it to finish and try again.',
+            );
+          case 'gone':
+            // Unreachable without observeJobId, but the switch stays total.
+            return fail('The refresh being observed has already been collected.');
         }
       }),
   },

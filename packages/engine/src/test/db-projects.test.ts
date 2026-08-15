@@ -134,3 +134,34 @@ describe('v7: resume columns', () => {
     expect(rec?.costUsd).toBeCloseTo(0.01);
   });
 });
+
+describe('app locks (cross-process advisory leases)', () => {
+  it('grants, refuses live foreign locks, allows takeover of expired or own locks', () => {
+    expect(db.acquireAppLock('snapshot:c1', 'desktop-a', 60_000)).toBe(true);
+    // Someone else, lock still live → refused.
+    expect(db.acquireAppLock('snapshot:c1', 'plugin-b', 60_000)).toBe(false);
+    // The holder itself re-acquires (lease renewal).
+    expect(db.acquireAppLock('snapshot:c1', 'desktop-a', 60_000)).toBe(true);
+    // Expired lock is taken over.
+    expect(db.acquireAppLock('snapshot:c2', 'desktop-a', -1000)).toBe(true);
+    expect(db.acquireAppLock('snapshot:c2', 'plugin-b', 60_000)).toBe(true);
+    // Release only removes the caller's own lock.
+    db.releaseAppLock('snapshot:c1', 'plugin-b');
+    expect(db.acquireAppLock('snapshot:c1', 'plugin-b', 60_000)).toBe(false);
+    db.releaseAppLock('snapshot:c1', 'desktop-a');
+    expect(db.acquireAppLock('snapshot:c1', 'plugin-b', 60_000)).toBe(true);
+  });
+});
+
+describe('snapshot status', () => {
+  it('reports empty for unknown connections and records runs', () => {
+    const empty = db.getSnapshotStatus('conn-x');
+    expect(empty.artifactCount).toBe(0);
+    expect(empty.lastIndexedAt).toBeNull();
+    expect(empty.lastRun).toBeNull();
+    db.insertMetadataSnapshot({ connectionId: 'conn-x', kind: 'baseline', types: ['Flow'], artifactCount: 42 });
+    const after = db.getSnapshotStatus('conn-x');
+    expect(after.lastRun?.kind).toBe('baseline');
+    expect(after.lastRun?.artifactCount).toBe(42);
+  });
+});

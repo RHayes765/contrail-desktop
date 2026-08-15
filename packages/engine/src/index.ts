@@ -68,7 +68,23 @@ export { MetadataSoapClient, type TestLevel } from './salesforce/metadataSoap.js
 
 // Snapshot / graph / diff
 export { SnapshotStore } from './snapshot/store.js';
-export { SnapshotEngine } from './snapshot/engine.js';
+export {
+  SnapshotEngine,
+  type RefreshOptions,
+  type RefreshJobState,
+  type RefreshSummary,
+} from './snapshot/engine.js';
+export {
+  inlineSnapshotWork,
+  runExtractAndIndex,
+  withChildTypes,
+  type SnapshotWorkUnits,
+  type ExtractIndexInput,
+  type ExtractIndexResult,
+  type EdgeExtractionInput,
+} from './snapshot/work.js';
+export { indexSnapshotFiles, type IndexedArtifact } from './snapshot/indexer.js';
+export { extractAllEdges, buildKnownArtifacts, type KnownArtifacts } from './deps/extract.js';
 export { queryDependencies } from './deps/graph.js';
 export { semanticDiff } from './diff/semantic.js';
 

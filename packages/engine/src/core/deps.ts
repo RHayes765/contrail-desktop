@@ -7,6 +7,7 @@ import { ConnectFlowManager, type FlowOps } from '../connect/flow.js';
 import { AccessTokenManager } from '../salesforce/tokens.js';
 import { SnapshotStore } from '../snapshot/store.js';
 import { SnapshotEngine } from '../snapshot/engine.js';
+import type { SnapshotWorkUnits } from '../snapshot/work.js';
 import { DeployEngine } from '../deploy/engine.js';
 import type { ApprovalPresenter } from '../deploy/approval.js';
 
@@ -37,6 +38,8 @@ export interface EngineOverrides {
   store?: SnapshotStore;
   approvals?: ApprovalPresenter;
   deploysDir?: string;
+  /** CPU-work seam for the snapshot pipeline (desktop: worker process). */
+  snapshotWork?: SnapshotWorkUnits;
 }
 
 export function createEngineDeps(overrides?: EngineOverrides): EngineDeps {
@@ -47,7 +50,7 @@ export function createEngineDeps(overrides?: EngineOverrides): EngineDeps {
   const flows = new ConnectFlowManager(db, tokens, audit, config, overrides?.flowOps);
   const tokenMgr = new AccessTokenManager(db, tokens, config);
   const store = overrides?.store ?? new SnapshotStore();
-  const engine = new SnapshotEngine(db, store, tokenMgr, config, audit);
+  const engine = new SnapshotEngine(db, store, tokenMgr, config, audit, overrides?.snapshotWork);
   const deploys = new DeployEngine(db, store, tokenMgr, config, audit, overrides?.approvals, {
     deploysDir: overrides?.deploysDir ?? deploysDir(),
   });

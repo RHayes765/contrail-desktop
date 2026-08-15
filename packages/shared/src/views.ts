@@ -112,6 +112,22 @@ export interface ProjectNoteView {
   createdAt: string;
 }
 
+// ── metadata snapshots ───────────────────────────────────────────────────
+
+export interface SnapshotStatusView {
+  connectionId: string;
+  artifactCount: number;
+  edgeCount: number;
+  /** Newest indexed artifact's retrieval time — null when never synced. */
+  lastIndexedAt: string | null;
+  /** A sync is running right now (this app instance). */
+  syncing: boolean;
+  /** Live progress line while syncing. */
+  progress: string | null;
+  /** Synced, but past the freshness threshold. */
+  stale: boolean;
+}
+
 // ── agent sessions ───────────────────────────────────────────────────────
 
 export interface SessionView {

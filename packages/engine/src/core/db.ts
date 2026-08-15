@@ -659,6 +659,102 @@ export class ContrailDb {
     this.db.prepare(`UPDATE sessions SET transcript_path = ? WHERE id = ?`).run(transcriptPath, id);
   }
 
+  // ── app locks & snapshot runs (v6, desktop-owned) ──────────────────────
+
+  /**
+   * Advisory cross-process lease (e.g. 'snapshot:{connectionId}') so the
+   * desktop and the plugin do not run the same long job concurrently against
+   * the shared database. Best-effort: expired or self-held locks are taken
+   * over; a live lock held by someone else refuses.
+   */
+  acquireAppLock(name: string, holder: string, ttlMs: number): boolean {
+    const now = Date.now();
+    const tx = this.db.transaction((): boolean => {
+      const row = this.db
+        .prepare(`SELECT holder, expires_at FROM app_locks WHERE name = ?`)
+        .get(name) as { holder: string; expires_at: string } | undefined;
+      if (row && row.holder !== holder && new Date(row.expires_at).getTime() > now) {
+        return false;
+      }
+      this.db
+        .prepare(
+          `INSERT OR REPLACE INTO app_locks (name, holder, pid, acquired_at, expires_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(
+          name,
+          holder,
+          process.pid,
+          new Date(now).toISOString(),
+          new Date(now + ttlMs).toISOString(),
+        );
+      return true;
+    });
+    return tx();
+  }
+
+  releaseAppLock(name: string, holder: string): void {
+    this.db.prepare(`DELETE FROM app_locks WHERE name = ? AND holder = ?`).run(name, holder);
+  }
+
+  insertMetadataSnapshot(input: {
+    connectionId: string;
+    kind: 'baseline' | 'refresh';
+    types: string[];
+    artifactCount: number;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO metadata_snapshots (id, workspace_id, connection_id, taken_at, kind, types_json, artifact_count)
+         VALUES (?, 'default', ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        input.connectionId,
+        new Date().toISOString(),
+        input.kind,
+        JSON.stringify(input.types),
+        input.artifactCount,
+      );
+  }
+
+  /**
+   * Snapshot posture for a connection: what the index holds now, and when the
+   * last recorded run happened. artifact-table facts work even for snapshots
+   * taken by the plugin (which never writes metadata_snapshots rows).
+   */
+  getSnapshotStatus(connectionId: string): {
+    artifactCount: number;
+    edgeCount: number;
+    lastIndexedAt: string | null;
+    lastRun: { takenAt: string; kind: string; artifactCount: number | null } | null;
+  } {
+    const artifacts = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n, MAX(retrieved_at) AS latest FROM artifacts WHERE connection_id = ?`,
+      )
+      .get(connectionId) as { n: number; latest: string | null };
+    const edges = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM dependency_edges WHERE connection_id = ?`)
+      .get(connectionId) as { n: number };
+    const lastRun = this.db
+      .prepare(
+        `SELECT taken_at, kind, artifact_count FROM metadata_snapshots
+         WHERE connection_id = ? ORDER BY taken_at DESC LIMIT 1`,
+      )
+      .get(connectionId) as
+      | { taken_at: string; kind: string; artifact_count: number | null }
+      | undefined;
+    return {
+      artifactCount: artifacts.n,
+      edgeCount: edges.n,
+      lastIndexedAt: artifacts.latest,
+      lastRun: lastRun
+        ? { takenAt: lastRun.taken_at, kind: lastRun.kind, artifactCount: lastRun.artifact_count }
+        : null,
+    };
+  }
+
   /**
    * Startup reconciliation: no session can genuinely be active when the app
    * boots, so any 'active' row is the residue of a crash or force-kill.

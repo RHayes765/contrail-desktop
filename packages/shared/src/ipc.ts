@@ -11,6 +11,7 @@ import type {
   ProjectNoteView,
   ProjectView,
   SessionView,
+  SnapshotStatusView,
   TranscriptView,
 } from './views.js';
 
@@ -50,6 +51,9 @@ export const REQUEST_SCHEMAS = {
       data_write: z.boolean(),
     }),
   }),
+
+  'metadata:status': z.object({ connectionId: ID }),
+  'metadata:sync': z.object({ connectionId: ID }),
 
   'projects:list': z.object({}),
   'projects:create': z.object({
@@ -103,6 +107,12 @@ export interface Contracts {
     res: ConnectionView;
   };
 
+  'metadata:status': { req: { connectionId: string }; res: SnapshotStatusView };
+  'metadata:sync': {
+    req: { connectionId: string };
+    res: { status: 'started' | 'already_syncing' | 'locked' };
+  };
+
   'projects:list': { req: Record<string, never>; res: ProjectView[] };
   'projects:create': { req: { name: string; description?: string }; res: ProjectView };
   'projects:update': {
@@ -150,6 +160,13 @@ void _covered;
 
 export interface PushEvents {
   'connections:changed': { reason: 'connected' | 'updated' | 'removed' };
+  /** Live snapshot-sync progress; `done` closes the stream (error set on failure). */
+  'metadata:progress': {
+    connectionId: string;
+    progress: string;
+    done: boolean;
+    error: string | null;
+  };
   /** Streamed agent events for a live session. */
   'session:event': { sessionId: string; event: ChatEvent };
   /** A session started or ended — session lists for this project are stale. */

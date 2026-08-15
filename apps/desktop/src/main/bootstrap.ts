@@ -25,7 +25,10 @@ export interface Bootstrap {
   health: HealthView;
 }
 
-export function bootstrap(appVersion: string): Bootstrap {
+export function bootstrap(
+  appVersion: string,
+  overrides?: { snapshotWork?: import('@contrail/engine').SnapshotWorkUnits },
+): Bootstrap {
   const sqlite = probeBetterSqlite3();
   const keyring = probeKeyring();
   if (!sqlite.ok || !keyring.ok) {
@@ -38,7 +41,10 @@ export function bootstrap(appVersion: string): Bootstrap {
   }
 
   // Electron owns the browser opener; everything else is production wiring.
-  const deps = createEngineDeps({ flowOps: { openBrowser: openBrowserViaShell } });
+  const deps = createEngineDeps({
+    flowOps: { openBrowser: openBrowserViaShell },
+    snapshotWork: overrides?.snapshotWork,
+  });
   const schemaVersion = deps.db.schemaVersion();
   const connectionCount = deps.db.listConnections().length;
 

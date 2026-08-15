@@ -4,6 +4,7 @@ import type { EngineDeps } from '@contrail/engine';
 import { ConnectionService } from '../services/connections.js';
 import { docView, noteView, ProjectService } from '../services/projects.js';
 import { AgentSessionManager } from '../services/agentRuntime.js';
+import { SnapshotService } from '../services/snapshots.js';
 
 /**
  * The complete handler map for the typed IPC registry. Handlers are thin:
@@ -15,12 +16,13 @@ export interface MainServices {
   connections: ConnectionService;
   projects: ProjectService;
   sessions: AgentSessionManager;
+  snapshots: SnapshotService;
   /** The window whose native dialogs (file picker) we parent. */
   getWindow: () => BrowserWindow | null;
 }
 
 export function makeHandlers(health: HealthView, services: MainServices) {
-  const { connections, projects, sessions } = services;
+  const { connections, projects, sessions, snapshots } = services;
   return {
     'app:health': (deps: EngineDeps): HealthView => ({
       ...health,
@@ -36,6 +38,11 @@ export function makeHandlers(health: HealthView, services: MainServices) {
       _deps: EngineDeps,
       req: { id: string; grants: GrantSetView },
     ) => connections.setGrants(req.id, req.grants),
+
+    'metadata:status': (_deps: EngineDeps, req: { connectionId: string }) =>
+      snapshots.status(req.connectionId),
+    'metadata:sync': (_deps: EngineDeps, req: { connectionId: string }) =>
+      snapshots.sync(req.connectionId, 'refresh'),
 
     'projects:list': () => projects.list(),
     'projects:create': (_deps: EngineDeps, req: { name: string; description?: string }) =>

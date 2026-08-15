@@ -154,9 +154,29 @@ function ConnectForm({ onDone }: { onDone: () => void }) {
   );
 }
 
+function agoLabel(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
 export function ConnectionsScreen() {
-  const { connections, pings, connectMessage, refresh, ping, remove, clearConnectMessage } =
-    useConnections();
+  const {
+    connections,
+    pings,
+    snapshots,
+    syncErrors,
+    connectMessage,
+    refresh,
+    ping,
+    remove,
+    syncSnapshot,
+    clearConnectMessage,
+  } = useConnections();
   const [showConnect, setShowConnect] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [editingGrants, setEditingGrants] = useState<string | null>(null);
@@ -217,6 +237,34 @@ export function ConnectionsScreen() {
                     <div className="conn-detail">
                       {c.orgName ?? 'unnamed org'} · {c.username ?? 'unknown user'} · {c.instanceUrl}
                     </div>
+                    {(() => {
+                      const snap = snapshots[c.id];
+                      const syncError = syncErrors[c.id];
+                      if (!snap && !syncError) return null;
+                      return (
+                        <div className="snap-line">
+                          {snap?.syncing ? (
+                            <span className="snap-syncing">syncing — {snap.progress ?? '…'}</span>
+                          ) : snap?.lastIndexedAt ? (
+                            <>
+                              <span>
+                                synced {agoLabel(snap.lastIndexedAt)} ·{' '}
+                                {snap.artifactCount.toLocaleString()} artifacts ·{' '}
+                                {snap.edgeCount.toLocaleString()} refs
+                              </span>
+                              {snap.stale && <span className="stale-badge">stale</span>}
+                            </>
+                          ) : (
+                            <span>metadata never synced</span>
+                          )}
+                          {syncError && !snap?.syncing && (
+                            <span className="sync-error" title={syncError}>
+                              sync failed: {syncError.slice(0, 80)}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                   <div className="grant-badges">
                     {GRANT_LABELS.map(([key, label]) => (
@@ -226,6 +274,12 @@ export function ConnectionsScreen() {
                     ))}
                   </div>
                   <div className="row-actions">
+                    <button
+                      disabled={snapshots[c.id]?.syncing}
+                      onClick={() => void syncSnapshot(c.id)}
+                    >
+                      {snapshots[c.id]?.syncing ? 'Syncing…' : 'Sync'}
+                    </button>
                     <button
                       onClick={() => setEditingGrants(editingGrants === c.id ? null : c.id)}
                     >

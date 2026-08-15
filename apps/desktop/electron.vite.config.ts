@@ -10,7 +10,12 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
-        input: { index: 'src/main/index.ts' },
+        input: {
+          index: 'src/main/index.ts',
+          // The snapshot CPU worker: forked as a utilityProcess so unzip/
+          // index/reference-extraction never block the UI thread.
+          snapshotWorker: 'src/main/workers/snapshotWorker.ts',
+        },
         // Workspace packages stay external so the engine runs from its own
         // built dist with its own node_modules — that's where the native
         // addons resolve from. Bundling it would re-break that resolution.
