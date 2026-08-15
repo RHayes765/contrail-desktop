@@ -8,3 +8,6 @@ release/
 *.tsbuildinfo
 coverage/
 .secrets/
+
+# local diagnostic outputs
+*-diag.json
