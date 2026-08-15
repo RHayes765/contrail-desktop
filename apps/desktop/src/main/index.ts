@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, Notification, shell } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { log } from '@contrail/engine';
@@ -8,7 +8,40 @@ import { registerHandlers } from './ipc/registry.js';
 import { makeHandlers, type MainServices } from './ipc/handlers.js';
 import { ConnectionService } from './services/connections.js';
 import { ProjectService } from './services/projects.js';
-import { AgentSessionManager } from './services/agentRuntime.js';
+import { AgentSessionManager, type SessionAlert } from './services/agentRuntime.js';
+
+// Windows toasts need an AppUserModelID; unpackaged dev builds borrow the
+// executable's so notifications display instead of silently dropping.
+app.setAppUserModelId(app.isPackaged ? 'com.lanefour.contrail' : process.execPath);
+
+/**
+ * Completion alerts, Claude-Desktop style: only when the user is NOT looking
+ * at the app (unfocused/minimized), flash the taskbar and raise an OS
+ * notification whose click brings Contrail forward. A focused window means
+ * the user is watching the reply stream — no alert.
+ */
+function alertUser(info: SessionAlert): void {
+  const win = mainWindow;
+  if (!win || win.isDestroyed() || win.isFocused()) return;
+  win.flashFrame(true);
+  if (!Notification.isSupported()) return;
+  const title =
+    info.kind === 'done'
+      ? `${info.projectName} — reply ready`
+      : info.kind === 'error'
+        ? `${info.projectName} — session error`
+        : `${info.projectName} — session ended`;
+  const notification = new Notification({ title, body: info.text, silent: false });
+  notification.on('click', () => {
+    const w = mainWindow;
+    if (!w || w.isDestroyed()) return;
+    if (w.isMinimized()) w.restore();
+    w.show();
+    w.focus();
+    w.flashFrame(false);
+  });
+  notification.show();
+}
 
 /**
  * Contrail desktop — main process. Hardening posture (spec §8), set before
@@ -101,6 +134,8 @@ function createWindow(): void {
   });
 
   mainWindow.once('ready-to-show', () => mainWindow?.show());
+  // Coming back to the app clears any completion flash.
+  mainWindow.on('focus', () => mainWindow?.flashFrame(false));
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
@@ -279,7 +314,13 @@ app.whenReady().then(async () => {
   const connections = new ConnectionService(boot.deps, (reason) =>
     push('connections:changed', { reason }),
   );
-  sessionManager = new AgentSessionManager(boot.deps, projects, runtimeChildPath(), push);
+  sessionManager = new AgentSessionManager(
+    boot.deps,
+    projects,
+    runtimeChildPath(),
+    push,
+    alertUser,
+  );
 
   const services: MainServices = {
     connections,

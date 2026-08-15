@@ -387,9 +387,21 @@ export class AgentSessionRun {
 
 type PushFn = <C extends PushChannel>(channel: C, payload: PushEvents[C]) => void;
 
+/** Something alert-worthy happened while the user may not be watching. */
+export interface SessionAlert {
+  sessionId: string;
+  projectName: string;
+  kind: 'done' | 'error' | 'ended';
+  /** Short human text: the reply's start, the error, or the end reason. */
+  text: string;
+}
+
+type AlertFn = (alert: SessionAlert) => void;
+
 interface LiveSession {
   sessionId: string;
   projectId: string;
+  projectName: string;
   child: UtilityProcess;
   run: AgentSessionRun;
   ctx: SessionContext;
@@ -433,6 +445,8 @@ export class AgentSessionManager {
     private readonly silo: ProjectService,
     private readonly childPath: string,
     private readonly push: PushFn,
+    /** Optional OS-alert hook — index.ts decides focus rules; headless modes omit it. */
+    private readonly alert: AlertFn = () => undefined,
   ) {
     // A crash or force-kill leaves rows stuck 'active'; nothing can genuinely
     // be active before this manager exists, so close them out at startup.
@@ -747,6 +761,7 @@ export class AgentSessionManager {
     const entry: LiveSession = {
       sessionId,
       projectId: spec.project.id,
+      projectName: spec.project.name,
       child,
       run,
       ctx,
@@ -788,6 +803,12 @@ export class AgentSessionManager {
         this.push('session:event', {
           sessionId,
           event: { type: 'session_ended', reason: 'The session runtime crashed.' },
+        });
+        this.alert({
+          sessionId,
+          projectName: spec.project.name,
+          kind: 'ended',
+          text: 'The session runtime crashed.',
         });
         this.teardown(entry, 'error');
       }
@@ -928,12 +949,16 @@ export class AgentSessionManager {
         // The live query ended on its own — budget/turn cap tripped or a
         // fatal SDK error. The child already emitted error+done; close the
         // session out so it cannot zombie as 'active'.
+        const reason = entry.lastError ?? 'The session reached its budget or turn limit.';
         this.push('session:event', {
           sessionId: entry.sessionId,
-          event: {
-            type: 'session_ended',
-            reason: entry.lastError ?? 'The session reached its budget or turn limit.',
-          },
+          event: { type: 'session_ended', reason },
+        });
+        this.alert({
+          sessionId: entry.sessionId,
+          projectName: entry.projectName,
+          kind: 'ended',
+          text: reason.slice(0, 140),
         });
         this.teardown(entry, entry.lastError ? 'error' : 'ended');
       }
@@ -967,10 +992,26 @@ export class AgentSessionManager {
     } else if (event.type === 'error') {
       entry.lastError = event.message;
       this.writeTranscript(entry, { kind: 'error', message: event.message });
+      if (entry.status === 'active') {
+        this.alert({
+          sessionId: entry.sessionId,
+          projectName: entry.projectName,
+          kind: 'error',
+          text: event.message.slice(0, 140),
+        });
+      }
     } else if (event.type === 'done' && event.result !== null) {
       // A turn completed cleanly — an earlier recovered error must not brand
       // the whole session 'error' at teardown.
       entry.lastError = null;
+      if (entry.status === 'active') {
+        this.alert({
+          sessionId: entry.sessionId,
+          projectName: entry.projectName,
+          kind: 'done',
+          text: event.result.slice(0, 140),
+        });
+      }
     }
     this.forward(entry, event);
   }
