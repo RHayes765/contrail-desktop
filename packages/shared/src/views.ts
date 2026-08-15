@@ -466,21 +466,21 @@ export const CONNECTOR_PRESETS: ConnectorPresetView[] = [
     label: 'Gmail',
     transport: 'http',
     urlSuggestion: 'https://gmailmcp.googleapis.com/mcp/v1',
-    note: 'Google’s official Gmail MCP server. Google requires your own OAuth client: create a Desktop-app client in Google Cloud Console (with the Gmail API enabled), paste its ID + secret under “OAuth client…”, then Authorize.',
+    note: 'Google’s official Gmail MCP server. In the Google Cloud project that owns your OAuth client, enable BOTH the “Gmail API” and the “Gmail MCP API” (gmailmcp.googleapis.com) — the second one is the step everyone misses and causes 403s after login. Consent screen: add the gmail.readonly and gmail.compose scopes and yourself as a test user. Then paste the client ID + secret under “OAuth client…” and Authorize.',
   },
   {
     kind: 'gdrive',
     label: 'Google Drive',
     transport: 'http',
     urlSuggestion: 'https://drivemcp.googleapis.com/mcp/v1',
-    note: 'Google’s official Drive MCP server. Google requires your own OAuth client: create a Desktop-app client in Google Cloud Console (with the Drive API enabled), paste its ID + secret under “OAuth client…”, then Authorize.',
+    note: 'Google’s official Drive MCP server. Enable BOTH the “Google Drive API” and the “Drive MCP API” (drivemcp.googleapis.com) on your OAuth client’s project — the MCP API is the step everyone misses. Add Drive scopes + yourself as a test user on the consent screen, paste the client ID + secret under “OAuth client…”, then Authorize.',
   },
   {
     kind: 'gcalendar',
     label: 'Google Calendar',
     transport: 'http',
     urlSuggestion: 'https://calendarmcp.googleapis.com/mcp/v1',
-    note: 'Google’s official Calendar MCP server. Google requires your own OAuth client: create a Desktop-app client in Google Cloud Console (with the Calendar API enabled), paste its ID + secret under “OAuth client…”, then Authorize.',
+    note: 'Google’s official Calendar MCP server. Enable BOTH the “Google Calendar API” and the “Calendar MCP API” (calendarmcp.googleapis.com) on your OAuth client’s project — the MCP API is the step everyone misses. Add Calendar scopes + yourself as a test user on the consent screen, paste the client ID + secret under “OAuth client…”, then Authorize.',
   },
 ];
 

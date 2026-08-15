@@ -414,9 +414,21 @@ async function testHttpServer(
         body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
       });
       if (listRes.status === 401 || listRes.status === 403) {
+        // The provider's error body names the actual problem (disabled API,
+        // missing scope, unverified app) — surface it instead of guessing.
+        let reason = '';
+        try {
+          const bodyText = await listRes.text();
+          const parsed = parseMcpBody(listRes.headers.get('content-type') ?? '', bodyText) as {
+            error?: { message?: string };
+          } | null;
+          reason = String(parsed?.error?.message ?? bodyText).slice(0, 260);
+        } catch {
+          /* no body */
+        }
         return {
           status: 'needs_auth',
-          detail: `The server accepts anonymous handshakes${serverName ? ` ("${serverName}")` : ''} but its tools require authentication (HTTP ${listRes.status} on tools/list) — OAuth-only until authorized.`,
+          detail: `Tools rejected with HTTP ${listRes.status}${serverName ? ` (server "${serverName}")` : ''}${reason ? ` — provider says: ${reason}` : ' — authentication required or insufficient.'}`,
           tools: [],
         };
       }
