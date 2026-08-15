@@ -49,6 +49,8 @@ export interface HealthView {
   ok: boolean;
   appVersion: string;
   dataDir: string;
+  /** The database file the engine ACTUALLY opened (better-sqlite3 db.name). */
+  dbFile: string;
   schemaVersion: number;
   nativeModules: {
     betterSqlite3: { ok: boolean; detail: string };

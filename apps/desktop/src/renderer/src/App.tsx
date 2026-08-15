@@ -94,7 +94,8 @@ export function App() {
         <footer className="statusbar">
           <span>Contrail {health.appVersion}</span>
           <span>engine ok · schema v{health.schemaVersion}</span>
-          <span>{health.dataDir}</span>
+          {/* The file the engine ACTUALLY opened — db.name, never a computed path. */}
+          <span title={`dataDir: ${health.dataDir}`}>{health.dbFile}</span>
         </footer>
       )}
     </div>

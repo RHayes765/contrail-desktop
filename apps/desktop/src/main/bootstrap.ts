@@ -48,10 +48,19 @@ export function bootstrap(
   const schemaVersion = deps.db.schemaVersion();
   const connectionCount = deps.db.listConnections().length;
 
+  // Ground truth to the terminal: the file the engine ACTUALLY opened plus
+  // the env that decided it. A computed dataDir() can lie; db.name cannot.
+  console.log(
+    `[contrail] db opened: ${deps.db.file}\n` +
+      `[contrail] LOCALAPPDATA=${process.env.LOCALAPPDATA ?? '(unset)'} ` +
+      `CONTRAIL_DATA_DIR=${process.env.CONTRAIL_DATA_DIR ?? '(unset)'} cwd=${process.cwd()}`,
+  );
+
   const health: HealthView = {
     ok: true,
     appVersion,
     dataDir: dataDir(),
+    dbFile: deps.db.file,
     schemaVersion,
     nativeModules: { betterSqlite3: sqlite, keyring },
     connectionCount,

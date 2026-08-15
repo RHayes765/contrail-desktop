@@ -54,6 +54,14 @@ export class ContrailDb {
     this.migrate();
   }
 
+  /**
+   * The file better-sqlite3 ACTUALLY opened — ground truth, not a computed
+   * path. Diagnostics must show this, never re-derive dataDir().
+   */
+  get file(): string {
+    return this.db.name;
+  }
+
   /** The stored schema version (SQLite user_version). */
   schemaVersion(): number {
     return this.db.pragma('user_version', { simple: true }) as number;
