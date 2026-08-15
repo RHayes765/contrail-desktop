@@ -33,6 +33,10 @@ export interface FlowGraphNode {
   kind: FlowNodeKind;
   /** Extra context: action name for actions, object for record ops. */
   detail: string | null;
+  /** Inspector rows: decision criteria, query filters, assignments, … */
+  props: Array<{ name: string; value: string }>;
+  /** The element's raw XML block — the inspector's ground-truth fallback. */
+  xml: string;
 }
 
 export type FlowEdgeKind = 'normal' | 'fault' | 'decision' | 'loop_next' | 'loop_end';
@@ -90,6 +94,104 @@ function connectorTarget(block: string, connectorTag: string): string | null {
   return match?.[1]?.trim() ?? null;
 }
 
+/** Render a Flow value block (<elementReference>/<stringValue>/…) as display text. */
+function valueText(block: string): string {
+  const ref = tagValue(block, 'elementReference');
+  if (ref != null) return `{!${ref}}`;
+  for (const tag of ['stringValue', 'numberValue', 'booleanValue', 'dateValue', 'dateTimeValue', 'apexValue']) {
+    const v = tagValue(block, tag);
+    if (v != null) return v;
+  }
+  if (/<value\s*\/>|<value>\s*<\/value>/.test(block)) return '(empty)';
+  return '';
+}
+
+/** "field operator value" line from a condition/filter block. */
+function conditionText(block: string): string {
+  const left =
+    tagValue(block, 'leftValueReference') ?? tagValue(block, 'field') ?? '?';
+  const operator = tagValue(block, 'operator') ?? '=';
+  const rightBlock = block.match(/<(rightValue|value)>([\s\S]*?)<\/\1>/);
+  const right = rightBlock ? valueText(rightBlock[2] ?? '') : '';
+  return `${left} ${operator}${right ? ' ' + right : ''}`;
+}
+
+/** Best-effort per-kind inspector rows. Crash-safe: unknown shapes yield []. */
+function extractProps(block: string, kind: FlowNodeKind): Array<{ name: string; value: string }> {
+  const props: Array<{ name: string; value: string }> = [];
+  const push = (name: string, value: string | null): void => {
+    if (value) props.push({ name, value });
+  };
+  if (kind === 'decision') {
+    for (const rule of extractChildBlocks(block, 'rules')) {
+      const conditions = extractChildBlocks(rule, 'conditions').map(conditionText);
+      const logic = tagValue(rule, 'conditionLogic');
+      push(
+        tagValue(rule, 'label') ?? tagValue(rule, 'name') ?? 'rule',
+        conditions.join(logic === 'or' ? ' OR ' : ' AND ') || '(no conditions)',
+      );
+    }
+    push('default', tagValue(block, 'defaultConnectorLabel'));
+  } else if (kind === 'recordLookup' || kind === 'recordUpdate' || kind === 'recordDelete') {
+    push('object', tagValue(block, 'object'));
+    const filters = extractChildBlocks(block, 'filters').map(conditionText);
+    if (filters.length > 0) {
+      const logic = tagValue(block, 'filterLogic');
+      push('filters', filters.join(logic === 'or' ? ' OR ' : ' AND '));
+    }
+    push('sort', tagValue(block, 'sortField'));
+    push('first record only', tagValue(block, 'getFirstRecordOnly'));
+    for (const assignment of extractChildBlocks(block, 'inputAssignments')) {
+      push(tagValue(assignment, 'field') ?? 'field', valueText(assignment));
+    }
+  } else if (kind === 'recordCreate') {
+    push('object', tagValue(block, 'object'));
+    for (const assignment of extractChildBlocks(block, 'inputAssignments')) {
+      push(tagValue(assignment, 'field') ?? 'field', valueText(assignment));
+    }
+  } else if (kind === 'assignment') {
+    for (const item of extractChildBlocks(block, 'assignmentItems')) {
+      const target = tagValue(item, 'assignToReference') ?? '?';
+      const operator = tagValue(item, 'operator') ?? 'Assign';
+      props.push({ name: target, value: `${operator} ${valueText(item)}`.trim() });
+    }
+  } else if (kind === 'action') {
+    push('action', tagValue(block, 'actionName'));
+    push('type', tagValue(block, 'actionType'));
+    for (const param of extractChildBlocks(block, 'inputParameters')) {
+      push(tagValue(param, 'name') ?? 'param', valueText(param));
+    }
+  } else if (kind === 'subflow') {
+    push('flow', tagValue(block, 'flowName'));
+    for (const assignment of extractChildBlocks(block, 'inputAssignments')) {
+      push(tagValue(assignment, 'name') ?? 'input', valueText(assignment));
+    }
+  } else if (kind === 'loop') {
+    push('collection', tagValue(block, 'collectionReference'));
+    push('order', tagValue(block, 'iterationOrder'));
+  } else if (kind === 'start') {
+    push('object', tagValue(block, 'object'));
+    push('trigger', tagValue(block, 'triggerType'));
+    push('on', tagValue(block, 'recordTriggerType'));
+    const filters = extractChildBlocks(block, 'filters').map(conditionText);
+    if (filters.length > 0) {
+      const logic = tagValue(block, 'filterLogic');
+      push('entry criteria', filters.join(logic === 'or' ? ' OR ' : ' AND '));
+    }
+    push('requires record changed', tagValue(block, 'doesRequireRecordChangedToMeetCriteria'));
+    for (const path of extractChildBlocks(block, 'scheduledPaths')) {
+      const offset = [tagValue(path, 'offsetNumber'), tagValue(path, 'offsetUnit')]
+        .filter(Boolean)
+        .join(' ');
+      push(`path: ${tagValue(path, 'label') ?? tagValue(path, 'name') ?? 'scheduled'}`, offset || 'immediate');
+    }
+  } else if (kind === 'collection') {
+    push('type', tagValue(block, 'collectionProcessorType'));
+    push('collection', tagValue(block, 'collectionReference'));
+  }
+  return props;
+}
+
 export function parseFlowGraph(xml: string): FlowGraph {
   const nodes: FlowGraphNode[] = [];
   const edges: FlowGraphEdge[] = [];
@@ -116,7 +218,14 @@ export function parseFlowGraph(xml: string): FlowGraph {
         detail = tagValue(block, 'object');
       else if (kind === 'subflow') detail = tagValue(block, 'flowName');
       else if (kind === 'collection') detail = tagValue(block, 'collectionProcessorType');
-      nodes.push({ name, label: tagValue(block, 'label') ?? name, kind, detail });
+      nodes.push({
+        name,
+        label: tagValue(block, 'label') ?? name,
+        kind,
+        detail,
+        props: extractProps(block, kind),
+        xml: block.trim(),
+      });
 
       if (kind === 'decision') {
         for (const rule of extractChildBlocks(block, 'rules')) {
@@ -172,7 +281,14 @@ export function parseFlowGraph(xml: string): FlowGraph {
   const startBlock = startBlocks[0] ?? null;
   let trigger: string | null = null;
   defined.add('__start');
-  nodes.unshift({ name: '__start', label: 'Start', kind: 'start', detail: null });
+  nodes.unshift({
+    name: '__start',
+    label: 'Start',
+    kind: 'start',
+    detail: null,
+    props: startBlock ? extractProps(startBlock, 'start') : [],
+    xml: startBlock?.trim() ?? '',
+  });
   if (startBlock) {
     const object = tagValue(startBlock, 'object');
     const triggerType = tagValue(startBlock, 'triggerType');

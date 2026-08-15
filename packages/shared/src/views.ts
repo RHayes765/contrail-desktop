@@ -176,7 +176,14 @@ export interface FlowGraphView {
   processType: string | null;
   status: string | null;
   trigger: string | null;
-  nodes: Array<{ name: string; label: string; kind: string; detail: string | null }>;
+  nodes: Array<{
+    name: string;
+    label: string;
+    kind: string;
+    detail: string | null;
+    props: Array<{ name: string; value: string }>;
+    xml: string;
+  }>;
   edges: Array<{ from: string; to: string; kind: string; label: string | null }>;
   unresolved: string[];
 }

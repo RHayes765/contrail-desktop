@@ -85,3 +85,58 @@ describe('parseFlowGraph', () => {
     expect(checked).toBeGreaterThan(0);
   });
 });
+
+describe('inspector props', () => {
+  it('extracts decision criteria, start entry conditions, and scheduled paths', () => {
+    const g = parseFlowGraph(`<?xml version="1.0"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <start>
+    <object>Case</object>
+    <triggerType>RecordAfterSave</triggerType>
+    <filterLogic>and</filterLogic>
+    <filters><field>Priority</field><operator>EqualTo</operator><value><stringValue>High</stringValue></value></filters>
+    <filters><field>IsClosed</field><operator>EqualTo</operator><value><booleanValue>false</booleanValue></value></filters>
+    <scheduledPaths>
+      <name>Delay</name><label>Delayed</label>
+      <offsetNumber>1</offsetNumber><offsetUnit>Minutes</offsetUnit>
+      <connector><targetReference>Check</targetReference></connector>
+    </scheduledPaths>
+  </start>
+  <decisions>
+    <name>Check</name><label>Check</label>
+    <rules>
+      <name>Is_Big</name><label>Is Big</label>
+      <conditionLogic>and</conditionLogic>
+      <conditions><leftValueReference>$Record.Amount</leftValueReference><operator>GreaterThan</operator><rightValue><numberValue>100</numberValue></rightValue></conditions>
+      <connector><targetReference>Fetch</targetReference></connector>
+    </rules>
+  </decisions>
+  <recordLookups>
+    <name>Fetch</name><label>Fetch</label>
+    <object>Asset</object>
+    <filters><field>Status</field><operator>EqualTo</operator><value><stringValue>Active</stringValue></value></filters>
+    <getFirstRecordOnly>true</getFirstRecordOnly>
+  </recordLookups>
+</Flow>`);
+    const start = g.nodes.find((n) => n.name === '__start');
+    expect(start?.props).toEqual(
+      expect.arrayContaining([
+        { name: 'entry criteria', value: 'Priority EqualTo High AND IsClosed EqualTo false' },
+        { name: 'path: Delayed', value: '1 Minutes' },
+      ]),
+    );
+    const decision = g.nodes.find((n) => n.name === 'Check');
+    expect(decision?.props).toEqual([
+      { name: 'Is Big', value: '$Record.Amount GreaterThan 100' },
+    ]);
+    const lookup = g.nodes.find((n) => n.name === 'Fetch');
+    expect(lookup?.props).toEqual(
+      expect.arrayContaining([
+        { name: 'object', value: 'Asset' },
+        { name: 'filters', value: 'Status EqualTo Active' },
+        { name: 'first record only', value: 'true' },
+      ]),
+    );
+    expect(lookup?.xml).toContain('<object>Asset</object>');
+  });
+});

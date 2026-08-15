@@ -946,3 +946,51 @@ button.danger {
 }
 
 .flow-fullscreen .flow-scroll { flex: 1; max-height: none; }
+
+/* ── S6.5: node inspector + end-labels ───────────────────────────────── */
+
+.flow-stage { display: flex; gap: 10px; min-height: 0; flex: 1; }
+.flow-stage .flow-scroll { flex: 1; }
+
+.flow-node-hit { cursor: pointer; }
+.flow-node.selected { stroke-width: 3; filter: brightness(1.25); }
+
+.flow-inspector {
+  width: 320px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  padding: 12px 14px;
+  overflow-y: auto;
+  max-height: calc(100vh - 320px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.flow-fullscreen .flow-inspector { max-height: none; }
+
+.flow-inspector-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.flow-inspector-head button {
+  all: unset; cursor: pointer; color: var(--text-dim); padding: 2px 7px;
+  border-radius: 5px;
+}
+.flow-inspector-head button:hover { color: var(--text); background: var(--bg-hover); }
+
+.flow-props { border-collapse: collapse; font-size: 12.5px; width: 100%; }
+.flow-props td { border-bottom: 1px solid var(--border); padding: 5px 8px 5px 0; vertical-align: top; }
+.flow-prop-name { color: var(--text-dim); white-space: nowrap; max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+.flow-prop-value { word-break: break-word; }
+
+.flow-xml-toggle {
+  all: unset; cursor: pointer; font-size: 12px; color: var(--accent);
+  padding: 2px 0;
+}
+
+.flow-inspector-xml { max-height: 300px; font-size: 11px; }

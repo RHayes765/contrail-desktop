@@ -132,7 +132,9 @@ function layout(graph: FlowGraphView): {
     stacks.set(node.name, { gotoCount, labeledCount, stackPx });
     maxStack = Math.max(maxStack, stackPx);
   }
-  const rowGap = Math.max(MIN_ROW_GAP, maxStack + 40);
+  // Room for source-side stacks below nodes AND end-labels above targets
+  // (two alternating bands) — labels can never reach into either.
+  const rowGap = Math.max(MIN_ROW_GAP + 30, maxStack + 2 * LABEL_STEP + 26);
   const gapY = NODE_H + rowGap;
 
   const rows = new Map<number, string[]>();
@@ -214,10 +216,15 @@ function planEdges(
   const drawn: DrawnEdge[] = [];
   const pills: GoToPill[] = [];
   const bySource = new Map<string, typeof graph.edges>();
+  const inboundCount = new Map<string, number>();
+  const inboundSeen = new Map<string, number>();
   for (const edge of graph.edges) {
     const list = bySource.get(edge.from) ?? [];
     list.push(edge);
     bySource.set(edge.from, list);
+    if ((depth.get(edge.to) ?? -99) === (depth.get(edge.from) ?? 0) + 1) {
+      inboundCount.set(edge.to, (inboundCount.get(edge.to) ?? 0) + 1);
+    }
   }
   for (const [from, edges] of bySource) {
     const a = placed.get(from);
@@ -228,8 +235,7 @@ function planEdges(
     );
     const gotos = edges.filter((e) => !drawable.includes(e));
 
-    // Attachment stack under the node: go-to pills first, then branch
-    // labels — each on its OWN line, so nothing can overlap horizontally.
+    // Go-to pills stack under the node, one per line.
     const pillsBase = a.y + NODE_H + 6;
     gotos.forEach((edge, i) => {
       const target = placed.get(edge.to);
@@ -241,19 +247,24 @@ function planEdges(
         fault: edge.kind === 'fault',
       });
     });
-    const labelsBase = pillsBase + gotos.length * (PILL_H + 3) + 14;
-    // The horizontal jog runs BELOW the whole attachment stack.
     const stackPx = stacks.get(from)?.stackPx ?? 0;
-    let labelSlot = 0;
 
     drawable.forEach((edge, i) => {
       const b = placed.get(edge.to) as Placed;
       const spread = (i - (drawable.length - 1) / 2) * 22;
       const x1 = a.x + NODE_W / 2 + spread;
       const y1 = a.y + NODE_H;
-      const x2 = b.x + NODE_W / 2;
+      // Arrival spread: converging edges each get their own landing x on the
+      // target, so final segments never merge — and each end-label gets its
+      // own column right above where its line lands.
+      const arrivals = inboundCount.get(edge.to) ?? 1;
+      const slot = inboundSeen.get(edge.to) ?? 0;
+      inboundSeen.set(edge.to, slot + 1);
+      const arrivalSpread =
+        arrivals > 1 ? (slot - (arrivals - 1) / 2) * Math.min(34, (NODE_W - 24) / arrivals) : 0;
+      const x2 = b.x + NODE_W / 2 + arrivalSpread;
       const y2 = b.y;
-      const jogY = Math.min(y2 - 10, y1 + stackPx + 18);
+      const jogY = Math.min(y2 - LABEL_STEP - 12, y1 + stackPx + 18);
       drawn.push({
         path:
           Math.abs(x1 - x2) < 2
@@ -261,20 +272,28 @@ function planEdges(
             : `M ${x1} ${y1} L ${x1} ${jogY} L ${x2} ${jogY} L ${x2} ${y2}`,
         fault: edge.kind === 'fault',
         label: edge.label,
-        labelX: x1,
-        labelY: edge.label ? labelsBase + labelSlot++ * LABEL_STEP : 0,
+        // Labels ride the END of the line: on the arrival segment, just
+        // above the target, alternating two bands when arrivals are dense.
+        labelX: x2,
+        labelY: y2 - 10 - (slot % 2) * LABEL_STEP,
       });
     });
   }
   return { drawn, pills };
 }
 
+type FlowNode = FlowGraphView['nodes'][number];
+
 function Canvas({
   graph,
   onJump,
+  selected,
+  onSelect,
 }: {
   graph: FlowGraphView;
   onJump: (name: string) => void;
+  selected: string | null;
+  onSelect: (node: FlowNode) => void;
 }) {
   const { placed, width, height, depth, stacks } = useMemo(() => layout(graph), [graph]);
   const { drawn, pills } = useMemo(
@@ -337,34 +356,84 @@ function Canvas({
           </text>
         </g>
       ))}
-      {[...placed.values()].map((node) => (
-        <g key={node.name} id={`flow-node-${node.name}`}>
-          <rect
-            x={node.x}
-            y={node.y}
-            width={NODE_W}
-            height={NODE_H}
-            rx={8}
-            className="flow-node"
-            stroke={KIND_COLORS[node.kind] ?? 'var(--border)'}
-          />
-          <text x={node.x + 10} y={node.y + 20} className="flow-node-title">
-            {truncate(node.label, 22)}
-          </text>
-          <text x={node.x + 10} y={node.y + 37} className="flow-node-kind">
-            {truncate(
-              [KIND_LABELS[node.kind] ?? node.kind, node.detail].filter(Boolean).join(' · '),
-              26,
-            )}
-          </text>
-        </g>
-      ))}
+      {[...placed.values()].map((node) => {
+        const full = graph.nodes.find((n) => n.name === node.name);
+        return (
+          <g
+            key={node.name}
+            id={`flow-node-${node.name}`}
+            className="flow-node-hit"
+            onClick={() => full && onSelect(full)}
+          >
+            <rect
+              x={node.x}
+              y={node.y}
+              width={NODE_W}
+              height={NODE_H}
+              rx={8}
+              className={selected === node.name ? 'flow-node selected' : 'flow-node'}
+              stroke={KIND_COLORS[node.kind] ?? 'var(--border)'}
+            />
+            <text x={node.x + 10} y={node.y + 20} className="flow-node-title">
+              {truncate(node.label, 22)}
+            </text>
+            <text x={node.x + 10} y={node.y + 37} className="flow-node-kind">
+              {truncate(
+                [KIND_LABELS[node.kind] ?? node.kind, node.detail].filter(Boolean).join(' · '),
+                26,
+              )}
+            </text>
+          </g>
+        );
+      })}
     </svg>
+  );
+}
+
+/** Flow Builder-style attribute panel for the clicked node. */
+function InspectorPanel({ node, onClose }: { node: FlowNode; onClose: () => void }) {
+  const [showXml, setShowXml] = useState(false);
+  return (
+    <div className="flow-inspector">
+      <div className="flow-inspector-head">
+        <div>
+          <div className="conn-alias">{node.label}</div>
+          <div className="conn-detail">
+            {KIND_LABELS[node.kind] ?? node.kind}
+            {node.detail && ` · ${node.detail}`}
+          </div>
+        </div>
+        <button onClick={onClose}>✕</button>
+      </div>
+      {node.props.length > 0 ? (
+        <table className="flow-props">
+          <tbody>
+            {node.props.map((p, i) => (
+              <tr key={i}>
+                <td className="flow-prop-name">{p.name}</td>
+                <td className="flow-prop-value">{p.value}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <p className="conn-detail">No parsed attributes for this element kind.</p>
+      )}
+      {node.xml && (
+        <>
+          <button className="flow-xml-toggle" onClick={() => setShowXml((v) => !v)}>
+            {showXml ? 'Hide element XML' : 'Element XML'}
+          </button>
+          {showXml && <pre className="meta-source flow-inspector-xml">{node.xml}</pre>}
+        </>
+      )}
+    </div>
   );
 }
 
 export function FlowDiagram({ graph }: { graph: FlowGraphView }) {
   const [fullscreen, setFullscreen] = useState(false);
+  const [selected, setSelected] = useState<FlowNode | null>(null);
 
   useEffect(() => {
     if (!fullscreen) return;
@@ -395,8 +464,16 @@ export function FlowDiagram({ graph }: { graph: FlowGraphView }) {
   const body = (
     <>
       {graph.trigger && <p className="conn-detail">Trigger: {graph.trigger}</p>}
-      <div className="flow-scroll">
-        <Canvas graph={graph} onJump={jump} />
+      <div className="flow-stage">
+        <div className="flow-scroll">
+          <Canvas
+            graph={graph}
+            onJump={jump}
+            selected={selected?.name ?? null}
+            onSelect={(node) => setSelected((cur) => (cur?.name === node.name ? null : node))}
+          />
+        </div>
+        {selected && <InspectorPanel node={selected} onClose={() => setSelected(null)} />}
       </div>
       {graph.unresolved.length > 0 && (
         <p className="conn-detail">Unresolved connector targets: {graph.unresolved.join(', ')}</p>
