@@ -362,6 +362,16 @@ export type ChatEvent =
       server: string;
       status: 'browser_opened' | 'completed' | 'declined';
     }
+  /** Connection state of external MCP servers (surfaced so failures are never silent). */
+  | {
+      type: 'mcp_status';
+      servers: Array<{
+        name: string;
+        status: string;
+        error: string | null;
+        toolCount: number;
+      }>;
+    }
   /**
    * Synthesized by main when the session is over for good (budget/turn cap
    * tripped, fatal error, runtime died) — the renderer must stop treating it

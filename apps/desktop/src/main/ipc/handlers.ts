@@ -179,5 +179,7 @@ export function makeHandlers(health: HealthView, services: MainServices) {
       return { ok: true };
     },
     'mcp:servers:test': (_deps: EngineDeps, req: { id: string }) => mcp.testServer(req.id),
+    'mcp:servers:authorize': (_deps: EngineDeps, req: { id: string }) =>
+      mcp.authorizeServer(req.id),
   };
 }

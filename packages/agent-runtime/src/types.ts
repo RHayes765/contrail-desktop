@@ -91,6 +91,16 @@ export type AgentEvent =
       server: string;
       status: 'browser_opened' | 'completed' | 'declined';
     }
+  /** Connection state of external MCP servers, straight from the SDK. */
+  | {
+      type: 'mcp_status';
+      servers: Array<{
+        name: string;
+        status: string;
+        error: string | null;
+        toolCount: number;
+      }>;
+    }
   /** The SDK announced its session id (init) — main stores it as the resume handle. */
   | { type: 'sdk_session'; sdkSessionId: string };
 

@@ -174,6 +174,8 @@ async function pumpEvents(q: Query): Promise<void> {
           server: (msg as { mcp_server_name?: string }).mcp_server_name ?? 'unknown',
           status: 'completed',
         });
+        // Auth just landed — report the post-auth connection state.
+        setTimeout(() => void reportMcpStatus(q, false), 1_500);
         continue;
       }
       if (msg.type === 'stream_event') {
@@ -241,6 +243,45 @@ async function pumpEvents(q: Query): Promise<void> {
   }
 }
 
+/** Servers we already forced a connection attempt for (one nudge each). */
+const nudgedServers = new Set<string>();
+
+/**
+ * Surface external-server state and, once per needs-auth server, force a
+ * reconnect — the connection attempt is what raises the url-mode OAuth
+ * elicitation. Without this a needs-auth server just sits there silently.
+ */
+async function reportMcpStatus(q: Query, nudge: boolean): Promise<void> {
+  try {
+    const statuses = await q.mcpServerStatus();
+    const external = statuses.filter((s) => s.name !== 'contrail');
+    if (external.length === 0) return;
+    emit({
+      type: 'mcp_status',
+      servers: external.map((s) => ({
+        name: s.name,
+        status: s.status,
+        error: s.error ?? null,
+        toolCount: s.tools?.length ?? 0,
+      })),
+    });
+    if (!nudge) return;
+    for (const s of external) {
+      if (s.status === 'needs-auth' && !nudgedServers.has(s.name)) {
+        nudgedServers.add(s.name);
+        void q
+          .reconnectMcpServer(s.name)
+          .then(() => reportMcpStatus(q, false))
+          .catch(() => {
+            /* the elicitation path itself reports failures */
+          });
+      }
+    }
+  } catch {
+    /* status unavailable — query winding down */
+  }
+}
+
 function startSession(sessionCtx: SessionContext): void {
   const options = buildSessionOptions(sessionCtx, invokeViaBridge, handleElicitation);
   options.includePartialMessages = true;
@@ -248,6 +289,13 @@ function startSession(sessionCtx: SessionContext): void {
   // the CLI handshake is local, so an untouched session costs nothing.
   live = query({ prompt: input, options });
   void pumpEvents(live);
+  if ((sessionCtx.externalServers ?? []).length > 0) {
+    const q = live;
+    // First check after the alwaysLoad connect window; second after the
+    // nudge/elicitation had time to move things.
+    setTimeout(() => void reportMcpStatus(q, true), 3_000);
+    setTimeout(() => void reportMcpStatus(q, false), 15_000);
+  }
 }
 
 parentPort.on('message', (e) => {

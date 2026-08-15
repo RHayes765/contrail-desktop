@@ -158,6 +158,7 @@ export const REQUEST_SCHEMAS = {
   }),
   'mcp:servers:remove': z.object({ id: ID }),
   'mcp:servers:test': z.object({ id: ID }),
+  'mcp:servers:authorize': z.object({ id: ID }),
 } as const;
 
 export type Channel = keyof typeof REQUEST_SCHEMAS;
@@ -285,6 +286,10 @@ export interface Contracts {
   };
   'mcp:servers:remove': { req: { id: string }; res: { ok: boolean } };
   'mcp:servers:test': { req: { id: string }; res: McpServerTestView };
+  'mcp:servers:authorize': {
+    req: { id: string };
+    res: { ok: boolean; detail: string; test: McpServerTestView | null };
+  };
 }
 
 // Compile-time check: every contract has a schema and vice versa.

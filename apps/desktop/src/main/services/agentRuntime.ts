@@ -490,6 +490,8 @@ export class AgentSessionManager {
     private readonly push: PushFn,
     /** Optional OS-alert hook — index.ts decides focus rules; headless modes omit it. */
     private readonly alert: AlertFn = () => undefined,
+    /** Browser opener for OAuth URLs — headless diagnostics record instead of opening. */
+    private readonly openUrl: (url: string) => void = (url) => void shell.openExternal(url),
   ) {
     // A crash or force-kill leaves rows stuck 'active'; nothing can genuinely
     // be active before this manager exists, so close them out at startup.
@@ -1016,7 +1018,7 @@ export class AgentSessionManager {
       // file:/javascript: URL gets declined, not opened.
       const accept = isSafeAuthUrl(raw.url);
       if (accept) {
-        void shell.openExternal(raw.url);
+        this.openUrl(raw.url);
         this.deps.audit.record('mcp.oauth_browser_opened', {
           tool: 'agent_session',
           outcome: 'success',
@@ -1102,6 +1104,8 @@ export class AgentSessionManager {
         server: event.server,
         status: event.status,
       });
+    } else if (event.type === 'mcp_status') {
+      this.writeTranscript(entry, { kind: 'mcp_status', servers: event.servers });
     } else if (event.type === 'error') {
       entry.lastError = event.message;
       this.writeTranscript(entry, { kind: 'error', message: event.message });

@@ -21,6 +21,8 @@ interface McpState {
   loadProject: (projectId: string) => Promise<void>;
   clearError: () => void;
   testServer: (id: string) => Promise<void>;
+  /** Runs Contrail's own MCP OAuth flow (browser login), then re-tests. */
+  authorizeServer: (id: string) => Promise<void>;
   setToggle: (projectId: string, serverKey: string, enabled: boolean) => Promise<boolean>;
   addServer: (req: {
     name: string;
@@ -72,6 +74,26 @@ export const useMcp = create<McpState>((set, get) => ({
       set({ projectId, project, error: null });
     } catch (err) {
       set({ error: String(err) });
+    }
+  },
+
+  authorizeServer: async (id) => {
+    set({ testResults: { ...get().testResults, [id]: 'testing' } });
+    try {
+      const outcome = await ipc.invoke('mcp:servers:authorize', { id });
+      set({
+        testResults: {
+          ...get().testResults,
+          [id]: outcome.test ?? { status: 'failed', detail: outcome.detail, tools: [] },
+        },
+      });
+    } catch (err) {
+      set({
+        testResults: {
+          ...get().testResults,
+          [id]: { status: 'failed', detail: String(err), tools: [] },
+        },
+      });
     }
   },
 

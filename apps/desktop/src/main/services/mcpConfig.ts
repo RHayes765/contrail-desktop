@@ -10,6 +10,21 @@ import {
 } from '@contrail/engine';
 import type { ExternalMcpServerSpec } from '@contrail/agent-runtime';
 import type { CustomMcpServerView, McpServerTestView, ProjectMcpView } from '@contrail/shared';
+import { clearMcpToken, mcpBearerFor, McpOAuthService } from './mcpOauth.js';
+
+/**
+ * The headers a server actually gets: a keychain-stored OAuth bearer (from
+ * the Authorize flow) underneath, user-typed headers on top — someone who
+ * pastes their own Authorization header wins over the stored token.
+ */
+function effectiveHeaders(server: CustomMcpServerRecord): Record<string, string> | undefined {
+  const bearer = server.transport === 'stdio' ? null : mcpBearerFor(server.id);
+  const merged = {
+    ...(bearer ? { Authorization: bearer } : {}),
+    ...(server.config.headers ?? {}),
+  };
+  return Object.keys(merged).length ? merged : undefined;
+}
 
 /**
  * MCP configuration: the standard-catalog toggle surface and the external
@@ -60,13 +75,14 @@ export function resolveSessionMcp(
     let n = 2;
     while (takenKeys.has(key)) key = `${slugifyServerName(server.name)}_${n++}`;
     takenKeys.add(key);
+    const headers = effectiveHeaders(server);
     externalServers.push({
       key,
       transport: server.transport,
       urlOrCommand: server.urlOrCommand,
       ...(server.config.args ? { args: server.config.args } : {}),
       ...(server.config.env ? { env: server.config.env } : {}),
-      ...(server.config.headers ? { headers: server.config.headers } : {}),
+      ...(headers ? { headers } : {}),
     });
     externalServerIds.push(server.id);
   }
@@ -96,13 +112,17 @@ export class McpConfigService {
    * resolved the server at start. Main wires this to
    * AgentSessionManager.endForExternalServer.
    */
+  private readonly oauth: McpOAuthService;
+
   constructor(
     private readonly deps: EngineDeps,
     private readonly onExternalRevoked?: (
       serverId: string,
       projectId?: string,
     ) => Promise<void>,
-  ) {}
+  ) {
+    this.oauth = new McpOAuthService(deps);
+  }
 
   projectView(projectId: string): ProjectMcpView {
     if (!this.deps.db.getProject(projectId)) throw new Error(`Project ${projectId} not found.`);
@@ -222,6 +242,26 @@ export class McpConfigService {
   }
 
   /**
+   * The MCP OAuth flow, run by Contrail itself (the SDK cannot initiate it
+   * — verified empirically). On success the fresh token is proven with a
+   * connection test so the caller gets a real verdict, not "flow finished".
+   */
+  async authorizeServer(
+    id: string,
+  ): Promise<{ ok: boolean; detail: string; test: McpServerTestView | null }> {
+    const outcome = await this.oauth.authorize(id);
+    if (!outcome.ok) {
+      this.deps.audit.record('mcp.oauth_failed', {
+        tool: 'desktop_mcp_panel',
+        outcome: 'error',
+        detail: { id, reason: outcome.detail.slice(0, 300) },
+      });
+      return { ...outcome, test: null };
+    }
+    return { ...outcome, test: await this.testServer(id) };
+  }
+
+  /**
    * A real MCP handshake against the stored config, from main (stored
    * headers/env are attached here and never leave the process; the result
    * carries statuses and tool names only). "Saved" is not "working" — this
@@ -233,7 +273,10 @@ export class McpConfigService {
     const result =
       server.transport === 'stdio'
         ? await testStdioServer(server)
-        : await testHttpServer(server);
+        : await testHttpServer({
+            urlOrCommand: server.urlOrCommand,
+            config: { headers: effectiveHeaders(server) },
+          });
     this.deps.audit.record('mcp.server_tested', {
       tool: 'desktop_mcp_panel',
       outcome: result.status === 'connected' ? 'success' : 'error',
@@ -246,6 +289,7 @@ export class McpConfigService {
     const current = this.deps.db.getCustomMcpServer(id);
     // End affected sessions BEFORE the rows go — same order as projects:delete.
     if (current) await this.onExternalRevoked?.(id);
+    clearMcpToken(id);
     this.deps.db.removeCustomMcpServer(id);
     if (current) {
       this.deps.audit.record('mcp.server_removed', {
@@ -329,39 +373,60 @@ async function testHttpServer(
         tools: [],
       };
     }
-    // Best-effort tool listing (needs the session header on most servers).
+    // A handshake alone is NOT proof of usability: stateless servers
+    // (Google's) accept anonymous initialize and only reject real work.
+    // tools/list is the honesty check.
     const sessionId = res.headers.get('mcp-session-id');
-    let tools: string[] = [];
-    if (sessionId) {
-      try {
-        const listRes = await fetch(server.urlOrCommand, {
-          method: 'POST',
-          signal: controller.signal,
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json, text/event-stream',
-            'mcp-session-id': sessionId,
-            ...(server.config.headers ?? {}),
-          },
-          body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
-        });
-        const listBody = parseMcpBody(
-          listRes.headers.get('content-type') ?? '',
-          await listRes.text(),
-        ) as { result?: { tools?: Array<{ name?: string }> } } | null;
-        tools = (listBody?.result?.tools ?? [])
-          .map((t) => t.name ?? '')
-          .filter(Boolean);
-      } catch {
-        /* initialize succeeded — tool listing is a bonus */
-      }
-    }
     const serverName = result.serverInfo?.name;
-    return {
-      status: 'connected',
-      detail: serverName ? `Connected to "${serverName}".` : 'Connected.',
-      tools,
-    };
+    try {
+      const listRes = await fetch(server.urlOrCommand, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
+          ...(server.config.headers ?? {}),
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+      });
+      if (listRes.status === 401 || listRes.status === 403) {
+        return {
+          status: 'needs_auth',
+          detail: `The server accepts anonymous handshakes${serverName ? ` ("${serverName}")` : ''} but its tools require authentication (HTTP ${listRes.status} on tools/list) — OAuth-only until authorized.`,
+          tools: [],
+        };
+      }
+      const listBody = parseMcpBody(
+        listRes.headers.get('content-type') ?? '',
+        await listRes.text(),
+      ) as {
+        result?: { tools?: Array<{ name?: string }> };
+        error?: { message?: string };
+      } | null;
+      if (listBody?.error) {
+        return {
+          status: 'needs_auth',
+          detail: `Handshake OK but tools are not available anonymously: ${String(listBody.error.message ?? 'error').slice(0, 200)}`,
+          tools: [],
+        };
+      }
+      const tools = (listBody?.result?.tools ?? []).map((t) => t.name ?? '').filter(Boolean);
+      return {
+        status: 'connected',
+        detail: serverName
+          ? `Connected to "${serverName}" — ${tools.length} tool${tools.length === 1 ? '' : 's'}.`
+          : `Connected — ${tools.length} tool${tools.length === 1 ? '' : 's'}.`,
+        tools,
+      };
+    } catch {
+      // initialize succeeded, listing didn't — report reachable, not usable.
+      return {
+        status: 'connected',
+        detail: `${serverName ? `"${serverName}" answered the handshake` : 'Handshake OK'}, but tool listing did not complete — usability unconfirmed.`,
+        tools: [],
+      };
+    }
   } catch (err) {
     const aborted = (err as Error).name === 'AbortError';
     return {

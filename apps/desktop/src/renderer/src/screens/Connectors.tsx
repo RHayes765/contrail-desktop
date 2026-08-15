@@ -158,8 +158,9 @@ function AddServerForm({ onDone }: { onDone: () => void }) {
         </button>
       </div>
       <p className="hint">
-        Header-based auth only in v1 — remote servers that require a browser OAuth flow are not
-        supported yet. Header and environment values never appear in views or transcripts.
+        OAuth-native servers (Slack, Google, Atlassian): register first, then click
+        <strong> Authorize…</strong> on the server card to sign in with your browser. Or paste a
+        token header here. Header and environment values never appear in views or transcripts.
       </p>
     </div>
   );
@@ -186,6 +187,7 @@ export function ConnectorsScreen() {
     removeServer,
     clearError,
     testServer,
+    authorizeServer,
     testResults,
   } = useMcp();
   const [adding, setAdding] = useState(false);
@@ -223,19 +225,37 @@ export function ConnectorsScreen() {
           {servers.map((s) => (
             <div key={s.id} className="row-card">
               <div className="conn-main">
-                <span className="conn-alias">{s.name}</span>
-                <span className="conn-detail">
-                  {s.transport === 'stdio' ? 'local (stdio)' : s.transport} · {s.urlOrCommand}
+                <div>
+                  <span className="conn-alias">{s.name}</span>{' '}
+                  <span className="meter-dim">
+                    {s.transport === 'stdio' ? 'local (stdio)' : s.transport}
+                  </span>
+                </div>
+                <div className="conn-detail">
+                  {s.urlOrCommand}
                   {s.args.length > 0 && ` ${s.args.join(' ')}`}
-                </span>
-                <span className="conn-detail meter-dim">
+                </div>
+                <div className="conn-detail meter-dim">
                   {s.headerNames.length > 0 && `headers: ${s.headerNames.join(', ')} · `}
                   {s.envNames.length > 0 && `env: ${s.envNames.join(', ')} · `}
                   {s.enabled ? 'available to projects that opt in' : 'off everywhere'}
-                </span>
-                {testResults[s.id] && <TestResultLine result={testResults[s.id]} />}
+                </div>
+                {testResults[s.id] && (
+                  <div>
+                    <TestResultLine result={testResults[s.id]} />
+                  </div>
+                )}
               </div>
               <div className="row-actions">
+                {s.transport !== 'stdio' && (
+                  <button
+                    disabled={testResults[s.id] === 'testing'}
+                    onClick={() => void authorizeServer(s.id)}
+                    title="Sign in with the provider in your browser — Contrail runs the OAuth flow and stores the token in the keychain"
+                  >
+                    Authorize…
+                  </button>
+                )}
                 <button
                   disabled={testResults[s.id] === 'testing'}
                   onClick={() => void testServer(s.id)}

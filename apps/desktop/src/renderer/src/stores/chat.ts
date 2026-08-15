@@ -352,6 +352,26 @@ function onEvent(event: ChatEvent): void {
         },
       });
       break;
+    case 'mcp_status': {
+      const bad = event.servers.filter((s) => s.status !== 'connected');
+      const isStatusNotice = state.notice?.startsWith('External servers:') ?? false;
+      if (bad.length === 0) {
+        // All good — clear only our own stale status line, never an auth prompt.
+        if (isStatusNotice) useChat.setState({ notice: null });
+      } else if (state.notice === null || isStatusNotice) {
+        const needsAuth = bad.some((s) => s.status === 'needs-auth');
+        useChat.setState({
+          notice:
+            `External servers: ${bad
+              .map((s) => `${s.name} — ${s.status}${s.error ? ` (${s.error.slice(0, 120)})` : ''}`)
+              .join('; ')}` +
+            (needsAuth
+              ? '. Authorize it on the Connectors screen, then start a new session.'
+              : ''),
+        });
+      }
+      break;
+    }
     case 'external_auth':
       useChat.setState({
         notice:

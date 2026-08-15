@@ -79,6 +79,8 @@ const SUMMARIZE_DEMO = summarizeDemoArg
 const narrateDemoArg = process.argv.find((a) => a.startsWith('--narrate-demo='));
 const NARRATE_DEMO = narrateDemoArg ? narrateDemoArg.slice('--narrate-demo='.length) : null;
 const MCP_DEMO = process.argv.includes('--mcp-demo');
+const mcpAuthDemoArg = process.argv.find((a) => a.startsWith('--mcp-auth-demo='));
+const MCP_AUTH_DEMO = mcpAuthDemoArg ? mcpAuthDemoArg.slice('--mcp-auth-demo='.length) : null;
 
 const HEADLESS =
   SMOKE ||
@@ -87,7 +89,8 @@ const HEADLESS =
   DIFF_DEMO !== null ||
   SUMMARIZE_DEMO !== null ||
   NARRATE_DEMO !== null ||
-  MCP_DEMO;
+  MCP_DEMO ||
+  MCP_AUTH_DEMO !== null;
 
 function smokeWrite(payload: unknown): void {
   const text = JSON.stringify(payload, null, 2) + '\n';
@@ -426,6 +429,88 @@ async function runMcpDemo(b: Bootstrap): Promise<void> {
 }
 
 /**
+ * S8.3 diagnostic: register a real OAuth-protected remote MCP endpoint and
+ * start a session with NO messages (zero model cost). Records everything
+ * the elicitation path does — mcp_status events, whether the url-mode
+ * elicitation fired, what URL the CLI produced (validated + recorded, never
+ * opened headlessly). This is how "the browser doesn't open" gets a root
+ * cause instead of a theory.
+ */
+async function runMcpAuthDemo(b: Bootstrap, url: string): Promise<void> {
+  const projects = new ProjectService(b.deps);
+  const mcp = new McpConfigService(b.deps);
+  let projectId: string | null = null;
+  let serverId: string | null = null;
+  try {
+    const project = b.deps.db.createProject({ name: `S8 Auth Probe ${Date.now()}` });
+    projectId = project.id;
+    const server = mcp.addServer({ name: 'Auth Probe', transport: 'http', urlOrCommand: url });
+    serverId = server.id;
+    await mcp.updateServer({ id: server.id, enabled: true });
+    await mcp.setToggle(project.id, `ext:${server.id}`, true);
+
+    const events: Array<{ sessionId: string; event: ChatEvent }> = [];
+    const openedUrls: string[] = [];
+    const push = <C extends PushChannel>(channel: C, payload: PushEvents[C]): void => {
+      if (channel === 'session:event') events.push(payload as PushEvents['session:event']);
+    };
+    const manager = new AgentSessionManager(
+      b.deps,
+      projects,
+      runtimeChildPath(),
+      push,
+      () => undefined,
+      // Record, never open — headless runs must not hijack the user's browser.
+      (authUrl) => openedUrls.push(authUrl),
+    );
+    sessionManager = manager;
+    const view = manager.start(project.id, 'claude-haiku-4-5');
+    // No messages sent — we only watch the MCP connect/auth machinery.
+    await new Promise((resolve) => setTimeout(resolve, 25_000));
+    await manager.end(view.id);
+
+    // Contrail's OWN OAuth flow (discovery → DCR → auth URL), headless:
+    // the URL is recorded, never opened; the flow times out at the wait.
+    const { McpOAuthService } = await import('./services/mcpOauth.js');
+    const oauthUrls: string[] = [];
+    const oauth = new McpOAuthService(boot!.deps, (u) => oauthUrls.push(u));
+    const oauthOutcome = await oauth.authorize(server.id, 6_000);
+
+    smokeWrite({
+      ok: true,
+      url,
+      mcp_status_reports: events
+        .filter((e) => e.event.type === 'mcp_status')
+        .map((e) => (e.event as { servers: unknown }).servers),
+      sdk_elicitation_fired: openedUrls.length > 0,
+      contrail_oauth: {
+        outcome_detail: oauthOutcome.detail,
+        auth_url_produced: oauthUrls.length > 0,
+        auth_url_host: oauthUrls[0] ? new URL(oauthUrls[0]).host : null,
+        auth_url_has_pkce: oauthUrls[0]?.includes('code_challenge=') ?? false,
+      },
+      errors: events
+        .filter((e) => e.event.type === 'error')
+        .map((e) => (e.event as { message: string }).message),
+    });
+  } finally {
+    try {
+      if (serverId) await mcp.removeServer(serverId);
+    } catch {
+      /* best effort */
+    }
+    try {
+      if (projectId) {
+        await sessionManager?.endForProject(projectId);
+        b.deps.db.deleteProject(projectId);
+      }
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
+/**
  * Session 5 demo: a REAL snapshot sync of dev-org through the worker seam
  * (live Salesforce retrieve), then a chat session answering a dependency
  * question FROM THE LOCAL GRAPH (get_dependencies — no further org reads
@@ -539,6 +624,17 @@ app.whenReady().then(async () => {
   if (MCP_DEMO) {
     try {
       await runMcpDemo(boot);
+      app.exit(0);
+    } catch (err) {
+      smokeWrite({ ok: false, error: String(err) });
+      app.exit(1);
+    }
+    return;
+  }
+
+  if (MCP_AUTH_DEMO) {
+    try {
+      await runMcpAuthDemo(boot, MCP_AUTH_DEMO);
       app.exit(0);
     } catch (err) {
       smokeWrite({ ok: false, error: String(err) });
