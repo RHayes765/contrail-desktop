@@ -1,5 +1,10 @@
 import { shell } from 'electron';
-import type { EngineDeps, ConnectionRecord } from '@contrail/engine';
+import {
+  grantDependencyViolations,
+  type ConnectionRecord,
+  type EngineDeps,
+  type GrantSet,
+} from '@contrail/engine';
 import type { ConnectionView, ConnectOutcomeView, PingResultView } from '@contrail/shared';
 
 /**
@@ -104,6 +109,34 @@ export class ConnectionService {
         ? `Disconnected ${result.alias} and revoked its token.`
         : `Disconnected ${result.alias}; token revocation ${result.detail ?? 'did not confirm'}.`,
     };
+  }
+
+  /**
+   * The native grants editor — same rules and audit trail as the Phase 0
+   * localhost page, reached ONLY over renderer IPC (a human surface; the
+   * agent runtime has no path here). Grant changes apply to live sessions on
+   * their very next call: minting is UX, the engine's assertGrant reads the
+   * connection row at call time.
+   */
+  setGrants(id: string, grants: GrantSet): ConnectionView {
+    const rec = this.deps.db.resolveConnection(id);
+    if (!rec) throw new Error(`Connection ${id} not found.`);
+    const violations = grantDependencyViolations(grants);
+    if (violations.length > 0) {
+      throw new Error(`Invalid grant combination: ${violations.join('; ')}.`);
+    }
+    const before = rec.grants;
+    this.deps.db.updateGrants(rec.id, grants);
+    this.deps.audit.record('connection.grants_changed', {
+      connectionId: rec.id,
+      tool: 'desktop_connections_screen',
+      outcome: 'success',
+      detail: { before, after: grants },
+    });
+    this.notify('updated');
+    const updated = this.deps.db.resolveConnection(rec.id);
+    if (!updated) throw new Error('connection vanished during grant update');
+    return connectionView(updated);
   }
 
   /**

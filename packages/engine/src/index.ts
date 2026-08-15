@@ -27,8 +27,10 @@ export { dataDir, dbPath, configPath, deploysDir } from './core/paths.js';
 export { ContrailError, ConnectionNotFoundError } from './core/errors.js';
 export {
   GRANTS,
+  GRANT_DEPENDENCIES,
   TOOL_GRANT_MAP,
   GRANT_DESCRIPTIONS,
+  grantDependencyViolations,
   grantedList,
   notGrantedList,
   normalizeGrants,

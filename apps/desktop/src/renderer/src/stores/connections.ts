@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ConnectionView, PingResultView } from '@contrail/shared';
+import type { ConnectionView, GrantSetView, PingResultView } from '@contrail/shared';
 import { ipc } from '../lib/ipc.js';
 
 interface ConnectionsState {
@@ -13,6 +13,8 @@ interface ConnectionsState {
   connect: (login: string | undefined, label: string | undefined) => Promise<void>;
   remove: (id: string) => Promise<void>;
   ping: (id: string) => Promise<void>;
+  /** Returns true on success — the editor stays open (with the error) on false. */
+  setGrants: (id: string, grants: GrantSetView) => Promise<boolean>;
   clearConnectMessage: () => void;
 }
 
@@ -53,6 +55,17 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
       set((s) => ({
         pings: { ...s.pings, [id]: { status: 'unreachable', detail: String(err) } },
       }));
+    }
+  },
+
+  setGrants: async (id, grants) => {
+    try {
+      await ipc.invoke('connections:setGrants', { id, grants });
+      await get().refresh();
+      return true;
+    } catch (err) {
+      set({ connectMessage: String(err) });
+      return false;
     }
   },
 

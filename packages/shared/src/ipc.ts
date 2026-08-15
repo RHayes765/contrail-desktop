@@ -4,6 +4,7 @@ import type {
   ConnectionView,
   ConnectOutcomeView,
   EffortLevel,
+  GrantSetView,
   HealthView,
   PingResultView,
   ProjectDocView,
@@ -39,6 +40,16 @@ export const REQUEST_SCHEMAS = {
   }),
   'connections:remove': z.object({ id: ID }),
   'connections:ping': z.object({ id: ID }),
+  'connections:setGrants': z.object({
+    id: ID,
+    grants: z.object({
+      metadata_read: z.boolean(),
+      metadata_write: z.boolean(),
+      diagnostics_read: z.boolean(),
+      data_read: z.boolean(),
+      data_write: z.boolean(),
+    }),
+  }),
 
   'projects:list': z.object({}),
   'projects:create': z.object({
@@ -87,6 +98,10 @@ export interface Contracts {
   };
   'connections:remove': { req: { id: string }; res: { ok: boolean; detail: string | null } };
   'connections:ping': { req: { id: string }; res: PingResultView };
+  'connections:setGrants': {
+    req: { id: string; grants: GrantSetView };
+    res: ConnectionView;
+  };
 
   'projects:list': { req: Record<string, never>; res: ProjectView[] };
   'projects:create': { req: { name: string; description?: string }; res: ProjectView };

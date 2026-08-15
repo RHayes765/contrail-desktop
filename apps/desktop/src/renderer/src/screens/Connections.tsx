@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { ConnectionView } from '@contrail/shared';
+import type { ConnectionView, GrantSetView } from '@contrail/shared';
 import { useConnections } from '../stores/connections.js';
 
 const ENV_COLORS: Record<string, string> = {
@@ -16,6 +16,83 @@ const GRANT_LABELS: Array<[keyof ConnectionView['grants'], string]> = [
   ['data_read', 'D-R'],
   ['data_write', 'D-W'],
 ];
+
+const GRANT_FULL_LABELS: Array<[keyof GrantSetView, string]> = [
+  ['metadata_read', 'Metadata read'],
+  ['metadata_write', 'Metadata write (deploys)'],
+  ['diagnostics_read', 'Diagnostics read (logs)'],
+  ['data_read', 'Data read (SOQL)'],
+  ['data_write', 'Data write (DML)'],
+];
+
+/** write → its required read (mirrors the engine's GRANT_DEPENDENCIES). */
+const REQUIRES: Partial<Record<keyof GrantSetView, keyof GrantSetView>> = {
+  metadata_write: 'metadata_read',
+  data_write: 'data_read',
+};
+
+function GrantsEditor({
+  connection,
+  onDone,
+}: {
+  connection: ConnectionView;
+  onDone: () => void;
+}) {
+  const { setGrants } = useConnections();
+  const [draft, setDraft] = useState<GrantSetView>({ ...connection.grants });
+  const [saving, setSaving] = useState(false);
+
+  const toggle = (key: keyof GrantSetView) => {
+    setDraft((d) => {
+      const next = { ...d, [key]: !d[key] };
+      if (next[key]) {
+        // Enabling a write pulls in its required read.
+        const required = REQUIRES[key];
+        if (required) next[required] = true;
+      } else {
+        // Disabling a read drops any write that depends on it.
+        for (const [dependent, required] of Object.entries(REQUIRES) as Array<
+          [keyof GrantSetView, keyof GrantSetView]
+        >) {
+          if (required === key) next[dependent] = false;
+        }
+      }
+      return next;
+    });
+  };
+
+  const dirty = GRANT_FULL_LABELS.some(([key]) => draft[key] !== connection.grants[key]);
+
+  return (
+    <div className="grants-editor">
+      {GRANT_FULL_LABELS.map(([key, label]) => (
+        <label key={key} className="grant-toggle">
+          <input type="checkbox" checked={draft[key]} onChange={() => toggle(key)} />
+          <span>{label}</span>
+        </label>
+      ))}
+      <div className="form-actions">
+        <button
+          className="primary"
+          disabled={!dirty || saving}
+          onClick={() => {
+            setSaving(true);
+            void setGrants(connection.id, draft).then((ok) => {
+              setSaving(false);
+              if (ok) onDone();
+            });
+          }}
+        >
+          {saving ? 'Saving…' : 'Save grants'}
+        </button>
+        <button onClick={onDone}>Cancel</button>
+        <span className="hint" style={{ margin: 0 }}>
+          Changes apply to running sessions on their next tool call.
+        </span>
+      </div>
+    </div>
+  );
+}
 
 function ConnectForm({ onDone }: { onDone: () => void }) {
   const { connect, connecting } = useConnections();
@@ -82,6 +159,7 @@ export function ConnectionsScreen() {
     useConnections();
   const [showConnect, setShowConnect] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const [editingGrants, setEditingGrants] = useState<string | null>(null);
 
   useEffect(() => {
     void refresh();
@@ -119,52 +197,62 @@ export function ConnectionsScreen() {
           {connections.map((c) => {
             const pingResult = pings[c.id];
             return (
-              <div className="conn-card" key={c.id}>
-                <span
-                  className="env-badge"
-                  style={{ background: ENV_COLORS[c.orgType] ?? 'var(--env-other)' }}
-                >
-                  {c.orgType}
-                </span>
-                <div className="conn-main">
-                  <div className="conn-alias">
-                    {c.alias}
-                    {pingResult && (
-                      <span className={`ping-badge ${pingResult.status}`}>
-                        {pingResult.status === 'ok' ? 'token ok' : pingResult.status}
+              <div className="conn-card-wrap" key={c.id}>
+                <div className="conn-card">
+                  <span
+                    className="env-badge"
+                    style={{ background: ENV_COLORS[c.orgType] ?? 'var(--env-other)' }}
+                  >
+                    {c.orgType}
+                  </span>
+                  <div className="conn-main">
+                    <div className="conn-alias">
+                      {c.alias}
+                      {pingResult && (
+                        <span className={`ping-badge ${pingResult.status}`}>
+                          {pingResult.status === 'ok' ? 'token ok' : pingResult.status}
+                        </span>
+                      )}
+                    </div>
+                    <div className="conn-detail">
+                      {c.orgName ?? 'unnamed org'} · {c.username ?? 'unknown user'} · {c.instanceUrl}
+                    </div>
+                  </div>
+                  <div className="grant-badges">
+                    {GRANT_LABELS.map(([key, label]) => (
+                      <span key={key} className={`grant${c.grants[key] ? ' on' : ''}`}>
+                        {label}
                       </span>
+                    ))}
+                  </div>
+                  <div className="row-actions">
+                    <button
+                      onClick={() => setEditingGrants(editingGrants === c.id ? null : c.id)}
+                    >
+                      {editingGrants === c.id ? 'Close' : 'Grants'}
+                    </button>
+                    <button onClick={() => void ping(c.id)}>Check</button>
+                    {confirmRemove === c.id ? (
+                      <>
+                        <button
+                          className="danger"
+                          onClick={() => {
+                            setConfirmRemove(null);
+                            void remove(c.id);
+                          }}
+                        >
+                          Really disconnect
+                        </button>
+                        <button onClick={() => setConfirmRemove(null)}>Keep</button>
+                      </>
+                    ) : (
+                      <button onClick={() => setConfirmRemove(c.id)}>Disconnect</button>
                     )}
                   </div>
-                  <div className="conn-detail">
-                    {c.orgName ?? 'unnamed org'} · {c.username ?? 'unknown user'} · {c.instanceUrl}
-                  </div>
                 </div>
-                <div className="grant-badges">
-                  {GRANT_LABELS.map(([key, label]) => (
-                    <span key={key} className={`grant${c.grants[key] ? ' on' : ''}`}>
-                      {label}
-                    </span>
-                  ))}
-                </div>
-                <div className="row-actions">
-                  <button onClick={() => void ping(c.id)}>Check</button>
-                  {confirmRemove === c.id ? (
-                    <>
-                      <button
-                        className="danger"
-                        onClick={() => {
-                          setConfirmRemove(null);
-                          void remove(c.id);
-                        }}
-                      >
-                        Really disconnect
-                      </button>
-                      <button onClick={() => setConfirmRemove(null)}>Keep</button>
-                    </>
-                  ) : (
-                    <button onClick={() => setConfirmRemove(c.id)}>Disconnect</button>
-                  )}
-                </div>
+                {editingGrants === c.id && (
+                  <GrantsEditor connection={c} onDone={() => setEditingGrants(null)} />
+                )}
               </div>
             );
           })}

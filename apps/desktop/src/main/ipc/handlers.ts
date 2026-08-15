@@ -1,5 +1,5 @@
 import type { BrowserWindow } from 'electron';
-import type { EffortLevel, HealthView } from '@contrail/shared';
+import type { EffortLevel, GrantSetView, HealthView } from '@contrail/shared';
 import type { EngineDeps } from '@contrail/engine';
 import { ConnectionService } from '../services/connections.js';
 import { docView, noteView, ProjectService } from '../services/projects.js';
@@ -32,6 +32,10 @@ export function makeHandlers(health: HealthView, services: MainServices) {
       connections.connect(req),
     'connections:remove': (_deps: EngineDeps, req: { id: string }) => connections.remove(req.id),
     'connections:ping': (_deps: EngineDeps, req: { id: string }) => connections.ping(req.id),
+    'connections:setGrants': (
+      _deps: EngineDeps,
+      req: { id: string; grants: GrantSetView },
+    ) => connections.setGrants(req.id, req.grants),
 
     'projects:list': () => projects.list(),
     'projects:create': (_deps: EngineDeps, req: { name: string; description?: string }) =>

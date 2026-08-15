@@ -268,3 +268,49 @@ describe('confirmation-code vault (codes never transit the runtime)', () => {
     expect(bare.confirmation_code).toBeUndefined();
   });
 });
+
+describe('native grants editor (ConnectionService.setGrants)', () => {
+  it('rejects dependency violations, audits valid changes with before/after', async () => {
+    const { ConnectionService } = await import('../main/services/connections.js');
+    const rec = conn('c-1', 'dev-org');
+    let saved: unknown = null;
+    const audits: Array<{ type: string; detail: unknown }> = [];
+    const deps = {
+      db: {
+        resolveConnection: (ref: string) =>
+          ref === 'c-1' ? { ...rec, grants: saved ?? rec.grants } : null,
+        updateGrants: (_id: string, grants: unknown) => {
+          saved = grants;
+        },
+      },
+      audit: {
+        record: (type: string, input: { detail?: unknown }) =>
+          audits.push({ type, detail: input.detail }),
+      },
+    } as never;
+    const service = new ConnectionService(deps, () => undefined);
+
+    // data_write without data_read violates the engine dependency rule.
+    expect(() =>
+      service.setGrants('c-1', {
+        metadata_read: true,
+        metadata_write: false,
+        diagnostics_read: false,
+        data_read: false,
+        data_write: true,
+      }),
+    ).toThrow(/data_write requires data_read/);
+    expect(saved).toBeNull(); // nothing persisted on refusal
+
+    const updated = service.setGrants('c-1', {
+      metadata_read: true,
+      metadata_write: true,
+      diagnostics_read: true,
+      data_read: true,
+      data_write: false,
+    });
+    expect(updated.grants.metadata_write).toBe(true);
+    expect(audits[0]?.type).toBe('connection.grants_changed');
+    expect((audits[0]?.detail as { before: unknown }).before).toBeTruthy();
+  });
+});
