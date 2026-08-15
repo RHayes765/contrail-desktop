@@ -26,8 +26,20 @@ export interface SessionContext {
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   maxTurns: number;
   maxBudgetUsd: number;
-  /** Per-session scratch working directory (never the user's real folders). */
+  /**
+   * Per-session working directory (never the user's real folders). STABLE
+   * across runs of the same session — the SDK keys its persisted history by
+   * cwd, so resume only finds the conversation if the cwd matches.
+   */
   cwd: string;
+  /**
+   * The Contrail-owned CLAUDE_CONFIG_DIR. The SDK persists session history
+   * here (that is what makes resume possible); the user's real ~/.claude is
+   * never read or written.
+   */
+  claudeConfigDir: string;
+  /** Set on resume: the SDK session id whose history this run continues. */
+  resumeSdkSessionId?: string;
   /** BYO Anthropic API key — lives in the runtime env only, never in views or transcripts. */
   apiKey: string;
 }
@@ -46,7 +58,9 @@ export type AgentEvent =
       costUsd: number;
     }
   | { type: 'error'; message: string }
-  | { type: 'done'; result: string | null };
+  | { type: 'done'; result: string | null }
+  /** The SDK announced its session id (init) — main stores it as the resume handle. */
+  | { type: 'sdk_session'; sdkSessionId: string };
 
 // ── bridge protocol (utilityProcess parentPort messages) ─────────────────
 

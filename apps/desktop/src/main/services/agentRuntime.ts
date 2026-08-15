@@ -124,9 +124,43 @@ export function redactSensitive(value: unknown): unknown {
 /** Matches the deploy confirmation-code shape (codes.ts ALPHABET, XXXX-XXXX). */
 const CONFIRMATION_CODE = /\b[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}\b/g;
 
-/** Scrub live confirmation codes out of user text before it is persisted. */
+/**
+ * Scrub live confirmation codes out of user text. Applied to BOTH the
+ * transcript AND the text forwarded to the runtime: the model (and therefore
+ * the SDK's resumable history store) never possesses a code — main vaults it
+ * and substitutes at execution time (see extractConfirmationCode).
+ */
 export function scrubCodes(text: string): string {
   return text.replace(CONFIRMATION_CODE, '[code]');
+}
+
+/** The LAST code in the message wins (a correction supersedes a typo). */
+export function extractConfirmationCode(text: string): string | null {
+  const matches = text.match(CONFIRMATION_CODE);
+  return matches && matches.length > 0 ? (matches[matches.length - 1] ?? null) : null;
+}
+
+/** Write-execute capabilities whose confirmation_code main fills from the vault. */
+const CODE_BEARING_CAPABILITIES = new Set(['execute_deploy', 'dml_execute']);
+
+/**
+ * Substitute the vaulted code into a write-execute call. The agent passes
+ * "[code]" (or nothing) because it never saw the real one; the HUMAN still
+ * typed it into chat this session, so the possession ritual holds — the
+ * engine's claim machinery (single-use, expiry, attempt cap) is untouched.
+ */
+export function applyVaultedCode(
+  name: string,
+  args: Record<string, unknown>,
+  vaulted: string | null,
+): { used: boolean } {
+  if (!CODE_BEARING_CAPABILITIES.has(name)) return { used: false };
+  const provided = args.confirmation_code;
+  const looksReal = typeof provided === 'string' && /^[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}$/.test(provided);
+  if (looksReal) return { used: false }; // defense in depth; normally impossible
+  if (!vaulted) return { used: false }; // engine will refuse with its own message
+  args.confirmation_code = vaulted;
+  return { used: true };
 }
 
 /** Riskiest-first ordering for env-role annotation on multi-org tool calls. */
@@ -134,6 +168,8 @@ const ENV_RISK_ORDER: EnvRole[] = ['prod', 'uat', 'qa', 'other', 'dev'];
 
 export class AgentSessionRun {
   readonly capabilityCalls: Array<{ name: string; refused: boolean }> = [];
+  /** The code vault: the human's latest confirmation code, held in main only. */
+  private vaultedCode: string | null = null;
 
   constructor(
     private readonly deps: EngineDeps,
@@ -188,8 +224,18 @@ export class AgentSessionRun {
     return { connection: targets.map((t) => t.alias).join(' → '), envRole: riskiest };
   }
 
+  /** Called by the manager when the human's message carried a confirmation code. */
+  provideCode(code: string): void {
+    this.vaultedCode = code;
+  }
+
   async executeCapability(name: string, args: unknown): Promise<BridgeToolResult> {
     const a = (args ?? {}) as Record<string, unknown>;
+
+    // The code vault: the model only ever saw "[code]" — the real code goes
+    // in here, single-use, so it never transits the runtime or its history.
+    const substitution = applyVaultedCode(name, a, this.vaultedCode);
+    if (substitution.used) this.vaultedCode = null;
 
     // Silo rule 0: project tools answer for THIS session's project, full stop.
     // The agent cannot name a project; there is nothing to validate away.
@@ -303,8 +349,16 @@ export class AgentSessionRun {
     return okJson({ connections: views, count: views.length });
   }
 
-  buildContext(sessionId: string, apiKey: string): SessionContext {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'contrail-session-'));
+  buildContext(
+    sessionId: string,
+    apiKey: string,
+    claudeConfigDir: string,
+    resumeSdkSessionId?: string,
+  ): SessionContext {
+    // STABLE per-session cwd: the SDK keys persisted history by cwd, so a
+    // resumed run must come back to the same directory to find it.
+    const cwd = path.join(dataDir(), 'sessions', sessionId, 'cwd');
+    fs.mkdirSync(cwd, { recursive: true });
     const bindings: BindingWithGrants[] = this.spec.bindings.map((b) => ({
       connectionId: b.connection.id,
       alias: b.connection.alias,
@@ -322,6 +376,8 @@ export class AgentSessionRun {
       maxTurns: this.spec.maxTurns,
       maxBudgetUsd: this.spec.maxBudgetUsd,
       cwd,
+      claudeConfigDir,
+      resumeSdkSessionId,
       apiKey,
     };
   }
@@ -356,6 +412,7 @@ export function sessionView(rec: AgentSessionRecord): SessionView {
     title: rec.title,
     status: rec.status as SessionView['status'],
     model: rec.model,
+    effort: (rec.effort as SessionView['effort']) ?? null,
     inputTokens: rec.inputTokens,
     outputTokens: rec.outputTokens,
     cacheReadTokens: rec.cacheReadTokens,
@@ -367,6 +424,9 @@ export function sessionView(rec: AgentSessionRecord): SessionView {
 
 export class AgentSessionManager {
   private readonly live = new Map<string, LiveSession>();
+
+  /** Contrail-owned SDK config dir — session history lives here, never ~/.claude. */
+  private readonly claudeConfigDir: string;
 
   constructor(
     private readonly deps: EngineDeps,
@@ -380,6 +440,60 @@ export class AgentSessionManager {
     if (orphaned > 0) {
       log('warn', 'closed orphaned agent sessions from a previous run', { count: orphaned });
     }
+
+    /**
+     * The SDK's history store. KNOW WHAT LIVES HERE: full conversation
+     * fidelity — user text (code-scrubbed by send()), assistant turns, tool
+     * inputs, and COMPLETE tool results (SOQL rows, doc contents). That
+     * fidelity is what makes resume work, and it never leaves this machine,
+     * but it does NOT pass through the transcript redaction layer. The API
+     * key is env-only and never lands here.
+     *
+     * Retention is OURS: settingSources [] puts the CLI in isolation mode,
+     * where its own cleanupPeriodDays sweep never runs (verified against the
+     * bundled binary) — so we sweep, below.
+     */
+    this.claudeConfigDir = path.join(dataDir(), 'claude-runtime');
+    fs.mkdirSync(this.claudeConfigDir, { recursive: true });
+    this.sweepRuntimeHistory();
+  }
+
+  /** Delete SDK history files past retention — old sessions just lose resumability. */
+  private sweepRuntimeHistory(): void {
+    const RETENTION_DAYS = 180;
+    const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    const projectsDir = path.join(this.claudeConfigDir, 'projects');
+    let swept = 0;
+    try {
+      if (!fs.existsSync(projectsDir)) return;
+      for (const dir of fs.readdirSync(projectsDir)) {
+        const dirPath = path.join(projectsDir, dir);
+        let remaining = 0;
+        for (const file of fs.readdirSync(dirPath)) {
+          const filePath = path.join(dirPath, file);
+          try {
+            if (fs.statSync(filePath).mtimeMs < cutoff) {
+              fs.rmSync(filePath, { force: true });
+              swept++;
+            } else {
+              remaining++;
+            }
+          } catch {
+            remaining++; // unreadable — leave it alone
+          }
+        }
+        if (remaining === 0) {
+          try {
+            fs.rmdirSync(dirPath);
+          } catch {
+            // non-empty or locked — fine
+          }
+        }
+      }
+    } catch (err) {
+      log('warn', 'runtime history sweep failed', { err: String(err) });
+    }
+    if (swept > 0) log('info', 'swept old runtime history', { files: swept, RETENTION_DAYS });
   }
 
   list(projectId: string): SessionView[] {
@@ -518,17 +632,121 @@ export class AgentSessionManager {
       projectId,
       title: null,
       model: spec.model,
+      effort: effort ?? null,
     });
     const transcriptPath = path.join(transcriptDir, `${sessionId}.jsonl`);
     this.deps.db.setAgentSessionTranscriptPath(sessionId, transcriptPath);
 
+    const entry = this.spawnEntry(spec, sessionId, transcriptPath, apiKey);
+    this.writeTranscript(entry, {
+      kind: 'session',
+      sessionId,
+      projectId,
+      project: project.name,
+      model: spec.model,
+      bindings: spec.bindings.map((b) => ({ alias: b.connection.alias, envRole: b.envRole })),
+    });
+
+    this.push('sessions:changed', { projectId });
+    const rec = this.deps.db.getAgentSession(sessionId);
+    if (!rec) throw new Error('session row vanished during start');
+    return sessionView(rec);
+  }
+
+  /**
+   * Continue an ENDED session with its conversation history intact. The SDK
+   * replays the persisted history (from the Contrail-owned config dir) into a
+   * fresh runtime; same session row, accumulated usage, same transcript file.
+   */
+  resume(sessionId: string): SessionView {
+    const existing = this.live.get(sessionId);
+    if (existing) {
+      // Already running — resuming a live session is just "go talk to it".
+      const rec = this.deps.db.getAgentSession(sessionId);
+      if (!rec) throw new Error('session row vanished');
+      return sessionView(rec);
+    }
+    if (this.live.size >= MAX_LIVE_SESSIONS) {
+      throw new Error(
+        `${this.live.size} sessions are already running — end one before resuming another.`,
+      );
+    }
+    const rec = this.deps.db.getAgentSession(sessionId);
+    if (!rec) throw new Error(`Session ${sessionId} not found.`);
+    const project = this.deps.db.getProject(rec.projectId);
+    if (!project) throw new Error('This session\'s project no longer exists.');
+    if (!rec.sdkSessionId) {
+      throw new Error(
+        'This session cannot be resumed — it predates resume support, so no runtime history was kept.',
+      );
+    }
+    if (!rec.model || !Object.hasOwn(CHAT_MODELS, rec.model)) {
+      throw new Error(`This session's model "${rec.model}" is no longer available.`);
+    }
+    const modelId = rec.model as ChatModelId;
+
+    const apiKey = readApiKey();
+    if (!apiKey) {
+      throw new Error('No Anthropic API key found. Add one in Settings before resuming.');
+    }
+
+    // Bindings and grants re-resolve from TODAY's state — a resumed session
+    // gets no more access than a new one would.
+    const bindings: SessionSpec['bindings'] = [];
+    for (const b of this.deps.db.listProjectBindings(rec.projectId)) {
+      const connection = this.deps.db.resolveConnection(b.connectionId);
+      if (connection) bindings.push({ connection, envRole: b.envRole });
+    }
+
+    const spec: SessionSpec = {
+      project,
+      bindings,
+      model: modelId,
+      effort: (rec.effort as EffortLevel | null) ?? undefined,
+      maxTurns: CHAT_MAX_TURNS,
+      // A fresh budget for the resumed run; the row keeps the lifetime total.
+      maxBudgetUsd: CHAT_MODELS[modelId].maxBudgetUsd,
+    };
+
+    const transcriptPath =
+      rec.transcriptPath ?? path.join(dataDir(), 'sessions', `${sessionId}.jsonl`);
+    if (!rec.transcriptPath) this.deps.db.setAgentSessionTranscriptPath(sessionId, transcriptPath);
+
+    // Spawn FIRST — if the fork throws, the row must stay 'ended', not zombie 'active'.
+    const entry = this.spawnEntry(spec, sessionId, transcriptPath, apiKey, rec.sdkSessionId);
+    this.deps.db.reopenAgentSession(sessionId);
+    // The row keeps LIFETIME totals — seed the accumulator so per-turn
+    // updates keep adding instead of resetting history to zero.
+    entry.usage = {
+      inputTokens: rec.inputTokens,
+      outputTokens: rec.outputTokens,
+      cacheReadTokens: rec.cacheReadTokens,
+      costUsd: rec.costUsd,
+    };
+    entry.sentFirstMessage = true; // the title is already set from the first run
+    this.writeTranscript(entry, { kind: 'resumed', sessionId, model: spec.model });
+
+    this.push('sessions:changed', { projectId: rec.projectId });
+    const reopened = this.deps.db.getAgentSession(sessionId);
+    if (!reopened) throw new Error('session row vanished during resume');
+    return sessionView(reopened);
+  }
+
+  /** Shared child wiring for start() and resume(). */
+  private spawnEntry(
+    spec: SessionSpec,
+    sessionId: string,
+    transcriptPath: string,
+    apiKey: string,
+    resumeSdkSessionId?: string,
+  ): LiveSession {
     const run = new AgentSessionRun(this.deps, spec, sessionId, this.silo);
-    const ctx = run.buildContext(sessionId, apiKey);
+    const ctx = run.buildContext(sessionId, apiKey, this.claudeConfigDir, resumeSdkSessionId);
     const child = utilityProcess.fork(this.childPath, [], { stdio: 'pipe' });
 
     const entry: LiveSession = {
       sessionId,
-      projectId,
+      projectId: spec.project.id,
       child,
       run,
       ctx,
@@ -550,14 +768,6 @@ export class AgentSessionManager {
         err: String(err),
       });
       entry.transcript = null;
-    });
-    this.writeTranscript(entry, {
-      kind: 'session',
-      sessionId,
-      projectId,
-      project: project.name,
-      model: spec.model,
-      bindings: bindings.map((b) => ({ alias: b.connection.alias, envRole: b.envRole })),
     });
 
     child.on('message', (raw: ToMain) => {
@@ -586,11 +796,7 @@ export class AgentSessionManager {
       const init: ToChild = { kind: 'init', ctx };
       child.postMessage(init);
     });
-
-    this.push('sessions:changed', { projectId });
-    const rec = this.deps.db.getAgentSession(sessionId);
-    if (!rec) throw new Error('session row vanished during start');
-    return sessionView(rec);
+    return entry;
   }
 
   send(sessionId: string, text: string): void {
@@ -600,16 +806,20 @@ export class AgentSessionManager {
       this.deps.db.setAgentSessionTitle(sessionId, text.slice(0, 80));
       this.push('sessions:changed', { projectId: entry.projectId });
     }
-    // Transcript gets the text with any live confirmation code scrubbed; the
-    // child gets it verbatim (the agent legitimately relays codes to tools).
-    this.writeTranscript(entry, { kind: 'user', text: scrubCodes(text) });
+    // Confirmation codes never leave main: vault the code, and BOTH the
+    // transcript and the runtime (whose SDK history store persists verbatim)
+    // receive the scrubbed text. executeCapability substitutes at call time.
+    const code = extractConfirmationCode(text);
+    if (code) entry.run.provideCode(code);
+    const scrubbed = scrubCodes(text);
+    this.writeTranscript(entry, { kind: 'user', text: scrubbed });
     if (!entry.ready) {
       // The child hasn't confirmed init yet — a send posted now would arrive
       // before the session exists. Queue it; 'ready' flushes in order.
-      entry.pendingSends.push(text);
+      entry.pendingSends.push(scrubbed);
       return;
     }
-    const msg: ToChild = { kind: 'send', text };
+    const msg: ToChild = { kind: 'send', text: scrubbed };
     entry.child.postMessage(msg);
   }
 
@@ -688,12 +898,8 @@ export class AgentSessionManager {
     entry.child.kill();
     entry.transcript?.end();
     entry.transcript = null;
-    try {
-      fs.rmSync(entry.ctx.cwd, { recursive: true, force: true, maxRetries: 3 });
-    } catch {
-      // The killed CLI can briefly hold the scratch cwd on Windows (EPERM).
-      // An orphaned empty temp dir is acceptable; failing the session is not.
-    }
+    // The cwd deliberately survives: it lives under dataDir/sessions/{id} and
+    // the SDK keys resumable history by it. Session deletion (future) cleans it.
     this.push('sessions:changed', { projectId: entry.projectId });
   }
 
@@ -735,6 +941,11 @@ export class AgentSessionManager {
   }
 
   private onAgentEvent(entry: LiveSession, event: AgentEvent): void {
+    if (event.type === 'sdk_session') {
+      // The resume handle — persisted, never forwarded (not a chat event).
+      this.deps.db.setAgentSessionSdkId(entry.sessionId, event.sdkSessionId);
+      return;
+    }
     if (event.type === 'usage') {
       entry.usage.inputTokens += event.inputTokens;
       entry.usage.outputTokens += event.outputTokens;
@@ -764,7 +975,7 @@ export class AgentSessionManager {
     this.forward(entry, event);
   }
 
-  private forward(entry: LiveSession, event: AgentEvent): void {
+  private forward(entry: LiveSession, event: Exclude<AgentEvent, { type: 'sdk_session' }>): void {
     let chat: ChatEvent;
     if (event.type === 'tool_start') {
       // Annotate from the raw input (needs the connection value), then redact

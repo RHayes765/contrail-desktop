@@ -23,6 +23,8 @@ export function ChatScreen({ projectId }: { projectId: string }) {
     error,
     model,
     effort,
+    sessionModel,
+    sessionEffort,
     start,
     configure,
     send,
@@ -30,6 +32,12 @@ export function ChatScreen({ projectId }: { projectId: string }) {
     end,
     clearError,
   } = useChat();
+
+  // Once the conversation is locked, the pickers show what the SESSION runs —
+  // never a preference the session might not be honoring (resume, races).
+  const locked = messages.length > 0;
+  const shownModel = locked ? (sessionModel ?? model) : model;
+  const shownEffort = locked ? sessionEffort : effort;
   const { projects } = useProjects();
   const { openProject } = useNav();
   const [draft, setDraft] = useState('');
@@ -66,10 +74,10 @@ export function ChatScreen({ projectId }: { projectId: string }) {
         <button className="crumb" onClick={leave}>
           ← {project?.name ?? 'Project'}
         </button>
-        <div className="model-picker" title={messages.length > 0 ? 'Model is fixed for a running conversation — start a new session to change it' : 'Model and reasoning effort for this session'}>
+        <div className="model-picker" title={locked ? 'Model is fixed for a running conversation — start a new session to change it' : 'Model and reasoning effort for this session'}>
           <select
-            value={model}
-            disabled={messages.length > 0}
+            value={shownModel}
+            disabled={locked}
             onChange={(e) => void configure(e.target.value as ChatModelId, effort)}
           >
             {(Object.keys(CHAT_MODELS) as ChatModelId[]).map((id) => (
@@ -79,8 +87,8 @@ export function ChatScreen({ projectId }: { projectId: string }) {
             ))}
           </select>
           <select
-            value={effort ?? ''}
-            disabled={messages.length > 0}
+            value={shownEffort ?? ''}
+            disabled={locked}
             onChange={(e) =>
               void configure(model, (e.target.value || null) as EffortLevel | null)
             }

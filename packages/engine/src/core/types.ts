@@ -136,6 +136,9 @@ export interface AgentSessionRecord {
   status: string;
   transcriptPath: string | null;
   model: string | null;
+  /** The Agent SDK's session id — the resume handle into the runtime's own store. */
+  sdkSessionId: string | null;
+  effort: string | null;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;

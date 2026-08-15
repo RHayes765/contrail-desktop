@@ -120,6 +120,7 @@ export interface SessionView {
   title: string | null;
   status: 'active' | 'ended' | 'error' | string;
   model: string | null;
+  effort: EffortLevel | null;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;

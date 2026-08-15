@@ -1,5 +1,12 @@
 import { create } from 'zustand';
-import { CHAT_MODELS, type ChatEvent, type ChatModelId, type EffortLevel, type EnvRole } from '@contrail/shared';
+import {
+  CHAT_MODELS,
+  type ChatEvent,
+  type ChatModelId,
+  type EffortLevel,
+  type EnvRole,
+  type TranscriptEntryView,
+} from '@contrail/shared';
 import { ipc } from '../lib/ipc.js';
 
 /**
@@ -50,6 +57,8 @@ interface ChatState {
   sessionEffort: EffortLevel | null;
 
   start: (projectId: string) => Promise<void>;
+  /** Continue an ended session with its history — visible AND model-side. */
+  resume: (projectId: string, sessionId: string) => Promise<void>;
   /** Change model/effort — restarts the session (only offered before the first message). */
   configure: (model: ChatModelId, effort: EffortLevel | null) => Promise<void>;
   send: (text: string) => Promise<void>;
@@ -80,6 +89,48 @@ function loadPrefs(): { model: ChatModelId; effort: EffortLevel | null } {
 
 function savePrefs(model: ChatModelId, effort: EffortLevel | null): void {
   localStorage.setItem(PREFS_KEY, JSON.stringify({ model, effort }));
+}
+
+/** Rebuild the visible thread from a persisted transcript (resume preload). */
+export function messagesFromTranscript(entries: TranscriptEntryView[]): ChatMessage[] {
+  const toolOutcomes = new Map<string, boolean>();
+  for (const e of entries) {
+    if (e.kind === 'tool_end') toolOutcomes.set(e.toolUseId, e.ok);
+  }
+  const messages: ChatMessage[] = [];
+  const currentAssistant = (): ChatMessage => {
+    const last = messages[messages.length - 1];
+    if (last && last.role === 'assistant') return last;
+    const fresh: ChatMessage = { role: 'assistant', parts: [] };
+    messages.push(fresh);
+    return fresh;
+  };
+  for (const e of entries) {
+    switch (e.kind) {
+      case 'user':
+        messages.push({ role: 'user', parts: [{ kind: 'text', text: e.text }] });
+        break;
+      case 'assistant':
+        currentAssistant().parts.push({ kind: 'text', text: e.text });
+        break;
+      case 'tool_start':
+        currentAssistant().parts.push({
+          kind: 'tool',
+          card: {
+            toolUseId: e.toolUseId,
+            name: e.name,
+            input: e.input,
+            connection: null,
+            envRole: null,
+            ok: toolOutcomes.get(e.toolUseId) ?? null,
+          },
+        });
+        break;
+      default:
+        break; // tool_end folded above; errors don't reconstruct as messages
+    }
+  }
+  return messages;
 }
 
 function lastAssistant(messages: ChatMessage[]): ChatMessage | null {
@@ -134,6 +185,50 @@ export const useChat = create<ChatState>((set, get) => ({
       });
     } catch (err) {
       set({ sessionId: null, projectId, error: String(err) });
+    } finally {
+      set({ starting: false });
+    }
+  },
+
+  resume: async (projectId, sessionId) => {
+    const state = get();
+    if (state.starting) return;
+    if (state.sessionId === sessionId) return; // already the live session
+    set({ starting: true, error: null });
+    try {
+      // One live chat: leave any other session behind first.
+      const prev = get().sessionId;
+      if (prev) {
+        await ipc.invoke('sessions:end', { sessionId: prev }).catch(() => undefined);
+      }
+      // Preload the visible history, then bring the runtime back up on it.
+      const transcript = await ipc.invoke('sessions:transcript', { sessionId });
+      const view = await ipc.invoke('sessions:resume', { sessionId });
+      const sessionModel =
+        view.model && Object.hasOwn(CHAT_MODELS, view.model)
+          ? (view.model as ChatModelId)
+          : null;
+      set({
+        sessionId: view.id,
+        projectId,
+        messages: messagesFromTranscript(transcript.entries),
+        streaming: '',
+        busy: false,
+        usage: {
+          inputTokens: view.inputTokens,
+          outputTokens: view.outputTokens,
+          cacheReadTokens: view.cacheReadTokens,
+          costUsd: view.costUsd,
+        },
+        error: null,
+        // The session's OWN model/effort (from the row) — the user's saved
+        // preference is deliberately untouched; the locked picker displays
+        // sessionModel, so the header tells the truth about what is running.
+        sessionModel,
+        sessionEffort: view.effort,
+      });
+    } catch (err) {
+      set({ error: String(err) });
     } finally {
       set({ starting: false });
     }

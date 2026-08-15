@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { CHAT_MODELS, type TranscriptView } from '@contrail/shared';
 import { ipc } from '../lib/ipc.js';
 import { useNav } from '../stores/nav.js';
-import type { ToolCard } from '../stores/chat.js';
+import { useChat, type ToolCard } from '../stores/chat.js';
 import { Md, ToolCardView } from '../components/thread.js';
 
 /**
@@ -18,9 +18,23 @@ export function SessionViewerScreen({
   projectId: string;
   sessionId: string;
 }) {
-  const { openProject } = useNav();
+  const { openProject, openChat } = useNav();
   const [transcript, setTranscript] = useState<TranscriptView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [resuming, setResuming] = useState(false);
+
+  const continueConversation = async () => {
+    setResuming(true);
+    setError(null);
+    await useChat.getState().resume(projectId, sessionId);
+    setResuming(false);
+    const chat = useChat.getState();
+    if (chat.sessionId === sessionId) {
+      openChat(projectId);
+    } else {
+      setError(chat.error ?? 'Could not resume this session.');
+    }
+  };
 
   useEffect(() => {
     setTranscript(null);
@@ -61,6 +75,15 @@ export function SessionViewerScreen({
                 {new Date(session.createdAt).toLocaleString()}
               </span>
             </div>
+            {session.status !== 'active' && (
+              <button
+                className="primary"
+                disabled={resuming}
+                onClick={() => void continueConversation()}
+              >
+                {resuming ? 'Resuming…' : 'Continue this conversation'}
+              </button>
+            )}
           </>
         )}
       </div>

@@ -116,3 +116,21 @@ describe('agent session rows', () => {
     expect(db.listAgentSessions(p.id).map((s) => s.id)).toContain(id);
   });
 });
+
+describe('v7: resume columns', () => {
+  it('sdk session id + effort persist and reopen flips an ended row back to active', () => {
+    const p = db.createProject({ name: 'P' });
+    const id = db.createAgentSession({ projectId: p.id, title: 't', model: 'claude-haiku-4-5', effort: 'high' });
+    db.setAgentSessionSdkId(id, 'sdk-abc');
+    let rec = db.getAgentSession(id);
+    expect(rec?.sdkSessionId).toBe('sdk-abc');
+    expect(rec?.effort).toBe('high');
+    db.finishAgentSession(id, { inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, costUsd: 0.01 }, 'ended');
+    db.reopenAgentSession(id);
+    rec = db.getAgentSession(id);
+    expect(rec?.status).toBe('active');
+    expect(rec?.endedAt).toBeNull();
+    // usage survives the reopen — resume accumulates on top of it
+    expect(rec?.costUsd).toBeCloseTo(0.01);
+  });
+});

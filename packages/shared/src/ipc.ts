@@ -72,6 +72,7 @@ export const REQUEST_SCHEMAS = {
   'sessions:interrupt': z.object({ sessionId: ID }),
   'sessions:end': z.object({ sessionId: ID }),
   'sessions:transcript': z.object({ sessionId: ID }),
+  'sessions:resume': z.object({ sessionId: ID }),
 } as const;
 
 export type Channel = keyof typeof REQUEST_SCHEMAS;
@@ -121,6 +122,7 @@ export interface Contracts {
   'sessions:interrupt': { req: { sessionId: string }; res: { ok: boolean } };
   'sessions:end': { req: { sessionId: string }; res: { ok: boolean } };
   'sessions:transcript': { req: { sessionId: string }; res: TranscriptView };
+  'sessions:resume': { req: { sessionId: string }; res: SessionView };
 }
 
 // Compile-time check: every contract has a schema and vice versa.

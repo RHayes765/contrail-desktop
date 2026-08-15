@@ -17,8 +17,12 @@ import { MCP_SERVER_NAME, mintableCapabilities, PROJECT_TOOLS, sdkToolName } fro
  *                              allowlist + path enforcement; Bash never in v1.
  *   - `settingSources: []`   → never load ~/.claude settings, CLAUDE.md, or
  *                              the user's skills into a Contrail session.
- *   - `persistSession: false`→ no writes to the user's Claude session store;
- *                              Contrail keeps its own transcripts.
+ *   - CLAUDE_CONFIG_DIR      → ALWAYS the Contrail-owned dir from ctx. The
+ *                              SDK persists session history there (that is
+ *                              what makes resume work — deliberate change
+ *                              from the original persistSession:false, made
+ *                              when resume shipped); the user's real ~/.claude
+ *                              is never read or written either way.
  *   - allowlist minting      → only grant-filtered engine capabilities exist,
  *                              executed in MAIN via the bridge (the runtime
  *                              process never holds tokens or DB handles).
@@ -70,10 +74,12 @@ export function buildSessionOptions(
     cwd: ctx.cwd,
     model: ctx.model,
     ...(ctx.effort ? { effort: ctx.effort } : {}),
+    ...(ctx.resumeSdkSessionId ? { resume: ctx.resumeSdkSessionId } : {}),
     systemPrompt: buildSystemPrompt(ctx),
     tools: [],
     settingSources: [],
-    persistSession: false,
+    // persistSession defaults true — history lands in ctx.claudeConfigDir
+    // (Contrail-owned), which is the whole resume mechanism.
     mcpServers: {
       [MCP_SERVER_NAME]: createSdkMcpServer({
         name: MCP_SERVER_NAME,
@@ -88,6 +94,7 @@ export function buildSessionOptions(
       ...process.env,
       ANTHROPIC_API_KEY: ctx.apiKey,
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      CLAUDE_CONFIG_DIR: ctx.claudeConfigDir,
     },
   };
 }

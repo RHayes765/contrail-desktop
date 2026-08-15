@@ -128,6 +128,12 @@ async function pumpEvents(q: Query): Promise<void> {
   let lastCostUsd = 0;
   try {
     for await (const msg of q) {
+      if (msg.type === 'system' && msg.subtype === 'init') {
+        // The resume handle: main stores it on the session row.
+        const sid = (msg as { session_id?: string }).session_id;
+        if (sid) emit({ type: 'sdk_session', sdkSessionId: sid });
+        continue;
+      }
       if (msg.type === 'stream_event') {
         const ev = (msg as { event?: { type?: string; delta?: { type?: string; text?: string } } })
           .event;

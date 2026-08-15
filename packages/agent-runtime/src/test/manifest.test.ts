@@ -55,6 +55,7 @@ function ctxWith(bindings: BindingWithGrants[]): SessionContext {
     maxTurns: 4,
     maxBudgetUsd: 0.25,
     cwd: 'C:/tmp/scratch',
+    claudeConfigDir: 'C:/tmp/contrail-claude-runtime',
     apiKey: 'sk-test',
   };
 }
@@ -124,11 +125,24 @@ describe('tool manifest (THE isolation snapshot)', () => {
     expect(options.tools).toEqual([]);
     // Never load the user's ~/.claude settings, CLAUDE.md, or skills.
     expect(options.settingSources).toEqual([]);
-    // Never write to the user's Claude session store.
-    expect(options.persistSession).toBe(false);
+    // Session history persists ONLY in the Contrail-owned config dir — the
+    // resume mechanism. (Deliberate change from persistSession:false when
+    // resume shipped; the user's real ~/.claude is still never touched.)
+    expect(options.persistSession).not.toBe(false);
+    expect(options.env?.CLAUDE_CONFIG_DIR).toBe('C:/tmp/contrail-claude-runtime');
     // Budget caps present.
     expect(options.maxTurns).toBe(4);
     expect(options.maxBudgetUsd).toBe(0.25);
+  });
+
+  it('resume passes through only when set', () => {
+    const fresh = buildSessionOptions(ctxWith([FULL]), invoke);
+    expect('resume' in fresh).toBe(false);
+    const resumed = buildSessionOptions(
+      { ...ctxWith([FULL]), resumeSdkSessionId: 'sdk-123' },
+      invoke,
+    );
+    expect((resumed as { resume?: string }).resume).toBe('sdk-123');
   });
 
   it('allowedTools carries ONLY namespaced contrail capabilities — no built-in names ever', () => {

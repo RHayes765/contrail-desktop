@@ -190,20 +190,45 @@ async function runAgentDemo(b: Bootstrap, question: string): Promise<void> {
 
   const inspection = manager.inspect(view.id);
   await manager.end(view.id);
-
-  const finalTexts = events
+  const turnTexts = events
     .filter((e) => e.event.type === 'text')
     .map((e) => (e.event as { text: string }).text);
+  events.length = 0;
+
+  // The resume leg: the runtime process is DEAD — bring the session back and
+  // ask about something only the earlier conversation contains.
+  const resumedView = manager.resume(view.id);
+  const turn3 = waitTurn(120_000);
+  manager.send(
+    resumedView.id,
+    'Earlier in this conversation I asked two questions. Answer again, with just the number, ' +
+      'the count you found for the second one.',
+  );
+  await turn3;
+  const resumedTexts = events
+    .filter((e) => e.event.type === 'text')
+    .map((e) => (e.event as { text: string }).text);
+  await manager.end(view.id);
+
   const row = b.deps.db.getAgentSession(view.id);
   smokeWrite({
     ok: true,
     session_id: view.id,
-    turn_texts: finalTexts,
+    turn_texts: turnTexts,
+    resumed_texts: resumedTexts,
+    resume_recalled_answer: resumedTexts.some((t) => t.includes('13')),
     capability_calls: inspection?.capabilityCalls ?? [],
-    usage: inspection?.usage ?? null,
+    usage: row
+      ? {
+          inputTokens: row.inputTokens,
+          outputTokens: row.outputTokens,
+          cacheReadTokens: row.cacheReadTokens,
+          costUsd: row.costUsd,
+        }
+      : null,
     row_status: row?.status,
+    sdk_session_captured: row?.sdkSessionId != null,
     transcript_path: row?.transcriptPath,
-    event_types: [...new Set(events.map((e) => e.event.type))],
   });
 }
 

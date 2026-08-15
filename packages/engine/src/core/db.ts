@@ -15,7 +15,7 @@ import type {
   ProjectRecord,
 } from './types.js';
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 /**
  * Local SQLite store: connection metadata and the audit log (P0.1); the
@@ -275,6 +275,16 @@ export class ContrailDb {
           ALTER TABLE deploy_requests ADD COLUMN approved_comment TEXT;
           ALTER TABLE deploy_requests ADD COLUMN desktop_state TEXT;
           ALTER TABLE deploy_requests ADD COLUMN origin TEXT;
+        `);
+      }
+      if (current < 7) {
+        // v7 (desktop-owned; sessions is a v6 table, so the freeze contract
+        // permits altering it): SDK session identity for resume + the
+        // reasoning-effort the session ran with. Fresh databases arrive here
+        // too — the v6 CREATE above builds sessions without these columns.
+        this.db.exec(`
+          ALTER TABLE sessions ADD COLUMN sdk_session_id TEXT;
+          ALTER TABLE sessions ADD COLUMN effort TEXT;
         `);
       }
       this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
@@ -558,6 +568,8 @@ export class ContrailDb {
     status: string;
     transcript_path: string | null;
     model: string | null;
+    sdk_session_id: string | null;
+    effort: string | null;
     input_tokens: number;
     output_tokens: number;
     cache_read_tokens: number;
@@ -572,6 +584,8 @@ export class ContrailDb {
       status: row.status,
       transcriptPath: row.transcript_path,
       model: row.model,
+      sdkSessionId: row.sdk_session_id,
+      effort: row.effort,
       inputTokens: row.input_tokens,
       outputTokens: row.output_tokens,
       cacheReadTokens: row.cache_read_tokens,
@@ -582,29 +596,42 @@ export class ContrailDb {
   }
 
   private static readonly SESSION_COLS =
-    'id, project_id, title, status, transcript_path, model, input_tokens, output_tokens, cache_read_tokens, cost_usd, created_at, ended_at';
+    'id, project_id, title, status, transcript_path, model, sdk_session_id, effort, input_tokens, output_tokens, cache_read_tokens, cost_usd, created_at, ended_at';
 
   createAgentSession(input: {
     projectId: string;
     title: string | null;
     model: string;
+    effort?: string | null;
     transcriptPath?: string | null;
   }): string {
     const id = randomUUID();
     this.db
       .prepare(
-        `INSERT INTO sessions (id, workspace_id, project_id, title, status, model, transcript_path, created_at)
-         VALUES (?, 'default', ?, ?, 'active', ?, ?, ?)`,
+        `INSERT INTO sessions (id, workspace_id, project_id, title, status, model, effort, transcript_path, created_at)
+         VALUES (?, 'default', ?, ?, 'active', ?, ?, ?, ?)`,
       )
       .run(
         id,
         input.projectId,
         input.title,
         input.model,
+        input.effort ?? null,
         input.transcriptPath ?? null,
         new Date().toISOString(),
       );
     return id;
+  }
+
+  setAgentSessionSdkId(id: string, sdkSessionId: string): void {
+    this.db.prepare(`UPDATE sessions SET sdk_session_id = ? WHERE id = ?`).run(sdkSessionId, id);
+  }
+
+  /** Resume support: an ended session goes live again on the same row. */
+  reopenAgentSession(id: string): void {
+    this.db
+      .prepare(`UPDATE sessions SET status = 'active', ended_at = NULL WHERE id = ?`)
+      .run(id);
   }
 
   listAgentSessions(projectId: string): AgentSessionRecord[] {

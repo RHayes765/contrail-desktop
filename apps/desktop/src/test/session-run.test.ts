@@ -244,3 +244,27 @@ describe('transcript replay (readTranscript)', () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 });
+
+describe('confirmation-code vault (codes never transit the runtime)', () => {
+  it('extracts the last code from user text; scrub replaces every one', async () => {
+    const { extractConfirmationCode } = await import('../main/services/agentRuntime.js');
+    expect(extractConfirmationCode('typo WXYZ-2345, use ABCD-EFGH instead')).toBe('ABCD-EFGH');
+    expect(extractConfirmationCode('no codes here')).toBeNull();
+    expect(scrubCodes('WXYZ-2345 then ABCD-EFGH')).toBe('[code] then [code]');
+  });
+
+  it('substitutes the vaulted code only for write-execute capabilities', async () => {
+    const { applyVaultedCode } = await import('../main/services/agentRuntime.js');
+    const args: Record<string, unknown> = { connection: 'dev', confirmation_code: '[code]' };
+    expect(applyVaultedCode('execute_deploy', args, 'ABCD-EFGH').used).toBe(true);
+    expect(args.confirmation_code).toBe('ABCD-EFGH');
+    // Read tools never get a code injected, even if the vault is loaded.
+    const readArgs: Record<string, unknown> = { connection: 'dev' };
+    expect(applyVaultedCode('soql_query', readArgs, 'ABCD-EFGH').used).toBe(false);
+    expect('confirmation_code' in readArgs).toBe(false);
+    // An empty vault substitutes nothing — the engine refuses with its own message.
+    const bare: Record<string, unknown> = { connection: 'dev' };
+    expect(applyVaultedCode('dml_execute', bare, null).used).toBe(false);
+    expect(bare.confirmation_code).toBeUndefined();
+  });
+});
