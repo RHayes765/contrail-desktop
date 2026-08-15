@@ -120,6 +120,13 @@ body {
   font-size: 12.5px;
   white-space: nowrap;
   overflow: hidden;
+}
+
+/* Connector/server cards carry long URLs and scope lists — wrap, never clip. */
+.row-card .conn-detail {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  overflow: visible;
   text-overflow: ellipsis;
 }
 

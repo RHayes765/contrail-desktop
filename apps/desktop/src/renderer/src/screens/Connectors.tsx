@@ -295,7 +295,10 @@ export function ConnectorsScreen() {
                   <div className="conn-detail meter-dim" title={s.authorizedScopes.join('\n')}>
                     granted scopes:{' '}
                     {s.authorizedScopes
-                      .map((sc) => sc.split('/').pop() ?? sc)
+                      .map((sc) => {
+                        const trimmed = sc.replace(/\/+$/, '');
+                        return trimmed.split('/').pop() || trimmed;
+                      })
                       .join(', ')}
                   </div>
                 )}
