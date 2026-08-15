@@ -61,6 +61,49 @@ export function mcpBearerFor(serverId: string): string | null {
   }
 }
 
+/**
+ * Silent renewal for a stored token that is expired (or about to be).
+ * Session start and the connection test call this so a live refresh token
+ * keeps working indefinitely — the Authorize button is only for NEW consent.
+ */
+export async function refreshMcpTokenIfExpired(serverId: string): Promise<void> {
+  const raw = readSecret(KEYCHAIN_SERVICE, account(serverId));
+  if (!raw) return;
+  let token: StoredToken;
+  try {
+    token = JSON.parse(raw) as StoredToken;
+  } catch {
+    return;
+  }
+  if (!token.refresh_token) return;
+  const expiresSoon = token.expires_at !== undefined && token.expires_at < Date.now() + 60_000;
+  if (!expiresSoon) return;
+  const res = await fetchJson(token.token_endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: token.refresh_token,
+      client_id: token.client_id,
+      ...(token.client_secret ? { client_secret: token.client_secret } : {}),
+      resource: token.resource,
+    }).toString(),
+  });
+  if (!res?.access_token) return; // refresh dead — Authorize will say so
+  writeSecret(
+    KEYCHAIN_SERVICE,
+    account(serverId),
+    JSON.stringify({
+      ...token,
+      access_token: res.access_token as string,
+      refresh_token: (res.refresh_token as string | undefined) ?? token.refresh_token,
+      expires_at:
+        typeof res.expires_in === 'number' ? Date.now() + res.expires_in * 1000 : undefined,
+      scope: (typeof res.scope === 'string' && res.scope.trim()) || token.scope,
+    } satisfies StoredToken),
+  );
+}
+
 /** Scopes the provider granted at consent — null when unknown/no token. */
 export function mcpGrantedScopes(serverId: string): string[] | null {
   const raw = readSecret(KEYCHAIN_SERVICE, account(serverId));

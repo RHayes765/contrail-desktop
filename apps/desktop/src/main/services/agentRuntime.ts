@@ -23,6 +23,7 @@ import type {
   ToMain,
 } from '@contrail/agent-runtime';
 import { resolveSessionMcp } from './mcpConfig.js';
+import { refreshMcpTokenIfExpired } from './mcpOauth.js';
 import {
   CHAT_MODELS,
   type ChatEvent,
@@ -643,7 +644,7 @@ export class AgentSessionManager {
     return { usage: { ...entry.usage }, capabilityCalls: [...entry.run.capabilityCalls] };
   }
 
-  start(projectId: string, model?: string, effort?: EffortLevel): SessionView {
+  async start(projectId: string, model?: string, effort?: EffortLevel): Promise<SessionView> {
     if (this.live.size >= MAX_LIVE_SESSIONS) {
       throw new Error(
         `${this.live.size} sessions are already running — end one before starting another.`,
@@ -675,6 +676,11 @@ export class AgentSessionManager {
       if (connection) bindings.push({ connection, envRole: b.envRole });
     }
 
+    // Expired external OAuth tokens refresh silently BEFORE resolution, so
+    // the session starts with a live bearer instead of a stale one.
+    for (const s of this.deps.db.listCustomMcpServers()) {
+      if (s.enabled && s.transport !== 'stdio') await refreshMcpTokenIfExpired(s.id);
+    }
     const mcp = resolveSessionMcp(this.deps, projectId);
     const spec: SessionSpec = {
       project,
@@ -721,7 +727,7 @@ export class AgentSessionManager {
    * replays the persisted history (from the Contrail-owned config dir) into a
    * fresh runtime; same session row, accumulated usage, same transcript file.
    */
-  resume(sessionId: string): SessionView {
+  async resume(sessionId: string): Promise<SessionView> {
     const existing = this.live.get(sessionId);
     if (existing) {
       // Already running — resuming a live session is just "go talk to it".
@@ -762,6 +768,9 @@ export class AgentSessionManager {
     }
 
     // Toggles and external servers also re-resolve from TODAY's state.
+    for (const s of this.deps.db.listCustomMcpServers()) {
+      if (s.enabled && s.transport !== 'stdio') await refreshMcpTokenIfExpired(s.id);
+    }
     const mcp = resolveSessionMcp(this.deps, rec.projectId);
     const spec: SessionSpec = {
       project,

@@ -81,6 +81,8 @@ const NARRATE_DEMO = narrateDemoArg ? narrateDemoArg.slice('--narrate-demo='.len
 const MCP_DEMO = process.argv.includes('--mcp-demo');
 const mcpAuthDemoArg = process.argv.find((a) => a.startsWith('--mcp-auth-demo='));
 const MCP_AUTH_DEMO = mcpAuthDemoArg ? mcpAuthDemoArg.slice('--mcp-auth-demo='.length) : null;
+const mcpCallDiagArg = process.argv.find((a) => a.startsWith('--mcp-call-diag='));
+const MCP_CALL_DIAG = mcpCallDiagArg ? mcpCallDiagArg.slice('--mcp-call-diag='.length) : null;
 
 const HEADLESS =
   SMOKE ||
@@ -90,7 +92,8 @@ const HEADLESS =
   SUMMARIZE_DEMO !== null ||
   NARRATE_DEMO !== null ||
   MCP_DEMO ||
-  MCP_AUTH_DEMO !== null;
+  MCP_AUTH_DEMO !== null ||
+  MCP_CALL_DIAG !== null;
 
 function smokeWrite(payload: unknown): void {
   const text = JSON.stringify(payload, null, 2) + '\n';
@@ -233,7 +236,7 @@ async function runAgentDemo(b: Bootstrap, question: string): Promise<void> {
   const manager = new AgentSessionManager(b.deps, projects, runtimeChildPath(), push);
   sessionManager = manager;
 
-  const view = manager.start(project.id);
+  const view = await manager.start(project.id);
   const waitTurn = (timeoutMs: number): Promise<void> =>
     new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('turn timed out')), timeoutMs);
@@ -263,7 +266,7 @@ async function runAgentDemo(b: Bootstrap, question: string): Promise<void> {
 
   // The resume leg: the runtime process is DEAD — bring the session back and
   // ask about something only the earlier conversation contains.
-  const resumedView = manager.resume(view.id);
+  const resumedView = await manager.resume(view.id);
   const turn3 = waitTurn(120_000);
   manager.send(
     resumedView.id,
@@ -363,7 +366,7 @@ async function runMcpDemo(b: Bootstrap): Promise<void> {
     };
     const manager = new AgentSessionManager(b.deps, projects, runtimeChildPath(), push);
     sessionManager = manager;
-    const view = manager.start(project.id, 'claude-haiku-4-5');
+    const view = await manager.start(project.id, 'claude-haiku-4-5');
     const turn = new Promise<void>((resolve, reject) => {
       turnResolve = resolve;
       setTimeout(() => reject(new Error('mcp demo turn timed out')), 180_000);
@@ -464,7 +467,7 @@ async function runMcpAuthDemo(b: Bootstrap, url: string): Promise<void> {
       (authUrl) => openedUrls.push(authUrl),
     );
     sessionManager = manager;
-    const view = manager.start(project.id, 'claude-haiku-4-5');
+    const view = await manager.start(project.id, 'claude-haiku-4-5');
     // No messages sent — we only watch the MCP connect/auth machinery.
     await new Promise((resolve) => setTimeout(resolve, 25_000));
     await manager.end(view.id);
@@ -508,6 +511,102 @@ async function runMcpAuthDemo(b: Bootstrap, url: string): Promise<void> {
       /* best effort */
     }
   }
+}
+
+/**
+ * Read-only diagnostic for a registered remote MCP server, run from the
+ * USER'S environment (matters: shells descended from MSIX apps see a
+ * virtualized AppData, so only the app's own launch context is guaranteed
+ * the real DB + real keychain rows). Refreshes the stored token, then
+ * initialize → tools/list → ONE harmless read-style tools/call, dumping
+ * the provider's COMPLETE response bodies — the error details name the
+ * real denial reason.
+ */
+async function runMcpCallDiag(b: Bootstrap, serverName: string): Promise<void> {
+  const { mcpBearerFor, refreshMcpTokenIfExpired, mcpGrantedScopes } = await import(
+    './services/mcpOauth.js'
+  );
+  const server = b.deps.db
+    .listCustomMcpServers()
+    .find((s) => s.name.toLowerCase() === serverName.toLowerCase());
+  if (!server) {
+    smokeWrite({
+      ok: false,
+      error: `No server named "${serverName}". Registered: ${b.deps.db.listCustomMcpServers().map((s) => s.name).join(', ') || '(none)'}`,
+    });
+    return;
+  }
+  await refreshMcpTokenIfExpired(server.id);
+  const bearer = mcpBearerFor(server.id);
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json, text/event-stream',
+    ...(bearer ? { Authorization: bearer } : {}),
+    ...(server.config.headers ?? {}),
+  };
+  const post = (body: unknown, extra: Record<string, string> = {}) =>
+    fetch(server.urlOrCommand, {
+      method: 'POST',
+      headers: { ...headers, ...extra },
+      body: JSON.stringify(body),
+    });
+  const parse = async (r: Response): Promise<unknown> => {
+    const t = await r.text();
+    try {
+      if ((r.headers.get('content-type') ?? '').includes('event-stream')) {
+        for (const l of t.split('\n')) {
+          if (l.trim().startsWith('data:')) return JSON.parse(l.trim().slice(5));
+        }
+        return t.slice(0, 800);
+      }
+      return JSON.parse(t);
+    } catch {
+      return t.slice(0, 800);
+    }
+  };
+
+  const initRes = await post({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: {
+      protocolVersion: '2025-03-26',
+      capabilities: {},
+      clientInfo: { name: 'contrail-call-diag', version: '1.0.0' },
+    },
+  });
+  const sid = initRes.headers.get('mcp-session-id');
+  const sh = sid ? { 'mcp-session-id': sid } : {};
+  const initBody = (await parse(initRes)) as { result?: { serverInfo?: { name?: string } } };
+  await post({ jsonrpc: '2.0', method: 'notifications/initialized' }, sh);
+  const listRes = await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, sh);
+  const listBody = (await parse(listRes)) as {
+    result?: { tools?: Array<{ name: string }> };
+  } | null;
+  const tools = listBody?.result?.tools ?? [];
+  // A profile/label-style read returns account facts, never message content.
+  const target =
+    tools.find((t) => /profile/i.test(t.name)) ??
+    tools.find((t) => /label/i.test(t.name)) ??
+    tools[0];
+  let call: unknown = null;
+  if (target) {
+    const callRes = await post(
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: target.name, arguments: {} } },
+      sh,
+    );
+    call = { tool: target.name, http_status: callRes.status, body: await parse(callRes) };
+  }
+  smokeWrite({
+    ok: true,
+    server: server.name,
+    token_present: Boolean(bearer),
+    granted_scopes: mcpGrantedScopes(server.id),
+    init_status: initRes.status,
+    server_info: initBody?.result?.serverInfo ?? null,
+    tool_count: tools.length,
+    call,
+  });
 }
 
 /**
@@ -565,7 +664,7 @@ async function runSnapshotDemo(b: Bootstrap, question: string): Promise<void> {
 
   const manager = new AgentSessionManager(b.deps, projects, runtimeChildPath(), push);
   sessionManager = manager;
-  const view = manager.start(project.id);
+  const view = await manager.start(project.id);
   const turn = new Promise<void>((resolve, reject) => {
     turnResolve = resolve;
     setTimeout(() => reject(new Error('agent turn timed out')), 120_000);
@@ -643,6 +742,17 @@ app.whenReady().then(async () => {
     return;
   }
 
+  if (MCP_CALL_DIAG) {
+    try {
+      await runMcpCallDiag(boot, MCP_CALL_DIAG);
+      app.exit(0);
+    } catch (err) {
+      smokeWrite({ ok: false, error: String(err) });
+      app.exit(1);
+    }
+    return;
+  }
+
   if (AGENT_DEMO) {
     try {
       await runAgentDemo(boot, AGENT_DEMO);
@@ -704,7 +814,7 @@ app.whenReady().then(async () => {
       };
       const manager = new AgentSessionManager(boot.deps, projects, runtimeChildPath(), push);
       sessionManager = manager;
-      const view = manager.start(project.id);
+      const view = await manager.start(project.id);
       const turn = new Promise<void>((resolve, reject) => {
         turnResolve = resolve;
         setTimeout(() => reject(new Error('narration turn timed out')), 180_000);

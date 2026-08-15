@@ -10,7 +10,13 @@ import {
 } from '@contrail/engine';
 import type { ExternalMcpServerSpec } from '@contrail/agent-runtime';
 import type { CustomMcpServerView, McpServerTestView, ProjectMcpView } from '@contrail/shared';
-import { clearMcpToken, mcpBearerFor, mcpGrantedScopes, McpOAuthService } from './mcpOauth.js';
+import {
+  clearMcpToken,
+  mcpBearerFor,
+  mcpGrantedScopes,
+  refreshMcpTokenIfExpired,
+  McpOAuthService,
+} from './mcpOauth.js';
 
 /**
  * The headers a server actually gets: a keychain-stored OAuth bearer (from
@@ -294,6 +300,7 @@ export class McpConfigService {
   async testServer(id: string): Promise<McpServerTestView> {
     const server = this.deps.db.getCustomMcpServer(id);
     if (!server) throw new Error('Server not found.');
+    if (server.transport !== 'stdio') await refreshMcpTokenIfExpired(id);
     const result =
       server.transport === 'stdio'
         ? await testStdioServer(server)
