@@ -110,6 +110,13 @@ export {
   type ObjectPermissionView,
   type FieldPermissionView,
 } from './metadata/profiles.js';
+export {
+  parseFlowGraph,
+  type FlowGraph,
+  type FlowGraphNode,
+  type FlowGraphEdge,
+  type FlowNodeKind,
+} from './metadata/flowgraph.js';
 
 // Deploy
 export { DeployEngine } from './deploy/engine.js';

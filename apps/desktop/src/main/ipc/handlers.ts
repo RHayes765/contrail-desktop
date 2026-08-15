@@ -6,6 +6,7 @@ import { docView, noteView, ProjectService } from '../services/projects.js';
 import { AgentSessionManager } from '../services/agentRuntime.js';
 import { SnapshotService } from '../services/snapshots.js';
 import { DiffService, MetadataService } from '../services/metadata.js';
+import { SummaryService } from '../services/summaries.js';
 
 /**
  * The complete handler map for the typed IPC registry. Handlers are thin:
@@ -20,12 +21,13 @@ export interface MainServices {
   snapshots: SnapshotService;
   metadata: MetadataService;
   diff: DiffService;
+  summaries: SummaryService;
   /** The window whose native dialogs (file picker) we parent. */
   getWindow: () => BrowserWindow | null;
 }
 
 export function makeHandlers(health: HealthView, services: MainServices) {
-  const { connections, projects, sessions, snapshots, metadata, diff } = services;
+  const { connections, projects, sessions, snapshots, metadata, diff, summaries } = services;
   return {
     'app:health': (deps: EngineDeps): HealthView => ({
       ...health,
@@ -56,6 +58,14 @@ export function makeHandlers(health: HealthView, services: MainServices) {
       _deps: EngineDeps,
       req: { connectionId: string; type: string; apiName: string },
     ) => metadata.artifact(req.connectionId, req.type, req.apiName),
+    'metadata:summarize': (
+      _deps: EngineDeps,
+      req: {
+        connectionId: string;
+        type: 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule';
+        apiName: string;
+      },
+    ) => summaries.summarize(req.connectionId, req.type, req.apiName),
     'diff:scope': (
       _deps: EngineDeps,
       req: { connectionA: string; connectionB: string; types?: string[] },

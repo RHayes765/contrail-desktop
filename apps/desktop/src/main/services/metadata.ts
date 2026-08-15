@@ -1,5 +1,6 @@
 import {
   findChildBlock,
+  parseFlowGraph,
   parsePermissionSet,
   queryDependencies,
   type EngineDeps,
@@ -129,6 +130,7 @@ export class MetadataService {
       usedByTruncated,
       permissionSet:
         rec.type === 'PermissionSet' && content ? parsePermissionSet(content) : null,
+      flowGraph: rec.type === 'Flow' && content ? parseFlowGraph(content) : null,
     };
   }
 

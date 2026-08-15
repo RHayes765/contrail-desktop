@@ -11,6 +11,7 @@ import { ProjectService } from './services/projects.js';
 import { AgentSessionManager, type SessionAlert } from './services/agentRuntime.js';
 import { SnapshotService, SnapshotWorkerBridge } from './services/snapshots.js';
 import { DiffService, MetadataService } from './services/metadata.js';
+import { SummaryService } from './services/summaries.js';
 
 /** The snapshot CPU worker bundle (built as a second main entry). */
 function snapshotWorkerPath(): string {
@@ -70,8 +71,17 @@ const snapshotDemoArg = process.argv.find((a) => a.startsWith('--snapshot-demo='
 const SNAPSHOT_DEMO = snapshotDemoArg ? snapshotDemoArg.slice('--snapshot-demo='.length) : null;
 const diffDemoArg = process.argv.find((a) => a.startsWith('--diff-demo='));
 const DIFF_DEMO = diffDemoArg ? diffDemoArg.slice('--diff-demo='.length) : null;
+const summarizeDemoArg = process.argv.find((a) => a.startsWith('--summarize-demo='));
+const SUMMARIZE_DEMO = summarizeDemoArg
+  ? summarizeDemoArg.slice('--summarize-demo='.length)
+  : null;
 
-const HEADLESS = SMOKE || AGENT_DEMO !== null || SNAPSHOT_DEMO !== null || DIFF_DEMO !== null;
+const HEADLESS =
+  SMOKE ||
+  AGENT_DEMO !== null ||
+  SNAPSHOT_DEMO !== null ||
+  DIFF_DEMO !== null ||
+  SUMMARIZE_DEMO !== null;
 
 function smokeWrite(payload: unknown): void {
   const text = JSON.stringify(payload, null, 2) + '\n';
@@ -401,6 +411,40 @@ app.whenReady().then(async () => {
     return;
   }
 
+  if (SUMMARIZE_DEMO !== null) {
+    // Arg: "alias:Type:ApiName" — one direct Haiku call on local content.
+    try {
+      const [ref, type, apiName] = SUMMARIZE_DEMO.split(':');
+      if (!ref || !type || !apiName) throw new Error('--summarize-demo expects "alias:Type:ApiName"');
+      const conn = boot.deps.db.resolveConnection(ref);
+      if (!conn) throw new Error(`connection "${ref}" not found`);
+      const metadata = new MetadataService(boot.deps);
+      const summaries = new SummaryService(boot.deps, metadata);
+      const started = Date.now();
+      const first = await summaries.summarize(
+        conn.id,
+        type as 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule',
+        apiName,
+      );
+      const second = await summaries.summarize(
+        conn.id,
+        type as 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule',
+        apiName,
+      );
+      smokeWrite({
+        ok: true,
+        summary: first.summary,
+        duration_ms: Date.now() - started,
+        second_call_cached: second.cached,
+      });
+      app.exit(0);
+    } catch (err) {
+      smokeWrite({ ok: false, error: String(err) });
+      app.exit(1);
+    }
+    return;
+  }
+
   if (DIFF_DEMO !== null) {
     // Cross-org scope diff over LOCAL snapshots — zero Salesforce calls.
     // Arg: "aliasA,aliasB" (both must have synced snapshots).
@@ -481,6 +525,7 @@ app.whenReady().then(async () => {
     snapshots,
     metadata,
     diff,
+    summaries: new SummaryService(boot.deps, metadata),
     getWindow: () => mainWindow,
   };
 

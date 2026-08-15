@@ -3,11 +3,84 @@ import type {
   ArtifactDetailView,
   ArtifactRowView,
   ConnectionView,
+  DependencyRefView,
   MetadataTypeCountView,
   PermissionSetView,
 } from '@contrail/shared';
 import { ipc } from '../lib/ipc.js';
 import { useConnections } from '../stores/connections.js';
+import { Md } from '../components/thread.js';
+import { FlowDiagram } from '../components/FlowDiagram.js';
+
+const SUMMARIZABLE = new Set(['ApexClass', 'ApexTrigger', 'Flow', 'ValidationRule']);
+
+/** Uses/Used-by grouped by type; the section and each subgroup collapse. */
+function DepSection({
+  title,
+  refs,
+  truncated,
+  onOpen,
+}: {
+  title: string;
+  refs: DependencyRefView[];
+  truncated: boolean;
+  onOpen: (type: string, name: string) => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
+  if (refs.length === 0) return null;
+
+  const groups = new Map<string, DependencyRefView[]>();
+  for (const ref of refs) {
+    const list = groups.get(ref.type) ?? [];
+    list.push(ref);
+    groups.set(ref.type, list);
+  }
+  const sorted = [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+
+  return (
+    <div className="dep-section">
+      <button className="dep-section-head" onClick={() => setOpen((v) => !v)}>
+        <span className="dep-caret">{open ? '▾' : '▸'}</span>
+        <span className="dep-label">{title}</span>
+        <span className="meta-count">{refs.length}{truncated ? '+' : ''}</span>
+      </button>
+      {open &&
+        sorted.map(([type, items]) => {
+          // Small groups start open; big ones start collapsed.
+          const groupOpen = openGroups[type] ?? items.length <= 5;
+          return (
+            <div className="dep-subgroup" key={type}>
+              <button
+                className="dep-subgroup-head"
+                onClick={() => setOpenGroups((g) => ({ ...g, [type]: !groupOpen }))}
+              >
+                <span className="dep-caret">{groupOpen ? '▾' : '▸'}</span>
+                <span>{type}</span>
+                <span className="meta-count">{items.length}</span>
+              </button>
+              {groupOpen && (
+                <div className="dep-group">
+                  {items.map((d) => (
+                    <button
+                      key={`${d.type}:${d.name}`}
+                      className="dep-chip"
+                      onClick={() => onOpen(d.type, d.name)}
+                    >
+                      {d.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      {open && truncated && (
+        <span className="meter-dim">first 50 shown — ask the agent for the full graph</span>
+      )}
+    </div>
+  );
+}
 
 /**
  * The metadata browser: type tree → artifact list → detail (source +
@@ -25,6 +98,24 @@ export function MetadataScreen() {
   const [detail, setDetail] = useState<ArtifactDetailView | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [rawXml, setRawXml] = useState(false);
+  const [summary, setSummary] = useState<string | null>(null);
+  const [summarizing, setSummarizing] = useState(false);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+
+  const summarize = () => {
+    if (!connectionId || !detail || !SUMMARIZABLE.has(detail.type)) return;
+    setSummarizing(true);
+    setSummaryError(null);
+    void ipc
+      .invoke('metadata:summarize', {
+        connectionId,
+        type: detail.type as 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule',
+        apiName: detail.apiName,
+      })
+      .then((r) => setSummary(r.summary))
+      .catch((err) => setSummaryError(String(err)))
+      .finally(() => setSummarizing(false));
+  };
 
   useEffect(() => {
     void refresh();
@@ -85,6 +176,8 @@ export function MetadataScreen() {
     setDetail(null);
     setDetailError(null);
     setRawXml(false);
+    setSummary(null);
+    setSummaryError(null);
     setSelectedType(type);
     void ipc
       .invoke('metadata:artifact', { connectionId, type, apiName })
@@ -191,53 +284,47 @@ export function MetadataScreen() {
                       ` on ${new Date(detail.lastModifiedDate).toLocaleString()}`}
                   </div>
                 </div>
-                {permissionSet && (
-                  <button onClick={() => setRawXml((v) => !v)}>
-                    {rawXml ? 'Parsed view' : 'Raw XML'}
-                  </button>
-                )}
+                <div className="meta-detail-actions">
+                  {SUMMARIZABLE.has(detail.type) && !summary && (
+                    <button disabled={summarizing} onClick={summarize}>
+                      {summarizing ? 'Summarizing…' : 'AI summary'}
+                    </button>
+                  )}
+                  {(permissionSet || detail.flowGraph) && (
+                    <button onClick={() => setRawXml((v) => !v)}>
+                      {rawXml ? (detail.flowGraph ? 'Diagram' : 'Parsed view') : 'Raw XML'}
+                    </button>
+                  )}
+                </div>
               </div>
 
-              {(detail.uses.length > 0 || detail.usedBy.length > 0) && (
-                <div className="dep-panel">
-                  {detail.uses.length > 0 && (
-                    <div className="dep-group">
-                      <span className="dep-label">uses</span>
-                      {detail.uses.map((d) => (
-                        <button
-                          key={`${d.type}:${d.name}`}
-                          className="dep-chip"
-                          onClick={() => openArtifact(d.type, d.name)}
-                        >
-                          {d.type}: {d.name}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                  {detail.usedBy.length > 0 && (
-                    <div className="dep-group">
-                      <span className="dep-label">used by</span>
-                      {detail.usedBy.map((d) => (
-                        <button
-                          key={`${d.type}:${d.name}`}
-                          className="dep-chip"
-                          onClick={() => openArtifact(d.type, d.name)}
-                        >
-                          {d.type}: {d.name}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                  {(detail.usesTruncated || detail.usedByTruncated) && (
-                    <span className="meter-dim">
-                      showing the first {50} — ask the agent (get_dependencies) for the full graph
-                    </span>
-                  )}
+              {summaryError && <div className="notice">{summaryError}</div>}
+              {summary && (
+                <div className="summary-panel">
+                  <div className="dep-label">AI summary</div>
+                  <Md text={summary} />
                 </div>
               )}
 
+              <div className="dep-panel">
+                <DepSection
+                  title="uses"
+                  refs={detail.uses}
+                  truncated={detail.usesTruncated}
+                  onOpen={openArtifact}
+                />
+                <DepSection
+                  title="used by"
+                  refs={detail.usedBy}
+                  truncated={detail.usedByTruncated}
+                  onOpen={openArtifact}
+                />
+              </div>
+
               {permissionSet && !rawXml ? (
                 <PermissionSetPanel view={permissionSet} />
+              ) : detail.flowGraph && !rawXml ? (
+                <FlowDiagram graph={detail.flowGraph} />
               ) : detail.content ? (
                 <pre className="meta-source">{detail.content}</pre>
               ) : (

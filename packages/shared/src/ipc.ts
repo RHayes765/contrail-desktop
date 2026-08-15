@@ -70,6 +70,11 @@ export const REQUEST_SCHEMAS = {
     type: z.string().min(1).max(80),
     apiName: z.string().min(1).max(300),
   }),
+  'metadata:summarize': z.object({
+    connectionId: ID,
+    type: z.enum(['ApexClass', 'ApexTrigger', 'Flow', 'ValidationRule']),
+    apiName: z.string().min(1).max(300),
+  }),
 
   'diff:scope': z.object({
     connectionA: ID,
@@ -142,6 +147,14 @@ export interface Contracts {
   'metadata:artifact': {
     req: { connectionId: string; type: string; apiName: string };
     res: ArtifactDetailView;
+  };
+  'metadata:summarize': {
+    req: {
+      connectionId: string;
+      type: 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule';
+      apiName: string;
+    };
+    res: { summary: string; cached: boolean };
   };
 
   'diff:scope': {

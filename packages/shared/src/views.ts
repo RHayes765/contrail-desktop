@@ -166,6 +166,19 @@ export interface ArtifactDetailView {
   usedByTruncated: boolean;
   /** Parsed permissions — present only for PermissionSet artifacts. */
   permissionSet: unknown | null;
+  /** Parsed node/edge graph — present only for Flow artifacts. */
+  flowGraph: FlowGraphView | null;
+}
+
+/** Structural mirror of the engine's parsed flow graph (shared stays engine-free). */
+export interface FlowGraphView {
+  label: string | null;
+  processType: string | null;
+  status: string | null;
+  trigger: string | null;
+  nodes: Array<{ name: string; label: string; kind: string; detail: string | null }>;
+  edges: Array<{ from: string; to: string; kind: string; label: string | null }>;
+  unresolved: string[];
 }
 
 /** Structural mirror of the engine's parsed PermissionSet (shared stays engine-free). */
