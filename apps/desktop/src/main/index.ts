@@ -338,6 +338,10 @@ async function runMcpDemo(b: Bootstrap): Promise<void> {
     await mcp.setToggle(project.id, `ext:${server.id}`, true);
     const resolved = resolveSessionMcp(b.deps, project.id);
 
+    // Leg 2.5: the registration-time connection test (S8.2) — a real MCP
+    // handshake against the stored config, no model involved.
+    const probe = await mcp.testServer(server.id);
+
     // Leg 3: LIVE — the agent calls the echo tool through the SDK.
     const events: Array<{ sessionId: string; event: ChatEvent }> = [];
     let turnResolve: (() => void) | null = null;
@@ -383,6 +387,8 @@ async function runMcpDemo(b: Bootstrap): Promise<void> {
       deploy_disabled: after.disabledCatalogKeys.includes('deploy'),
       default_off_before_opt_in: beforeOptIn.externalServers.length === 0,
       resolved_key_present: resolved.externalServers.some((s) => s.key === 'echo_demo'),
+      probe_connected: probe.status === 'connected',
+      probe_found_echo_tool: probe.tools.includes('echo'),
       secret_value_absent_from_views: !viewsJson.includes(SECRET_CANARY),
       secret_name_present_in_views: viewsJson.includes('DEMO_SECRET'),
       echo_tool_called: toolCalls.some((n) => n.includes('echo')),

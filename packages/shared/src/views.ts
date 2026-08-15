@@ -458,3 +458,10 @@ export const CONNECTOR_PRESETS: ConnectorPresetView[] = [
     note: 'Google’s official Calendar MCP server. OAuth 2.0 only per Google’s docs — not usable with v1 header auth until Contrail supports OAuth flows.',
   },
 ];
+
+/** Result of a registration-time MCP connection test (mcp:servers:test). */
+export interface McpServerTestView {
+  status: 'connected' | 'needs_auth' | 'failed';
+  detail: string | null;
+  tools: string[];
+}

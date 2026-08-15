@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { CustomMcpServerView, ProjectMcpView } from '@contrail/shared';
+import type { CustomMcpServerView, McpServerTestView, ProjectMcpView } from '@contrail/shared';
 import { ipc } from '../lib/ipc.js';
 
 /**
@@ -14,10 +14,13 @@ interface McpState {
   projectId: string | null;
   project: ProjectMcpView | null;
   error: string | null;
+  /** Connection-test outcomes by server id ('testing' while in flight). */
+  testResults: Record<string, McpServerTestView | 'testing'>;
 
   refreshServers: () => Promise<void>;
   loadProject: (projectId: string) => Promise<void>;
   clearError: () => void;
+  testServer: (id: string) => Promise<void>;
   setToggle: (projectId: string, serverKey: string, enabled: boolean) => Promise<boolean>;
   addServer: (req: {
     name: string;
@@ -26,7 +29,7 @@ interface McpState {
     args?: string[];
     env?: Record<string, string>;
     headers?: Record<string, string>;
-  }) => Promise<boolean>;
+  }) => Promise<CustomMcpServerView | null>;
   setServerEnabled: (id: string, enabled: boolean) => Promise<boolean>;
   removeServer: (id: string) => Promise<boolean>;
 }
@@ -36,6 +39,7 @@ export const useMcp = create<McpState>((set, get) => ({
   projectId: null,
   project: null,
   error: null,
+  testResults: {},
 
   refreshServers: async () => {
     try {
@@ -46,6 +50,21 @@ export const useMcp = create<McpState>((set, get) => ({
   },
 
   clearError: () => set({ error: null }),
+
+  testServer: async (id) => {
+    set({ testResults: { ...get().testResults, [id]: 'testing' } });
+    try {
+      const result = await ipc.invoke('mcp:servers:test', { id });
+      set({ testResults: { ...get().testResults, [id]: result } });
+    } catch (err) {
+      set({
+        testResults: {
+          ...get().testResults,
+          [id]: { status: 'failed', detail: String(err), tools: [] },
+        },
+      });
+    }
+  },
 
   loadProject: async (projectId) => {
     try {
@@ -69,12 +88,12 @@ export const useMcp = create<McpState>((set, get) => ({
 
   addServer: async (req) => {
     try {
-      await ipc.invoke('mcp:servers:add', req);
+      const created = await ipc.invoke('mcp:servers:add', req);
       await get().refreshServers();
-      return true;
+      return created;
     } catch (err) {
       set({ error: String(err) });
-      return false;
+      return null;
     }
   },
 

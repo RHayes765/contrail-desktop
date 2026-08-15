@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react';
-import { CONNECTOR_PRESETS, type ConnectorPresetView } from '@contrail/shared';
+import {
+  CONNECTOR_PRESETS,
+  type ConnectorPresetView,
+  type McpServerTestView,
+} from '@contrail/shared';
 import { useMcp } from '../stores/mcp.js';
 
 /**
@@ -34,7 +38,7 @@ function parseKeyValues(text: string): { values?: Record<string, string>; bad: s
 }
 
 function AddServerForm({ onDone }: { onDone: () => void }) {
-  const { addServer } = useMcp();
+  const { addServer, testServer } = useMcp();
   const [name, setName] = useState('');
   const [transport, setTransport] = useState<'stdio' | 'http' | 'sse'>('stdio');
   const [urlOrCommand, setUrlOrCommand] = useState('');
@@ -66,7 +70,7 @@ function AddServerForm({ onDone }: { onDone: () => void }) {
     }
     setFormError(null);
     setSaving(true);
-    const ok = await addServer({
+    const created = await addServer({
       name: name.trim(),
       transport,
       urlOrCommand: urlOrCommand.trim(),
@@ -82,7 +86,12 @@ function AddServerForm({ onDone }: { onDone: () => void }) {
       headers: headers.values,
     });
     setSaving(false);
-    if (ok) onDone();
+    if (created) {
+      onDone();
+      // Registration is only half the story — immediately prove (or
+      // disprove) that the server actually answers with this config.
+      void testServer(created.id);
+    }
   };
 
   return (
@@ -156,8 +165,29 @@ function AddServerForm({ onDone }: { onDone: () => void }) {
   );
 }
 
+function TestResultLine({ result }: { result: McpServerTestView | 'testing' }) {
+  if (result === 'testing') return <span className="conn-detail meter-dim">Testing connection…</span>;
+  const icon = result.status === 'connected' ? '✓' : result.status === 'needs_auth' ? '🔒' : '✗';
+  return (
+    <span className={`conn-detail ${result.status === 'connected' ? '' : 'meter-dim'}`}>
+      {icon} {result.detail}
+      {result.tools.length > 0 &&
+        ` Tools: ${result.tools.slice(0, 8).join(', ')}${result.tools.length > 8 ? '…' : ''}`}
+    </span>
+  );
+}
+
 export function ConnectorsScreen() {
-  const { servers, error, refreshServers, setServerEnabled, removeServer, clearError } = useMcp();
+  const {
+    servers,
+    error,
+    refreshServers,
+    setServerEnabled,
+    removeServer,
+    clearError,
+    testServer,
+    testResults,
+  } = useMcp();
   const [adding, setAdding] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
 
@@ -203,8 +233,15 @@ export function ConnectorsScreen() {
                   {s.envNames.length > 0 && `env: ${s.envNames.join(', ')} · `}
                   {s.enabled ? 'available to projects that opt in' : 'off everywhere'}
                 </span>
+                {testResults[s.id] && <TestResultLine result={testResults[s.id]} />}
               </div>
               <div className="row-actions">
+                <button
+                  disabled={testResults[s.id] === 'testing'}
+                  onClick={() => void testServer(s.id)}
+                >
+                  Test
+                </button>
                 <label className="grant-toggle">
                   <input
                     type="checkbox"

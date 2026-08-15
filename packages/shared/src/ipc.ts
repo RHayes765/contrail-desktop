@@ -8,6 +8,7 @@ import type {
   ConnectOutcomeView,
   CustomMcpServerView,
   DiffScopeView,
+  McpServerTestView,
   EffortLevel,
   GrantSetView,
   HealthView,
@@ -156,6 +157,7 @@ export const REQUEST_SCHEMAS = {
     headers: z.record(z.string().max(64), z.string().max(4000)).optional(),
   }),
   'mcp:servers:remove': z.object({ id: ID }),
+  'mcp:servers:test': z.object({ id: ID }),
 } as const;
 
 export type Channel = keyof typeof REQUEST_SCHEMAS;
@@ -282,6 +284,7 @@ export interface Contracts {
     res: CustomMcpServerView;
   };
   'mcp:servers:remove': { req: { id: string }; res: { ok: boolean } };
+  'mcp:servers:test': { req: { id: string }; res: McpServerTestView };
 }
 
 // Compile-time check: every contract has a schema and vice versa.

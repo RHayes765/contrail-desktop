@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import {
   STANDARD_CATALOG,
   externalServerKey,
@@ -8,7 +9,7 @@ import {
   type EngineDeps,
 } from '@contrail/engine';
 import type { ExternalMcpServerSpec } from '@contrail/agent-runtime';
-import type { CustomMcpServerView, ProjectMcpView } from '@contrail/shared';
+import type { CustomMcpServerView, McpServerTestView, ProjectMcpView } from '@contrail/shared';
 
 /**
  * MCP configuration: the standard-catalog toggle surface and the external
@@ -220,6 +221,27 @@ export class McpConfigService {
     return serverView(updated);
   }
 
+  /**
+   * A real MCP handshake against the stored config, from main (stored
+   * headers/env are attached here and never leave the process; the result
+   * carries statuses and tool names only). "Saved" is not "working" — this
+   * is how registration gets honest feedback.
+   */
+  async testServer(id: string): Promise<McpServerTestView> {
+    const server = this.deps.db.getCustomMcpServer(id);
+    if (!server) throw new Error('Server not found.');
+    const result =
+      server.transport === 'stdio'
+        ? await testStdioServer(server)
+        : await testHttpServer(server);
+    this.deps.audit.record('mcp.server_tested', {
+      tool: 'desktop_mcp_panel',
+      outcome: result.status === 'connected' ? 'success' : 'error',
+      detail: { id, name: server.name, status: result.status },
+    });
+    return result;
+  }
+
   async removeServer(id: string): Promise<void> {
     const current = this.deps.db.getCustomMcpServer(id);
     // End affected sessions BEFORE the rows go — same order as projects:delete.
@@ -233,4 +255,187 @@ export class McpConfigService {
       });
     }
   }
+}
+
+// ── connection probes ─────────────────────────────────────────────────────
+
+const TEST_TIMEOUT_MS = 10_000;
+
+const INITIALIZE_REQUEST = {
+  jsonrpc: '2.0',
+  id: 1,
+  method: 'initialize',
+  params: {
+    protocolVersion: '2025-03-26',
+    capabilities: {},
+    clientInfo: { name: 'contrail-connection-test', version: '1.0.0' },
+  },
+};
+
+/** Parse a streamable-HTTP response body that may be JSON or SSE-framed. */
+function parseMcpBody(contentType: string, body: string): unknown {
+  if (contentType.includes('text/event-stream')) {
+    for (const line of body.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('data:')) {
+        try {
+          return JSON.parse(trimmed.slice(5).trim());
+        } catch {
+          /* keep scanning */
+        }
+      }
+    }
+    return null;
+  }
+  try {
+    return JSON.parse(body);
+  } catch {
+    return null;
+  }
+}
+
+async function testHttpServer(
+  server: { urlOrCommand: string; config: { headers?: Record<string, string> } },
+): Promise<McpServerTestView> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(server.urlOrCommand, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        ...(server.config.headers ?? {}),
+      },
+      body: JSON.stringify(INITIALIZE_REQUEST),
+    });
+    if (res.status === 401 || res.status === 403) {
+      return {
+        status: 'needs_auth',
+        detail: `The server answered HTTP ${res.status} — it requires authentication this registration doesn't satisfy (OAuth-only servers can't be reached with header tokens).`,
+        tools: [],
+      };
+    }
+    if (!res.ok) {
+      return { status: 'failed', detail: `HTTP ${res.status} from the server.`, tools: [] };
+    }
+    const body = parseMcpBody(res.headers.get('content-type') ?? '', await res.text());
+    const result = (body as { result?: { serverInfo?: { name?: string } } } | null)?.result;
+    if (!result) {
+      return {
+        status: 'failed',
+        detail: 'The endpoint answered but not with an MCP initialize result.',
+        tools: [],
+      };
+    }
+    // Best-effort tool listing (needs the session header on most servers).
+    const sessionId = res.headers.get('mcp-session-id');
+    let tools: string[] = [];
+    if (sessionId) {
+      try {
+        const listRes = await fetch(server.urlOrCommand, {
+          method: 'POST',
+          signal: controller.signal,
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+            'mcp-session-id': sessionId,
+            ...(server.config.headers ?? {}),
+          },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+        });
+        const listBody = parseMcpBody(
+          listRes.headers.get('content-type') ?? '',
+          await listRes.text(),
+        ) as { result?: { tools?: Array<{ name?: string }> } } | null;
+        tools = (listBody?.result?.tools ?? [])
+          .map((t) => t.name ?? '')
+          .filter(Boolean);
+      } catch {
+        /* initialize succeeded — tool listing is a bonus */
+      }
+    }
+    const serverName = result.serverInfo?.name;
+    return {
+      status: 'connected',
+      detail: serverName ? `Connected to "${serverName}".` : 'Connected.',
+      tools,
+    };
+  } catch (err) {
+    const aborted = (err as Error).name === 'AbortError';
+    return {
+      status: 'failed',
+      detail: aborted ? `No response within ${TEST_TIMEOUT_MS / 1000}s.` : String(err).slice(0, 300),
+      tools: [],
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function testStdioServer(server: {
+  urlOrCommand: string;
+  config: { args?: string[]; env?: Record<string, string> };
+}): Promise<McpServerTestView> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (view: McpServerTestView): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child.kill();
+      } catch {
+        /* already gone */
+      }
+      resolve(view);
+    };
+    const child = spawn(server.urlOrCommand, server.config.args ?? [], {
+      env: { ...process.env, ...(server.config.env ?? {}) },
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const timer = setTimeout(
+      () => done({ status: 'failed', detail: `No response within ${TEST_TIMEOUT_MS / 1000}s.`, tools: [] }),
+      TEST_TIMEOUT_MS,
+    );
+    child.on('error', (err) =>
+      done({ status: 'failed', detail: `Could not start the command: ${String(err).slice(0, 200)}`, tools: [] }),
+    );
+    child.on('exit', (code) =>
+      done({ status: 'failed', detail: `The command exited (code ${code}) before completing the handshake.`, tools: [] }),
+    );
+    let buffer = '';
+    child.stderr?.on('data', () => {}); // drain — a chatty server must not wedge
+    child.stdout?.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString('utf8');
+      let idx: number;
+      while ((idx = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (!line) continue;
+        let msg: { id?: number; result?: { tools?: Array<{ name?: string }> } };
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (msg.id === 1 && msg.result) {
+          child.stdin?.write(
+            JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n',
+          );
+          child.stdin?.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }) + '\n');
+        } else if (msg.id === 2) {
+          const tools = (msg.result?.tools ?? []).map((t) => t.name ?? '').filter(Boolean);
+          done({
+            status: 'connected',
+            detail: `Handshake complete — ${tools.length} tool${tools.length === 1 ? '' : 's'}.`,
+            tools,
+          });
+        }
+      }
+    });
+    child.stdin?.write(JSON.stringify(INITIALIZE_REQUEST) + '\n');
+  });
 }

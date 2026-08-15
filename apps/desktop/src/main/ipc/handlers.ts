@@ -174,9 +174,10 @@ export function makeHandlers(health: HealthView, services: MainServices) {
         headers?: Record<string, string>;
       },
     ) => mcp.updateServer(req),
-    'mcp:servers:remove': (_deps: EngineDeps, req: { id: string }) => {
-      mcp.removeServer(req.id);
+    'mcp:servers:remove': async (_deps: EngineDeps, req: { id: string }) => {
+      await mcp.removeServer(req.id);
       return { ok: true };
     },
+    'mcp:servers:test': (_deps: EngineDeps, req: { id: string }) => mcp.testServer(req.id),
   };
 }
