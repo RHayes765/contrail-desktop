@@ -83,12 +83,12 @@ export const useMcp = create<McpState>((set, get) => ({
     set({ testResults: { ...get().testResults, [id]: 'testing' } });
     try {
       const outcome = await ipc.invoke('mcp:servers:authorize', { id });
-      set({
-        testResults: {
-          ...get().testResults,
-          [id]: outcome.test ?? { status: 'failed', detail: outcome.detail, tools: [] },
-        },
-      });
+      // Keep the authorize detail (granted scopes!) alongside the verdict.
+      const merged = outcome.test
+        ? { ...outcome.test, detail: [outcome.detail, outcome.test.detail].filter(Boolean).join(' ') }
+        : { status: 'failed' as const, detail: outcome.detail, tools: [] };
+      set({ testResults: { ...get().testResults, [id]: merged } });
+      await get().refreshServers(); // granted-scopes line on the card
     } catch (err) {
       set({
         testResults: {

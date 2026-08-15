@@ -419,6 +419,8 @@ export interface CustomMcpServerView {
   envNames: string[];
   /** A user-supplied OAuth client is configured (values never leave main). */
   hasOauthClient: boolean;
+  /** Scopes the provider GRANTED at the last consent — null when no token/unknown. */
+  authorizedScopes: string[] | null;
   enabled: boolean;
   createdAt: string;
 }

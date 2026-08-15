@@ -41,6 +41,8 @@ interface StoredToken {
   client_secret?: string;
   /** RFC 8707 resource indicator (the MCP server URL). */
   resource: string;
+  /** Scopes the provider actually GRANTED (Google's consent is granular). */
+  scope?: string;
 }
 
 function account(serverId: string): string {
@@ -54,6 +56,18 @@ export function mcpBearerFor(serverId: string): string | null {
   try {
     const token = JSON.parse(raw) as StoredToken;
     return `Bearer ${token.access_token}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Scopes the provider granted at consent — null when unknown/no token. */
+export function mcpGrantedScopes(serverId: string): string[] | null {
+  const raw = readSecret(KEYCHAIN_SERVICE, account(serverId));
+  if (!raw) return null;
+  try {
+    const token = JSON.parse(raw) as StoredToken;
+    return token.scope ? token.scope.split(/\s+/).filter(Boolean) : null;
   } catch {
     return null;
   }
@@ -162,13 +176,10 @@ export class McpOAuthService {
       return { ok: false, detail: 'Local stdio servers use env config, not OAuth.' };
     }
 
-    // Silent refresh path — no browser when a refresh token still works.
-    const existing = this.readToken(serverId);
-    if (existing?.refresh_token) {
-      const refreshed = await this.tryRefresh(serverId, existing);
-      if (refreshed) return { ok: true, detail: 'Re-authorized without a new login (refresh token).' };
-    }
-
+    // NO silent-refresh short-circuit here: a refresh reuses the ORIGINAL
+    // scope grant, so an explicit Authorize click must always run a fresh
+    // consent — that is how a user picks up newly configured scopes.
+    // (tryRefresh remains for automatic renewal paths.)
     const resourceMeta = await discoverResourceMetadata(server.urlOrCommand);
     const issuers = (resourceMeta?.authorization_servers as string[] | undefined) ?? [];
     // Legacy MCP discovery (2025-03 spec, used by Atlassian): no protected-
@@ -296,6 +307,8 @@ export class McpOAuthService {
     if (!tokenRes?.access_token) {
       return { ok: false, detail: 'The token exchange failed after login.' };
     }
+    const grantedScope =
+      typeof tokenRes.scope === 'string' && tokenRes.scope.trim() ? tokenRes.scope.trim() : undefined;
     const stored: StoredToken = {
       access_token: tokenRes.access_token as string,
       refresh_token: tokenRes.refresh_token as string | undefined,
@@ -307,14 +320,23 @@ export class McpOAuthService {
       client_id: clientId,
       ...(clientSecret ? { client_secret: clientSecret } : {}),
       resource,
+      ...(grantedScope ? { scope: grantedScope } : {}),
     };
     writeSecret(KEYCHAIN_SERVICE, account(serverId), JSON.stringify(stored));
     this.deps.audit.record('mcp.oauth_authorized', {
       tool: 'desktop_mcp_panel',
       outcome: 'success',
-      detail: { serverId, name: server.name },
+      detail: { serverId, name: server.name, scope: grantedScope ?? null },
     });
-    return { ok: true, detail: `Authorized "${server.name}".` };
+    // Granular consent (Google) can grant FEWER scopes than requested —
+    // say what actually landed, because "authorized" with zero data scopes
+    // still 403s on every real call.
+    const requested = scopes ? scopes.split(/\s+/).length : 0;
+    const granted = grantedScope ? grantedScope.split(/\s+/).length : null;
+    const scopeNote = grantedScope
+      ? ` Granted scopes (${granted}${requested ? ` of ${requested} requested` : ''}): ${grantedScope}`
+      : '';
+    return { ok: true, detail: `Authorized "${server.name}".${scopeNote}` };
   }
 
   private async tryRefresh(serverId: string, token: StoredToken): Promise<boolean> {
@@ -340,6 +362,7 @@ export class McpOAuthService {
         refresh_token: (res.refresh_token as string | undefined) ?? token.refresh_token,
         expires_at:
           typeof res.expires_in === 'number' ? Date.now() + res.expires_in * 1000 : undefined,
+        scope: (typeof res.scope === 'string' && res.scope.trim()) || token.scope,
       } satisfies StoredToken),
     );
     return true;

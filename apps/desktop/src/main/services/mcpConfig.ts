@@ -10,7 +10,7 @@ import {
 } from '@contrail/engine';
 import type { ExternalMcpServerSpec } from '@contrail/agent-runtime';
 import type { CustomMcpServerView, McpServerTestView, ProjectMcpView } from '@contrail/shared';
-import { clearMcpToken, mcpBearerFor, McpOAuthService } from './mcpOauth.js';
+import { clearMcpToken, mcpBearerFor, mcpGrantedScopes, McpOAuthService } from './mcpOauth.js';
 
 /**
  * The headers a server actually gets: a keychain-stored OAuth bearer (from
@@ -99,6 +99,7 @@ function serverView(record: CustomMcpServerRecord): CustomMcpServerView {
     headerNames: Object.keys(record.config.headers ?? {}),
     envNames: Object.keys(record.config.env ?? {}),
     hasOauthClient: Boolean(record.config.oauthClientId),
+    authorizedScopes: record.transport === 'stdio' ? null : mcpGrantedScopes(record.id),
     enabled: record.enabled,
     createdAt: record.createdAt,
   };

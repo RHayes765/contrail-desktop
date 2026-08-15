@@ -291,6 +291,14 @@ export function ConnectorsScreen() {
                   {s.hasOauthClient && 'own OAuth client · '}
                   {s.enabled ? 'available to projects that opt in' : 'off everywhere'}
                 </div>
+                {s.authorizedScopes && (
+                  <div className="conn-detail meter-dim" title={s.authorizedScopes.join('\n')}>
+                    granted scopes:{' '}
+                    {s.authorizedScopes
+                      .map((sc) => sc.split('/').pop() ?? sc)
+                      .join(', ')}
+                  </div>
+                )}
                 {testResults[s.id] && (
                   <div>
                     <TestResultLine result={testResults[s.id]} />
