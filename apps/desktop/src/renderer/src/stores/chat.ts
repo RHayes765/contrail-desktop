@@ -363,7 +363,7 @@ function onEvent(event: ChatEvent): void {
         useChat.setState({
           notice:
             `External servers: ${bad
-              .map((s) => `${s.name} — ${s.status}${s.error ? ` (${s.error.slice(0, 120)})` : ''}`)
+              .map((s) => `${s.name} — ${s.status}${s.error ? ` (${s.error.slice(0, 280)})` : ''}`)
               .join('; ')}` +
             (needsAuth
               ? '. Authorize it on the Connectors screen, then start a new session.'

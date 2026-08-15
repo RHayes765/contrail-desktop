@@ -392,15 +392,27 @@ async function testHttpServer(
         tools: [],
       };
     }
+    const rawText = await res.text();
+    const body = parseMcpBody(res.headers.get('content-type') ?? '', rawText) as {
+      result?: { serverInfo?: { name?: string } };
+      error?: { message?: string };
+    } | null;
     if (!res.ok) {
-      return { status: 'failed', detail: `HTTP ${res.status} from the server.`, tools: [] };
-    }
-    const body = parseMcpBody(res.headers.get('content-type') ?? '', await res.text());
-    const result = (body as { result?: { serverInfo?: { name?: string } } } | null)?.result;
-    if (!result) {
+      const reason = String(body?.error?.message ?? rawText).slice(0, 300);
       return {
         status: 'failed',
-        detail: 'The endpoint answered but not with an MCP initialize result.',
+        detail: `HTTP ${res.status} from the server${reason ? ` — ${reason}` : '.'}`,
+        tools: [],
+      };
+    }
+    const result = body?.result;
+    if (!result) {
+      // The provider's own words (e.g. Slack's "App is not installed…")
+      // beat any generic description of the shape mismatch.
+      const reason = String(body?.error?.message ?? rawText).slice(0, 300);
+      return {
+        status: 'failed',
+        detail: reason || 'The endpoint answered but not with an MCP initialize result.',
         tools: [],
       };
     }
