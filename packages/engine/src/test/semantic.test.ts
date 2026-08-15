@@ -138,6 +138,23 @@ describe('diffText', () => {
     expect(d.lines_removed).toBe(2100);
     expect(d.hunks).toEqual([]);
   });
+
+  it('caps hunk lines at the default limit but honors caller-supplied limits', () => {
+    // One contiguous 120-line insertion: defaults keep 40 lines and flag the
+    // cut; a UI-sized limit keeps the whole block with no flag.
+    const a = ['start', 'end'].join('\n');
+    const b = ['start', ...Array.from({ length: 120 }, (_, i) => `added-${i}`), 'end'].join('\n');
+
+    const capped = diffText(a, b);
+    expect(capped.hunks).toHaveLength(1);
+    expect(capped.hunks[0].added).toHaveLength(40);
+    expect(capped.hunks[0].added_truncated).toBe(true);
+    expect(capped.lines_added).toBe(120); // counts stay exact even when display is capped
+
+    const full = diffText(a, b, { maxHunkLines: 2_000 });
+    expect(full.hunks[0].added).toHaveLength(120);
+    expect(full.hunks[0].added_truncated).toBeUndefined();
+  });
 });
 
 describe('semanticDiff', () => {

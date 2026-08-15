@@ -590,11 +590,21 @@ function DrillPanel({
                   - {line}
                 </div>
               ))}
+              {hunk.removed_truncated && (
+                <div className="hunk-line removed meter-dim">
+                  ⋯ more removed lines — raw view has everything
+                </div>
+              )}
               {hunk.added.map((line, j) => (
                 <div key={`a${j}`} className="hunk-line added">
                   + {line}
                 </div>
               ))}
+              {hunk.added_truncated && (
+                <div className="hunk-line added meter-dim">
+                  ⋯ more added lines — raw view has everything
+                </div>
+              )}
             </div>
           ))}
           {drill.hunksTruncated && (

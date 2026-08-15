@@ -91,7 +91,7 @@ export {
 } from './snapshot/indexer.js';
 export { extractAllEdges, buildKnownArtifacts, type KnownArtifacts } from './deps/extract.js';
 export { queryDependencies } from './deps/graph.js';
-export { semanticDiff } from './diff/semantic.js';
+export { semanticDiff, type DiffLimits } from './diff/semantic.js';
 
 // Metadata reads
 export {

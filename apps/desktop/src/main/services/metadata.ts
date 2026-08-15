@@ -5,6 +5,7 @@ import {
   parsePermissionSet,
   queryDependencies,
   semanticDiff,
+  type DiffLimits,
   type EngineDeps,
 } from '@contrail/engine';
 import type {
@@ -161,7 +162,18 @@ interface DiffCacheEntry {
   view: DiffScopeView;
 }
 
-const DIFF_CONTENT_CAP = 100_000;
+// The engine's diff caps are sized for agent tool results (token budgets).
+// The drill-in renders on a screen from local disk, so it gets far larger
+// ones: the content cap clears Salesforce's own 1MB Apex source limit, and
+// the hunk limits are high enough that a full-class rewrite lists whole.
+const DIFF_CONTENT_CAP = 2_000_000;
+const UI_DIFF_LIMITS: DiffLimits = {
+  maxChanges: 2_000,
+  maxHunks: 500,
+  maxHunkLines: 2_000,
+  maxLineChars: 4_000,
+  maxHunkBudgetChars: 2_000_000,
+};
 
 export class DiffService {
   private cache: DiffCacheEntry | null = null;
@@ -244,7 +256,7 @@ export class DiffService {
     };
     if (contentA == null || contentB == null) return base;
 
-    const diff = semanticDiff(contentA, contentB);
+    const diff = semanticDiff(contentA, contentB, UI_DIFF_LIMITS);
     return {
       ...base,
       identical: diff.identical,
