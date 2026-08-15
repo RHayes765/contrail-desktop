@@ -7,12 +7,15 @@ import type {
   ArtifactRecord,
   AuditEvent,
   ConnectionRecord,
+  CustomMcpServerExtras,
+  CustomMcpServerRecord,
   DependencyEdge,
   DeployRequestRecord,
   OrgType,
   ProjectDocRecord,
   ProjectNoteRecord,
   ProjectRecord,
+  ServerToggleRecord,
 } from './types.js';
 
 const SCHEMA_VERSION = 8;
@@ -388,6 +391,7 @@ export class ContrailDb {
       this.db.prepare(`DELETE FROM project_bindings WHERE project_id = ?`).run(id);
       this.db.prepare(`DELETE FROM project_docs WHERE project_id = ?`).run(id);
       this.db.prepare(`DELETE FROM project_notes WHERE project_id = ?`).run(id);
+      this.db.prepare(`DELETE FROM mcp_server_toggles WHERE project_id = ?`).run(id);
       this.db.prepare(`DELETE FROM projects WHERE id = ?`).run(id);
     });
     tx();
@@ -414,6 +418,145 @@ export class ContrailDb {
         .prepare(`SELECT connection_id, env_role FROM project_bindings WHERE project_id = ?`)
         .all(projectId) as Array<{ connection_id: string; env_role: string }>
     ).map((r) => ({ connectionId: r.connection_id, envRole: r.env_role }));
+  }
+
+  // ── MCP server toggles & custom servers (S8) ───────────────────────────
+  // The v6 tables were forward declarations; this is their first wiring.
+  // Toggle rows are strictly per-project: project_id is nullable in the DDL
+  // but a NULL row would be dead weight under SQLite's NULL-distinct UNIQUE,
+  // so writes require a project id and reads filter on it.
+
+  getServerToggles(projectId: string): ServerToggleRecord[] {
+    return (
+      this.db
+        .prepare(`SELECT server_key, enabled FROM mcp_server_toggles WHERE project_id = ?`)
+        .all(projectId) as Array<{ server_key: string; enabled: number }>
+    ).map((r) => ({ serverKey: r.server_key, enabled: r.enabled === 1 }));
+  }
+
+  setServerToggle(projectId: string, serverKey: string, enabled: boolean): void {
+    if (!projectId) throw new Error('setServerToggle requires a project id.');
+    if (!serverKey) throw new Error('setServerToggle requires a server key.');
+    this.db
+      .prepare(
+        `INSERT INTO mcp_server_toggles (id, workspace_id, project_id, server_key, enabled)
+         VALUES (?, 'default', ?, ?, ?)
+         ON CONFLICT (project_id, server_key) DO UPDATE SET enabled = excluded.enabled`,
+      )
+      .run(randomUUID(), projectId, serverKey, enabled ? 1 : 0);
+  }
+
+  listCustomMcpServers(): CustomMcpServerRecord[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT id, name, transport, url_or_command, auth_mode, config_json, enabled, created_at
+           FROM custom_mcp_servers ORDER BY created_at`,
+        )
+        .all() as Array<Record<string, unknown>>
+    ).map((r) => this.customServerFromRow(r));
+  }
+
+  getCustomMcpServer(id: string): CustomMcpServerRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, name, transport, url_or_command, auth_mode, config_json, enabled, created_at
+         FROM custom_mcp_servers WHERE id = ?`,
+      )
+      .get(id) as Record<string, unknown> | undefined;
+    return row ? this.customServerFromRow(row) : null;
+  }
+
+  /**
+   * v1 registers auth_mode 'independent' only — org_bound is design-doc
+   * scope (docs/org-bound-contract.md), so this method cannot even express
+   * it. The CHECK constraint stays as the schema-level seam.
+   */
+  addCustomMcpServer(input: {
+    name: string;
+    transport: 'stdio' | 'http' | 'sse';
+    urlOrCommand: string;
+    config?: CustomMcpServerExtras;
+  }): CustomMcpServerRecord {
+    if (!input.name.trim()) throw new Error('Server name is required.');
+    if (!input.urlOrCommand.trim()) throw new Error('URL or command is required.');
+    if (!['stdio', 'http', 'sse'].includes(input.transport)) {
+      throw new Error(`Unknown transport "${input.transport}".`);
+    }
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO custom_mcp_servers
+           (id, workspace_id, name, transport, url_or_command, auth_mode, config_json, enabled, created_at)
+         VALUES (?, 'default', ?, ?, ?, 'independent', ?, 0, ?)`,
+      )
+      .run(
+        id,
+        input.name.trim(),
+        input.transport,
+        input.urlOrCommand.trim(),
+        JSON.stringify(input.config ?? {}),
+        new Date().toISOString(),
+      );
+    const created = this.getCustomMcpServer(id);
+    if (!created) throw new Error('custom MCP server insert did not persist');
+    return created;
+  }
+
+  updateCustomMcpServer(
+    id: string,
+    patch: {
+      name?: string;
+      urlOrCommand?: string;
+      enabled?: boolean;
+      config?: CustomMcpServerExtras;
+    },
+  ): CustomMcpServerRecord | null {
+    const current = this.getCustomMcpServer(id);
+    if (!current) return null;
+    this.db
+      .prepare(
+        `UPDATE custom_mcp_servers SET name = ?, url_or_command = ?, enabled = ?, config_json = ? WHERE id = ?`,
+      )
+      .run(
+        patch.name?.trim() || current.name,
+        patch.urlOrCommand?.trim() || current.urlOrCommand,
+        (patch.enabled ?? current.enabled) ? 1 : 0,
+        JSON.stringify(patch.config ?? current.config),
+        id,
+      );
+    return this.getCustomMcpServer(id);
+  }
+
+  /** Removes the server and every project's toggle rows for it. */
+  removeCustomMcpServer(id: string): void {
+    const tx = this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM mcp_server_toggles WHERE server_key = ?`).run(`ext:${id}`);
+      this.db.prepare(`DELETE FROM custom_mcp_servers WHERE id = ?`).run(id);
+    });
+    tx();
+  }
+
+  private customServerFromRow(r: Record<string, unknown>): CustomMcpServerRecord {
+    let config: CustomMcpServerExtras = {};
+    try {
+      const parsed: unknown = JSON.parse((r.config_json as string) ?? '{}');
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        config = parsed as CustomMcpServerExtras;
+      }
+    } catch {
+      // unreadable config degrades to {} — the server just has no extras
+    }
+    return {
+      id: r.id as string,
+      name: r.name as string,
+      transport: r.transport as CustomMcpServerRecord['transport'],
+      urlOrCommand: r.url_or_command as string,
+      authMode: r.auth_mode as CustomMcpServerRecord['authMode'],
+      config,
+      enabled: (r.enabled as number) === 1,
+      createdAt: r.created_at as string,
+    };
   }
 
   // ── project docs & notes ───────────────────────────────────────────────

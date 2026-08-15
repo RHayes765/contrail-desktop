@@ -158,6 +158,87 @@ describe('tool manifest (THE isolation snapshot)', () => {
     }
   });
 
+  it('catalog toggles remove whole families from minting and allowedTools', () => {
+    const names = mintableCapabilities([FULL], ['deploy', 'debug-logs']).map((c) => c.name);
+    for (const gone of [
+      'validate_deploy',
+      'execute_deploy',
+      'deactivate_flow',
+      'get_debug_logs',
+      'get_flow_errors',
+    ]) {
+      expect(names).not.toContain(gone);
+    }
+    // Untouched families and lifecycle survive.
+    for (const kept of ['soql_query', 'list_metadata', 'list_connections', 'get_permissions']) {
+      expect(names).toContain(kept);
+    }
+    const options = buildSessionOptions(
+      { ...ctxWith([FULL]), disabledCatalogKeys: ['deploy', 'debug-logs'] },
+      invoke,
+    );
+    const allowed = options.allowedTools ?? [];
+    expect(allowed).not.toContain('mcp__contrail__execute_deploy');
+    expect(allowed).toContain('mcp__contrail__soql_query');
+  });
+
+  it('external servers pass through: mcpServers entry + server-level allow spec', () => {
+    const options = buildSessionOptions(
+      {
+        ...ctxWith([FULL]),
+        externalServers: [
+          { key: 'echo', transport: 'stdio', urlOrCommand: 'node', args: ['echo.mjs'] },
+          { key: 'tracker', transport: 'http', urlOrCommand: 'https://mcp.example.com/mcp', headers: { Authorization: 'Bearer tok' } },
+        ],
+      },
+      invoke,
+    );
+    const servers = options.mcpServers as Record<string, { type?: string; command?: string; url?: string }>;
+    expect(Object.keys(servers).sort()).toEqual(['contrail', 'echo', 'tracker']);
+    expect(servers.echo).toMatchObject({ type: 'stdio', command: 'node' });
+    expect(servers.tracker).toMatchObject({ type: 'http', url: 'https://mcp.example.com/mcp' });
+    const allowed = options.allowedTools ?? [];
+    expect(allowed).toContain('mcp__echo');
+    expect(allowed).toContain('mcp__tracker');
+    // Every entry is either a contrail capability or a declared external server — nothing else.
+    for (const name of allowed) {
+      expect(name).toMatch(/^mcp__(contrail__|echo$|tracker$)/);
+    }
+    // Auth material must never leak into the model-visible system prompt.
+    expect(JSON.stringify(options.systemPrompt)).not.toContain('Bearer tok');
+  });
+
+  it('an external server can never shadow the first-party contrail namespace', () => {
+    const options = buildSessionOptions(
+      {
+        ...ctxWith([FULL]),
+        externalServers: [{ key: 'contrail', transport: 'http', urlOrCommand: 'https://evil.example.com' }],
+      },
+      invoke,
+    );
+    const servers = options.mcpServers as Record<string, { type?: string; url?: string }>;
+    expect(Object.keys(servers)).toEqual(['contrail']);
+    expect(servers.contrail.url).toBeUndefined(); // still the in-process SDK instance
+    expect(options.allowedTools).not.toContain('mcp__contrail');
+  });
+
+  it('no external config means exactly one mcp server — absence adds nothing', () => {
+    const options = buildSessionOptions(ctxWith([FULL]), invoke);
+    expect(Object.keys(options.mcpServers ?? {})).toEqual(['contrail']);
+  });
+
+  it('a server whose slug collides with a prototype key still mints (hasOwn, not `in`)', () => {
+    const options = buildSessionOptions(
+      {
+        ...ctxWith([FULL]),
+        externalServers: [{ key: 'constructor', transport: 'stdio', urlOrCommand: 'node' }],
+      },
+      invoke,
+    );
+    expect(Object.keys(options.mcpServers ?? {}).sort()).toEqual(['constructor', 'contrail']);
+    expect(options.allowedTools).toContain('mcp__constructor');
+  });
+
   it('read-only sessions cannot see write tools even in allowedTools', () => {
     const options = buildSessionOptions(ctxWith([READ_ONLY]), invoke);
     const allowed = options.allowedTools ?? [];

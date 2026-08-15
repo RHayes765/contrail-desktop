@@ -6,6 +6,7 @@ import type {
   ChatEvent,
   ConnectionView,
   ConnectOutcomeView,
+  CustomMcpServerView,
   DiffScopeView,
   EffortLevel,
   GrantSetView,
@@ -13,6 +14,7 @@ import type {
   MetadataTypeCountView,
   PingResultView,
   ProjectDocView,
+  ProjectMcpView,
   ProjectNoteView,
   ProjectView,
   SessionView,
@@ -128,6 +130,32 @@ export const REQUEST_SCHEMAS = {
   'sessions:end': z.object({ sessionId: ID }),
   'sessions:transcript': z.object({ sessionId: ID }),
   'sessions:resume': z.object({ sessionId: ID }),
+
+  'mcp:project': z.object({ projectId: ID }),
+  'mcp:setToggle': z.object({
+    projectId: ID,
+    serverKey: z.string().min(1).max(160),
+    enabled: z.boolean(),
+  }),
+  'mcp:servers:list': z.object({}),
+  'mcp:servers:add': z.object({
+    name: z.string().min(1).max(120),
+    transport: z.enum(['stdio', 'http', 'sse']),
+    urlOrCommand: z.string().min(1).max(2000),
+    args: z.array(z.string().max(500)).max(64).optional(),
+    env: z.record(z.string().max(64), z.string().max(4000)).optional(),
+    headers: z.record(z.string().max(64), z.string().max(4000)).optional(),
+  }),
+  'mcp:servers:update': z.object({
+    id: ID,
+    name: z.string().min(1).max(120).optional(),
+    urlOrCommand: z.string().min(1).max(2000).optional(),
+    enabled: z.boolean().optional(),
+    args: z.array(z.string().max(500)).max(64).optional(),
+    env: z.record(z.string().max(64), z.string().max(4000)).optional(),
+    headers: z.record(z.string().max(64), z.string().max(4000)).optional(),
+  }),
+  'mcp:servers:remove': z.object({ id: ID }),
 } as const;
 
 export type Channel = keyof typeof REQUEST_SCHEMAS;
@@ -223,6 +251,37 @@ export interface Contracts {
   'sessions:end': { req: { sessionId: string }; res: { ok: boolean } };
   'sessions:transcript': { req: { sessionId: string }; res: TranscriptView };
   'sessions:resume': { req: { sessionId: string }; res: SessionView };
+
+  'mcp:project': { req: { projectId: string }; res: ProjectMcpView };
+  'mcp:setToggle': {
+    req: { projectId: string; serverKey: string; enabled: boolean };
+    res: ProjectMcpView;
+  };
+  'mcp:servers:list': { req: Record<string, never>; res: CustomMcpServerView[] };
+  'mcp:servers:add': {
+    req: {
+      name: string;
+      transport: 'stdio' | 'http' | 'sse';
+      urlOrCommand: string;
+      args?: string[];
+      env?: Record<string, string>;
+      headers?: Record<string, string>;
+    };
+    res: CustomMcpServerView;
+  };
+  'mcp:servers:update': {
+    req: {
+      id: string;
+      name?: string;
+      urlOrCommand?: string;
+      enabled?: boolean;
+      args?: string[];
+      env?: Record<string, string>;
+      headers?: Record<string, string>;
+    };
+    res: CustomMcpServerView;
+  };
+  'mcp:servers:remove': { req: { id: string }; res: { ok: boolean } };
 }
 
 // Compile-time check: every contract has a schema and vice versa.

@@ -43,6 +43,7 @@ function fakeWorld() {
   const connections = new Map<string, ConnectionRecord>();
   const bindings = new Map<string, Array<{ connectionId: string; envRole: string }>>();
   const projects = new Set<string>(['p1']);
+  const toggles: Array<{ serverKey: string; enabled: boolean }> = [];
   const db = {
     resolveConnection: (ref: string) =>
       connections.get(ref) ??
@@ -51,8 +52,9 @@ function fakeWorld() {
     listProjectBindings: (projectId: string) => bindings.get(projectId) ?? [],
     getProject: (id: string) =>
       projects.has(id) ? { id, name: 'P', description: null, instructions: null } : null,
+    getServerToggles: (projectId: string) => (projectId === 'p1' ? [...toggles] : []),
   };
-  return { connections, bindings, projects, deps: { db } as unknown as EngineDeps };
+  return { connections, bindings, projects, toggles, deps: { db } as unknown as EngineDeps };
 }
 
 const SPEC_PROJECT = { id: 'p1', name: 'P', description: null, instructions: null };
@@ -67,6 +69,46 @@ function makeRun(world: ReturnType<typeof fakeWorld>, silo?: Partial<ProjectServ
   };
   return new AgentSessionRun(world.deps, spec, 'session-1', (silo ?? {}) as ProjectService);
 }
+
+describe('catalog toggle gate reads LIVE toggles (minting is UX, the gate is law)', () => {
+  it('a family toggled off is refused even though its tools were minted', async () => {
+    const world = fakeWorld();
+    world.toggles.push({ serverKey: 'deploy', enabled: false });
+    const run = makeRun(world);
+    const result = await run.executeCapability('validate_deploy', {});
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('deploy tool family is disabled');
+  });
+
+  it('flipping the toggle mid-session applies on the very next call', async () => {
+    const world = fakeWorld();
+    world.connections.set('c-dev', conn('c-dev', 'dev-org'));
+    world.toggles.push({ serverKey: 'data', enabled: false });
+    const run = makeRun(world);
+
+    const off = await run.executeCapability('soql_query', { connection: 'dev-org' });
+    expect(off.content[0].text).toContain('data tool family is disabled');
+
+    // Re-enable: the same call now clears the toggle gate and is refused by
+    // the SILO instead (dev-org is not bound) — proof the gate re-read the DB
+    // and proof of gate ordering, without ever reaching the engine.
+    world.toggles.length = 0;
+    world.toggles.push({ serverKey: 'data', enabled: true });
+    const on = await run.executeCapability('soql_query', { connection: 'dev-org' });
+    expect(on.content[0].text).toContain('not part of this project');
+  });
+
+  it('lifecycle capabilities and project tools ignore toggles entirely', async () => {
+    const world = fakeWorld();
+    for (const key of ['metadata', 'describe', 'data', 'debug-logs', 'deploy']) {
+      world.toggles.push({ serverKey: key, enabled: false });
+    }
+    const run = makeRun(world);
+    const listing = await run.executeCapability('list_connections', {});
+    expect(listing.isError).not.toBe(true);
+    expect(listing.content[0].text).toContain('"count": 0');
+  });
+});
 
 describe('silo enforcement reads LIVE bindings (never a session-start snapshot)', () => {
   it('a connection unbound after session start is refused on the next call', async () => {

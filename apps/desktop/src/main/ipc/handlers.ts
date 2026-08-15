@@ -7,6 +7,7 @@ import { AgentSessionManager } from '../services/agentRuntime.js';
 import { SnapshotService } from '../services/snapshots.js';
 import { DiffService, MetadataService } from '../services/metadata.js';
 import { SummaryService } from '../services/summaries.js';
+import { McpConfigService } from '../services/mcpConfig.js';
 
 /**
  * The complete handler map for the typed IPC registry. Handlers are thin:
@@ -22,12 +23,13 @@ export interface MainServices {
   metadata: MetadataService;
   diff: DiffService;
   summaries: SummaryService;
+  mcp: McpConfigService;
   /** The window whose native dialogs (file picker) we parent. */
   getWindow: () => BrowserWindow | null;
 }
 
 export function makeHandlers(health: HealthView, services: MainServices) {
-  const { connections, projects, sessions, snapshots, metadata, diff, summaries } = services;
+  const { connections, projects, sessions, snapshots, metadata, diff, summaries, mcp } = services;
   return {
     'app:health': (deps: EngineDeps): HealthView => ({
       ...health,
@@ -141,5 +143,40 @@ export function makeHandlers(health: HealthView, services: MainServices) {
       sessions.readTranscript(req.sessionId),
     'sessions:resume': (_deps: EngineDeps, req: { sessionId: string }) =>
       sessions.resume(req.sessionId),
+
+    'mcp:project': (_deps: EngineDeps, req: { projectId: string }) =>
+      mcp.projectView(req.projectId),
+    'mcp:setToggle': (
+      _deps: EngineDeps,
+      req: { projectId: string; serverKey: string; enabled: boolean },
+    ) => mcp.setToggle(req.projectId, req.serverKey, req.enabled),
+    'mcp:servers:list': () => mcp.listServers(),
+    'mcp:servers:add': (
+      _deps: EngineDeps,
+      req: {
+        name: string;
+        transport: 'stdio' | 'http' | 'sse';
+        urlOrCommand: string;
+        args?: string[];
+        env?: Record<string, string>;
+        headers?: Record<string, string>;
+      },
+    ) => mcp.addServer(req),
+    'mcp:servers:update': (
+      _deps: EngineDeps,
+      req: {
+        id: string;
+        name?: string;
+        urlOrCommand?: string;
+        enabled?: boolean;
+        args?: string[];
+        env?: Record<string, string>;
+        headers?: Record<string, string>;
+      },
+    ) => mcp.updateServer(req),
+    'mcp:servers:remove': (_deps: EngineDeps, req: { id: string }) => {
+      mcp.removeServer(req.id);
+      return { ok: true };
+    },
   };
 }

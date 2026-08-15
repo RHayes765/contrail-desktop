@@ -10,6 +10,7 @@ import { ChatScreen } from './screens/Chat.js';
 import { SessionViewerScreen } from './screens/SessionViewer.js';
 import { MetadataScreen } from './screens/Metadata.js';
 import { DiffScreen } from './screens/Diff.js';
+import { ConnectorsScreen } from './screens/Connectors.js';
 
 export function App() {
   const [health, setHealth] = useState<HealthView | null>(null);
@@ -59,6 +60,12 @@ export function App() {
         >
           Diff
         </button>
+        <button
+          className={screen === 'connectors' ? 'active' : ''}
+          onClick={() => useNav.setState({ screen: 'connectors', sessionId: null })}
+        >
+          Connectors
+        </button>
       </nav>
       <main className={`content${fullBleed ? ' content-chat' : ''}`}>
         {error ? (
@@ -77,6 +84,8 @@ export function App() {
           <MetadataScreen />
         ) : screen === 'diff' ? (
           <DiffScreen />
+        ) : screen === 'connectors' ? (
+          <ConnectorsScreen />
         ) : (
           <ProjectsScreen />
         )}

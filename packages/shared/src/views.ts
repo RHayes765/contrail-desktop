@@ -362,3 +362,82 @@ export type ChatEvent =
    * as live. Never emitted for a user-initiated end (the user already knows).
    */
   | { type: 'session_ended'; reason: string };
+
+// ── MCP catalog, toggles & external servers (S8) ─────────────────────────
+
+/** One standard capability family with its per-project effective state. */
+export interface CatalogFamilyView {
+  key: string;
+  label: string;
+  description: string;
+  capabilities: string[];
+  enabled: boolean;
+}
+
+/** An external server as seen from one project's toggle panel. */
+export interface ExternalServerProjectView {
+  id: string;
+  name: string;
+  transport: 'stdio' | 'http' | 'sse';
+  /** Registered AND switched on globally — a project toggle only matters then. */
+  globallyEnabled: boolean;
+  enabledForProject: boolean;
+}
+
+export interface ProjectMcpView {
+  families: CatalogFamilyView[];
+  externalServers: ExternalServerProjectView[];
+}
+
+/**
+ * Registry view of a custom MCP server. Header and env VALUES are auth
+ * material and never leave the main process — views carry names only.
+ */
+export interface CustomMcpServerView {
+  id: string;
+  name: string;
+  transport: 'stdio' | 'http' | 'sse';
+  urlOrCommand: string;
+  args: string[];
+  headerNames: string[];
+  envNames: string[];
+  enabled: boolean;
+  createdAt: string;
+}
+
+export interface ConnectorPresetView {
+  kind: 'slack' | 'jira' | 'google';
+  label: string;
+  transport: 'http' | 'sse';
+  /** Prefill only where the endpoint is well-known; the form stays editable. */
+  urlSuggestion: string | null;
+  note: string;
+}
+
+/**
+ * Presets prefill the custom-server form — v1 external auth is header-based
+ * (paste a token); browser OAuth flows are not supported headlessly.
+ */
+export const CONNECTOR_PRESETS: ConnectorPresetView[] = [
+  {
+    kind: 'slack',
+    label: 'Slack',
+    transport: 'http',
+    urlSuggestion: null,
+    note: 'Enter your Slack MCP endpoint and an Authorization header token.',
+  },
+  {
+    kind: 'jira',
+    label: 'Jira (Atlassian)',
+    transport: 'sse',
+    urlSuggestion: 'https://mcp.atlassian.com/v1/sse',
+    note: 'Atlassian Remote MCP Server. Header-based auth; OAuth flows are not supported in v1.',
+  },
+  {
+    kind: 'google',
+    label: 'Google Workspace',
+    transport: 'http',
+    urlSuggestion: null,
+    note: 'Enter your Google Workspace MCP endpoint and auth header.',
+  },
+];

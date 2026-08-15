@@ -12,6 +12,7 @@ import { AgentSessionManager, type SessionAlert } from './services/agentRuntime.
 import { SnapshotService, SnapshotWorkerBridge } from './services/snapshots.js';
 import { DiffService, MetadataService } from './services/metadata.js';
 import { SummaryService } from './services/summaries.js';
+import { McpConfigService, resolveSessionMcp } from './services/mcpConfig.js';
 
 /** The snapshot CPU worker bundle (built as a second main entry). */
 function snapshotWorkerPath(): string {
@@ -77,6 +78,7 @@ const SUMMARIZE_DEMO = summarizeDemoArg
   : null;
 const narrateDemoArg = process.argv.find((a) => a.startsWith('--narrate-demo='));
 const NARRATE_DEMO = narrateDemoArg ? narrateDemoArg.slice('--narrate-demo='.length) : null;
+const MCP_DEMO = process.argv.includes('--mcp-demo');
 
 const HEADLESS =
   SMOKE ||
@@ -84,7 +86,8 @@ const HEADLESS =
   SNAPSHOT_DEMO !== null ||
   DIFF_DEMO !== null ||
   SUMMARIZE_DEMO !== null ||
-  NARRATE_DEMO !== null;
+  NARRATE_DEMO !== null ||
+  MCP_DEMO;
 
 function smokeWrite(payload: unknown): void {
   const text = JSON.stringify(payload, null, 2) + '\n';
@@ -293,6 +296,130 @@ async function runAgentDemo(b: Bootstrap, question: string): Promise<void> {
 }
 
 /**
+ * Session 8 demo. Keyless legs: toggle resolution (deploy off → disabled
+ * key), external-server registration/opt-in (slug key, per-project default
+ * OFF). Live leg (Haiku, one turn): a local stdio echo MCP server actually
+ * called by the agent through the SDK passthrough. Demo state (project,
+ * server row, toggles) is removed in finally — silo hygiene.
+ */
+async function runMcpDemo(b: Bootstrap): Promise<void> {
+  const projects = new ProjectService(b.deps);
+  const mcp = new McpConfigService(b.deps);
+  let projectId: string | null = null;
+  let serverId: string | null = null;
+  const errors: string[] = [];
+  try {
+    const project = b.deps.db.createProject({
+      name: `S8 MCP Demo ${Date.now()}`,
+      description: 'Temporary project for the S8 headless demo.',
+    });
+    projectId = project.id;
+
+    // Leg 1: toggles resolve. Default = everything on, nothing external.
+    const before = resolveSessionMcp(b.deps, project.id);
+    await mcp.setToggle(project.id, 'deploy', false);
+    const after = resolveSessionMcp(b.deps, project.id);
+
+    // Leg 2: external server — registered, globally enabled, project opt-in.
+    // DEMO_SECRET is a canary: its VALUE must never appear in any view.
+    const SECRET_CANARY = 's8-canary-9c41';
+    const echoScript = path.resolve(app.getAppPath(), '..', '..', 'scripts', 'demo-mcp-echo.mjs');
+    if (!fs.existsSync(echoScript)) throw new Error(`echo script missing at ${echoScript}`);
+    const server = mcp.addServer({
+      name: 'Echo Demo',
+      transport: 'stdio',
+      urlOrCommand: process.execPath,
+      args: [echoScript],
+      env: { ELECTRON_RUN_AS_NODE: '1', DEMO_SECRET: SECRET_CANARY },
+    });
+    serverId = server.id;
+    await mcp.updateServer({ id: server.id, enabled: true });
+    const beforeOptIn = resolveSessionMcp(b.deps, project.id);
+    await mcp.setToggle(project.id, `ext:${server.id}`, true);
+    const resolved = resolveSessionMcp(b.deps, project.id);
+
+    // Leg 3: LIVE — the agent calls the echo tool through the SDK.
+    const events: Array<{ sessionId: string; event: ChatEvent }> = [];
+    let turnResolve: (() => void) | null = null;
+    const push = <C extends PushChannel>(channel: C, payload: PushEvents[C]): void => {
+      if (channel === 'session:event') {
+        const p = payload as PushEvents['session:event'];
+        events.push(p);
+        if (p.event.type === 'error') errors.push(p.event.message);
+        if (p.event.type === 'session_ended') errors.push(`session ended: ${p.event.reason}`);
+        if ((p.event.type === 'done' || p.event.type === 'session_ended') && turnResolve) {
+          const r = turnResolve;
+          turnResolve = null;
+          r();
+        }
+      }
+    };
+    const manager = new AgentSessionManager(b.deps, projects, runtimeChildPath(), push);
+    sessionManager = manager;
+    const view = manager.start(project.id, 'claude-haiku-4-5');
+    const turn = new Promise<void>((resolve, reject) => {
+      turnResolve = resolve;
+      setTimeout(() => reject(new Error('mcp demo turn timed out')), 180_000);
+    });
+    manager.send(
+      view.id,
+      "Call the echo tool with text 'contrail-s8'. Reply with exactly what it returns.",
+    );
+    await turn;
+    await manager.end(view.id);
+
+    const toolCalls = events
+      .filter((e) => e.event.type === 'tool_start')
+      .map((e) => (e.event as { name: string }).name);
+    const texts = events
+      .filter((e) => e.event.type === 'text')
+      .map((e) => (e.event as { text: string }).text);
+    const row = b.deps.db.getAgentSession(view.id);
+
+    // The probe checks for the secret VALUE (canary) leaking and for the
+    // name being present — a redacted view has the name, never the value.
+    const viewsJson = JSON.stringify(mcp.listServers());
+    const legs = {
+      deploy_disabled: after.disabledCatalogKeys.includes('deploy'),
+      default_off_before_opt_in: beforeOptIn.externalServers.length === 0,
+      resolved_key_present: resolved.externalServers.some((s) => s.key === 'echo_demo'),
+      secret_value_absent_from_views: !viewsJson.includes(SECRET_CANARY),
+      secret_name_present_in_views: viewsJson.includes('DEMO_SECRET'),
+      echo_tool_called: toolCalls.some((n) => n.includes('echo')),
+      echo_answer_returned: texts.some((t) => t.includes('ECHO: contrail-s8')),
+    };
+
+    smokeWrite({
+      // Honest top-level ok: every substantive leg must hold, not just "no crash".
+      ok: errors.length === 0 && Object.values(legs).every(Boolean),
+      errors,
+      legs,
+      toggles: {
+        default_disabled: before.disabledCatalogKeys,
+        after_deploy_off: after.disabledCatalogKeys,
+      },
+      external: { resolved_keys: resolved.externalServers.map((s) => s.key) },
+      live: { tool_calls: toolCalls, final_texts: texts, cost_usd: row?.costUsd ?? null },
+    });
+  } finally {
+    // Demo state must not outlive the demo (silo hygiene, learned in S7).
+    try {
+      if (serverId) await mcp.removeServer(serverId);
+    } catch {
+      /* best effort */
+    }
+    try {
+      if (projectId) {
+        await sessionManager?.endForProject(projectId);
+        b.deps.db.deleteProject(projectId);
+      }
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
+/**
  * Session 5 demo: a REAL snapshot sync of dev-org through the worker seam
  * (live Salesforce retrieve), then a chat session answering a dependency
  * question FROM THE LOCAL GRAPH (get_dependencies — no further org reads
@@ -400,6 +527,17 @@ app.whenReady().then(async () => {
     }));
     smokeWrite({ health: boot.health, connections });
     app.exit(0);
+    return;
+  }
+
+  if (MCP_DEMO) {
+    try {
+      await runMcpDemo(boot);
+      app.exit(0);
+    } catch (err) {
+      smokeWrite({ ok: false, error: String(err) });
+      app.exit(1);
+    }
     return;
   }
 
@@ -668,6 +806,11 @@ app.whenReady().then(async () => {
     metadata,
     diff,
     summaries: new SummaryService(boot.deps, metadata, diff),
+    mcp: new McpConfigService(boot.deps, async (serverId, scopedProjectId) => {
+      // External tools can't be gated per call — revocation ends the
+      // live sessions that resolved the server (see McpConfigService).
+      await sessionManager?.endForExternalServer(serverId, scopedProjectId);
+    }),
     getWindow: () => mainWindow,
   };
 

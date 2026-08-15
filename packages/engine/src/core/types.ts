@@ -146,3 +146,31 @@ export interface AgentSessionRecord {
   createdAt: string;
   endedAt: string | null;
 }
+
+/** Extra transport config for a custom MCP server, stored as config_json. */
+export interface CustomMcpServerExtras {
+  /** stdio: command arguments. */
+  args?: string[];
+  /** stdio: extra environment variables. */
+  env?: Record<string, string>;
+  /** http/sse: request headers (e.g. Authorization) — v1's only remote auth. */
+  headers?: Record<string, string>;
+}
+
+export interface CustomMcpServerRecord {
+  id: string;
+  name: string;
+  transport: 'stdio' | 'http' | 'sse';
+  urlOrCommand: string;
+  /** v1 registers 'independent' only; 'org_bound' is design-doc scope (docs/org-bound-contract.md). */
+  authMode: 'independent' | 'org_bound';
+  config: CustomMcpServerExtras;
+  enabled: boolean;
+  createdAt: string;
+}
+
+/** One per-project toggle row; absence has meaning (see capabilities/catalog.ts serverEnabled). */
+export interface ServerToggleRecord {
+  serverKey: string;
+  enabled: boolean;
+}

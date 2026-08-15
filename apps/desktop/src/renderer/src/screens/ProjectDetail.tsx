@@ -2,11 +2,99 @@ import { useEffect, useMemo, useState } from 'react';
 import type { EnvRole } from '@contrail/shared';
 import { useProjects } from '../stores/projects.js';
 import { useConnections } from '../stores/connections.js';
+import { useMcp } from '../stores/mcp.js';
 import { useNav } from '../stores/nav.js';
 
 const ENV_ROLES: EnvRole[] = ['dev', 'qa', 'uat', 'prod', 'other'];
 
-type Tab = 'sessions' | 'bindings' | 'instructions' | 'docs' | 'notes';
+type Tab = 'sessions' | 'bindings' | 'capabilities' | 'instructions' | 'docs' | 'notes';
+
+/** Per-project catalog family + external-server toggle panel. */
+function CapabilitiesTab({ projectId }: { projectId: string }) {
+  const { project, projectId: loadedFor, loadProject, setToggle, error, clearError } = useMcp();
+  const { goConnectors } = useNav();
+
+  useEffect(() => {
+    void loadProject(projectId);
+  }, [projectId, loadProject]);
+
+  if (!project || loadedFor !== projectId) {
+    return error ? (
+      <div className="notice clickable" onClick={clearError} title="Dismiss">
+        {error}
+      </div>
+    ) : (
+      <div className="empty">Loading…</div>
+    );
+  }
+
+  return (
+    <>
+      {error && (
+        <div className="notice clickable" onClick={clearError} title="Dismiss">
+          {error}
+        </div>
+      )}
+      <div className="panel grants-editor">
+        <h3>Tool families</h3>
+        <p className="hint">
+          Families toggled off don&apos;t exist in this project&apos;s new sessions, and running
+          sessions lose them on their next call. Grants on each connection still apply on top.
+        </p>
+        {project.families.map((f) => (
+          <label key={f.key} className="grant-toggle">
+            <input
+              type="checkbox"
+              checked={f.enabled}
+              onChange={(e) => void setToggle(projectId, f.key, e.target.checked)}
+            />
+            <span>
+              <strong>{f.label}</strong> — {f.description}{' '}
+              <span className="meter-dim">({f.capabilities.join(', ')})</span>
+            </span>
+          </label>
+        ))}
+      </div>
+      <div className="panel grants-editor">
+        <h3>External MCP servers</h3>
+        {project.externalServers.length === 0 ? (
+          <p className="hint">
+            None registered.{' '}
+            <button className="crumb" onClick={goConnectors}>
+              Add one on the Connectors screen →
+            </button>
+          </p>
+        ) : (
+          <>
+            <p className="hint">
+              Off by default in every project. An external server runs outside Contrail&apos;s
+              grant system, and the agent can share conversation context with it — enable it here
+              only if this engagement should use it. Disabling one ends any running session that
+              was using it (its connection can&apos;t be revoked mid-flight).
+            </p>
+            {project.externalServers.map((s) => (
+              <label key={s.id} className="grant-toggle">
+                <input
+                  type="checkbox"
+                  checked={s.enabledForProject}
+                  disabled={!s.globallyEnabled}
+                  onChange={(e) => void setToggle(projectId, `ext:${s.id}`, e.target.checked)}
+                />
+                <span>
+                  <strong>{s.name}</strong>{' '}
+                  <span className="meter-dim">
+                    ({s.transport === 'stdio' ? 'local' : s.transport})
+                    {!s.globallyEnabled && ' — disabled globally on the Connectors screen'}
+                  </span>
+                </span>
+              </label>
+            ))}
+          </>
+        )}
+      </div>
+    </>
+  );
+}
 
 export function ProjectDetailScreen({ projectId }: { projectId: string }) {
   const {
@@ -82,12 +170,16 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
       )}
 
       <div className="tabs">
-        {(['sessions', 'bindings', 'instructions', 'docs', 'notes'] as Tab[]).map((t) => (
-          <button key={t} className={tab === t ? 'on' : ''} onClick={() => setTab(t)}>
-            {t}
-          </button>
-        ))}
+        {(['sessions', 'bindings', 'capabilities', 'instructions', 'docs', 'notes'] as Tab[]).map(
+          (t) => (
+            <button key={t} className={tab === t ? 'on' : ''} onClick={() => setTab(t)}>
+              {t}
+            </button>
+          ),
+        )}
       </div>
+
+      {tab === 'capabilities' && <CapabilitiesTab projectId={project.id} />}
 
       {tab === 'sessions' && (
         <div className="panel-list">

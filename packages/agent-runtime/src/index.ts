@@ -2,6 +2,7 @@ export type {
   AgentEvent,
   BindingWithGrants,
   BridgeToolResult,
+  ExternalMcpServerSpec,
   SessionContext,
   ToChild,
   ToMain,

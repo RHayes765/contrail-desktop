@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import { allCapabilities, type Capability, type Grant, type GrantSet } from '@contrail/engine';
+import {
+  allCapabilities,
+  catalogKeyFor,
+  type Capability,
+  type Grant,
+  type GrantSet,
+} from '@contrail/engine';
 import type { BindingWithGrants } from './types.js';
 
 /**
@@ -37,11 +43,21 @@ export function grantUnion(bindings: BindingWithGrants[]): GrantSet {
   return union;
 }
 
-/** The capabilities a session with these bindings is allowed to see. */
-export function mintableCapabilities(bindings: BindingWithGrants[]): Capability[] {
+/**
+ * The capabilities a session with these bindings is allowed to see.
+ * `disabledCatalogKeys` removes whole catalog families the project toggled
+ * off; lifecycle capabilities (uncataloged) are unaffected by toggles.
+ */
+export function mintableCapabilities(
+  bindings: BindingWithGrants[],
+  disabledCatalogKeys: readonly string[] = [],
+): Capability[] {
   const union = grantUnion(bindings);
+  const disabled = new Set(disabledCatalogKeys);
   return allCapabilities().filter((cap) => {
     if (SESSION_EXCLUDED_CAPABILITIES.includes(cap.name)) return false;
+    const family = catalogKeyFor(cap.name);
+    if (family && disabled.has(family)) return false;
     if (cap.grant === null) return true; // zero-cost local reads (list_connections, get_permissions, …)
     return union[cap.grant];
   });

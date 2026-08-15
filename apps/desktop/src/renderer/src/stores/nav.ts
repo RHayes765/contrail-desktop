@@ -12,7 +12,8 @@ export type Screen =
   | 'chat'
   | 'session'
   | 'metadata'
-  | 'diff';
+  | 'diff'
+  | 'connectors';
 
 interface NavState {
   screen: Screen;
@@ -22,6 +23,7 @@ interface NavState {
   sessionId: string | null;
   goConnections: () => void;
   goProjects: () => void;
+  goConnectors: () => void;
   openProject: (projectId: string) => void;
   openChat: (projectId: string) => void;
   openSession: (projectId: string, sessionId: string) => void;
@@ -33,6 +35,7 @@ export const useNav = create<NavState>((set) => ({
   sessionId: null,
   goConnections: () => set({ screen: 'connections', sessionId: null }),
   goProjects: () => set({ screen: 'projects', projectId: null, sessionId: null }),
+  goConnectors: () => set({ screen: 'connectors', sessionId: null }),
   openProject: (projectId) => set({ screen: 'project', projectId, sessionId: null }),
   openChat: (projectId) => set({ screen: 'chat', projectId, sessionId: null }),
   openSession: (projectId, sessionId) => set({ screen: 'session', projectId, sessionId }),

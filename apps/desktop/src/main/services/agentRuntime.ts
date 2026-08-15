@@ -3,10 +3,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  catalogKeyFor,
   dataDir,
   invokeCapability,
   log,
   readSecret,
+  serverEnabled,
   type AgentSessionRecord,
   type ConnectionRecord,
   type EngineDeps,
@@ -15,10 +17,12 @@ import type {
   AgentEvent,
   BindingWithGrants,
   BridgeToolResult,
+  ExternalMcpServerSpec,
   SessionContext,
   ToChild,
   ToMain,
 } from '@contrail/agent-runtime';
+import { resolveSessionMcp } from './mcpConfig.js';
 import {
   CHAT_MODELS,
   type ChatEvent,
@@ -86,6 +90,12 @@ export interface SessionSpec {
   effort?: EffortLevel;
   maxTurns: number;
   maxBudgetUsd: number;
+  /** Catalog families toggled off at start (minting); the executor re-checks live. */
+  disabledCatalogKeys?: string[];
+  /** External MCP servers resolved for this project (per-project opt-in). */
+  externalServers?: ExternalMcpServerSpec[];
+  /** DB ids parallel to externalServers — revocation ends sessions by id. */
+  externalServerIds?: string[];
 }
 
 export interface UsageTotals {
@@ -229,6 +239,11 @@ export class AgentSessionRun {
     this.vaultedCode = code;
   }
 
+  /** Whether this session resolved the given external server at start. */
+  usesExternalServer(serverId: string): boolean {
+    return this.spec.externalServerIds?.includes(serverId) ?? false;
+  }
+
   async executeCapability(name: string, args: unknown): Promise<BridgeToolResult> {
     const a = (args ?? {}) as Record<string, unknown>;
 
@@ -241,6 +256,18 @@ export class AgentSessionRun {
     // The agent cannot name a project; there is nothing to validate away.
     if (PROJECT_TOOL_HANDLERS.has(name)) {
       return this.executeProjectTool(name, a);
+    }
+
+    // Catalog toggle gate: a family toggled off for this project is refused
+    // even if its tools were minted before the toggle changed. Live DB read
+    // per call — same posture as bindings (minting is UX, the gate is law).
+    const family = catalogKeyFor(name);
+    if (family && !serverEnabled(this.deps.db.getServerToggles(this.spec.project.id), family)) {
+      this.capabilityCalls.push({ name, refused: true });
+      return refuse(
+        `The ${family} tool family is disabled for this project. ` +
+          `The user can re-enable it in the project's Capabilities panel.`,
+      );
     }
 
     // Silo rule 1: connection-listing capabilities answer from the project's
@@ -379,6 +406,8 @@ export class AgentSessionRun {
       claudeConfigDir,
       resumeSdkSessionId,
       apiKey,
+      disabledCatalogKeys: this.spec.disabledCatalogKeys,
+      externalServers: this.spec.externalServers,
     };
   }
 }
@@ -630,6 +659,7 @@ export class AgentSessionManager {
       if (connection) bindings.push({ connection, envRole: b.envRole });
     }
 
+    const mcp = resolveSessionMcp(this.deps, projectId);
     const spec: SessionSpec = {
       project,
       bindings,
@@ -638,6 +668,9 @@ export class AgentSessionManager {
       maxTurns: CHAT_MAX_TURNS,
       // Budget scales with the model: a Fable turn costs what a Haiku session does.
       maxBudgetUsd: catalog.maxBudgetUsd,
+      disabledCatalogKeys: mcp.disabledCatalogKeys,
+      externalServers: mcp.externalServers,
+      externalServerIds: mcp.externalServerIds,
     };
 
     const transcriptDir = path.join(dataDir(), 'sessions');
@@ -712,6 +745,8 @@ export class AgentSessionManager {
       if (connection) bindings.push({ connection, envRole: b.envRole });
     }
 
+    // Toggles and external servers also re-resolve from TODAY's state.
+    const mcp = resolveSessionMcp(this.deps, rec.projectId);
     const spec: SessionSpec = {
       project,
       bindings,
@@ -720,6 +755,9 @@ export class AgentSessionManager {
       maxTurns: CHAT_MAX_TURNS,
       // A fresh budget for the resumed run; the row keeps the lifetime total.
       maxBudgetUsd: CHAT_MODELS[modelId].maxBudgetUsd,
+      disabledCatalogKeys: mcp.disabledCatalogKeys,
+      externalServers: mcp.externalServers,
+      externalServerIds: mcp.externalServerIds,
     };
 
     const transcriptPath =
@@ -878,6 +916,31 @@ export class AgentSessionManager {
       this.push('session:event', {
         sessionId: id,
         event: { type: 'session_ended', reason: 'The project was deleted.' },
+      });
+    }
+    await Promise.all(ids.map((id) => this.end(id)));
+  }
+
+  /**
+   * Revocation teardown for external MCP servers: their tools run inside
+   * the SDK child and never cross the per-call executor gate, so disabling
+   * or removing a server can only reach live sessions by ending them.
+   * Scoped to one project for a project toggle; fleet-wide otherwise.
+   */
+  async endForExternalServer(serverId: string, projectId?: string): Promise<void> {
+    const ids = [...this.live.values()]
+      .filter(
+        (e) =>
+          (!projectId || e.projectId === projectId) && e.run.usesExternalServer(serverId),
+      )
+      .map((e) => e.sessionId);
+    for (const id of ids) {
+      this.push('session:event', {
+        sessionId: id,
+        event: {
+          type: 'session_ended',
+          reason: 'An external MCP server this session was using was disabled. Resume to continue without it.',
+        },
       });
     }
     await Promise.all(ids.map((id) => this.end(id)));

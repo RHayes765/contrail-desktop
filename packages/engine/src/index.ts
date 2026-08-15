@@ -17,6 +17,15 @@ export {
   type Capability,
   type ToolResult,
 } from './capabilities/index.js';
+export {
+  STANDARD_CATALOG,
+  catalogKeyFor,
+  isStandardCatalogKey,
+  externalServerKey,
+  serverEnabled,
+  catalogCoverageViolations,
+  type CatalogEntry,
+} from './capabilities/catalog.js';
 
 // Core
 export { ContrailDb } from './core/db.js';
@@ -58,6 +67,9 @@ export type {
   ProjectDocRecord,
   ProjectNoteRecord,
   AgentSessionRecord,
+  CustomMcpServerRecord,
+  CustomMcpServerExtras,
+  ServerToggleRecord,
 } from './core/types.js';
 
 // Connect / Salesforce

@@ -10,6 +10,24 @@ export interface BindingWithGrants {
   grants: GrantSet;
 }
 
+/**
+ * An external (auth_mode: independent) MCP server resolved for this session.
+ * Main resolves per-project enablement before any of this crosses the bridge;
+ * headers/env may carry user-provided auth material, so these specs must never
+ * appear in events, transcripts, or views — they live in the child's SDK
+ * options only.
+ */
+export interface ExternalMcpServerSpec {
+  /** Sanitized server key — becomes the mcp__{key}__* tool namespace. */
+  key: string;
+  transport: 'stdio' | 'http' | 'sse';
+  /** stdio: the command; http/sse: the URL. */
+  urlOrCommand: string;
+  args?: string[];
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
+}
+
 /** Everything a session needs, assembled by main. The ONLY credential here is the BYO API key. */
 export interface SessionContext {
   sessionId: string;
@@ -42,6 +60,14 @@ export interface SessionContext {
   resumeSdkSessionId?: string;
   /** BYO Anthropic API key — lives in the runtime env only, never in views or transcripts. */
   apiKey: string;
+  /**
+   * Catalog families toggled OFF for this project. Minting is the UX layer;
+   * the main-side executor re-checks the toggle per call against live DB
+   * state, same two-layer posture as grants.
+   */
+  disabledCatalogKeys?: string[];
+  /** External MCP servers enabled for this project (see ExternalMcpServerSpec). */
+  externalServers?: ExternalMcpServerSpec[];
 }
 
 /** Events the runtime streams back to main (and main forwards to the renderer). */

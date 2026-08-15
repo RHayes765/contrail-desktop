@@ -1,0 +1,121 @@
+import { allCapabilities } from './index.js';
+
+/**
+ * The standard-server catalog (spec §6): the first-party capability families
+ * a project can toggle. Declarative data consumed by minting, the executor
+ * gate, and the toggles UI — adding a capability means adding its name to
+ * exactly one entry here (the catalog tripwire test enforces coverage).
+ *
+ * Lifecycle capabilities (grant: null — list_connections, get_permissions,
+ * get_audit_log) are deliberately uncataloged: they are zero-cost local
+ * reads every session keeps, so there is nothing to toggle.
+ */
+
+export interface CatalogEntry {
+  key: string;
+  label: string;
+  description: string;
+  capabilities: string[];
+}
+
+export const STANDARD_CATALOG: CatalogEntry[] = [
+  {
+    key: 'metadata',
+    label: 'Metadata',
+    description: 'Browse, search, retrieve, and diff org metadata from local snapshots.',
+    capabilities: [
+      'list_metadata',
+      'retrieve_metadata',
+      'search_metadata',
+      'get_dependencies',
+      'refresh_snapshot',
+      'diff_orgs',
+      'diff_artifact',
+    ],
+  },
+  {
+    key: 'describe',
+    label: 'Schema describe',
+    description: 'Object and field schema descriptions.',
+    capabilities: ['describe_schema'],
+  },
+  {
+    key: 'data',
+    label: 'Data & SOQL',
+    description: 'SOQL queries and record reads; DML proposal and execution.',
+    capabilities: ['soql_query', 'get_record', 'dml_propose', 'dml_execute'],
+  },
+  {
+    key: 'debug-logs',
+    label: 'Debug logs',
+    description: 'Apex debug logs and flow error investigation.',
+    capabilities: ['get_debug_logs', 'get_flow_errors'],
+  },
+  {
+    key: 'deploy',
+    label: 'Deploy',
+    description: 'Metadata deploy validation and execution, flow deactivation.',
+    capabilities: ['validate_deploy', 'deactivate_flow', 'execute_deploy'],
+  },
+];
+
+const KEY_BY_CAPABILITY = new Map<string, string>();
+for (const entry of STANDARD_CATALOG) {
+  for (const name of entry.capabilities) KEY_BY_CAPABILITY.set(name, entry.key);
+}
+
+/** The catalog family a capability belongs to; null = lifecycle (never toggleable). */
+export function catalogKeyFor(capabilityName: string): string | null {
+  return KEY_BY_CAPABILITY.get(capabilityName) ?? null;
+}
+
+export function isStandardCatalogKey(key: string): boolean {
+  return STANDARD_CATALOG.some((e) => e.key === key);
+}
+
+/** server_key for an external (custom) MCP server row — stable across renames. */
+export function externalServerKey(serverId: string): string {
+  return `ext:${serverId}`;
+}
+
+/**
+ * Resolve a toggle: an explicit row always wins. Absent a row, standard
+ * families are ON and external servers are OFF — an external server must be
+ * opted into per project (engagement isolation: a globally registered
+ * connector must never flow into a client project silently).
+ */
+export function serverEnabled(
+  toggles: ReadonlyArray<{ serverKey: string; enabled: boolean }>,
+  serverKey: string,
+): boolean {
+  const row = toggles.find((t) => t.serverKey === serverKey);
+  if (row) return row.enabled;
+  return isStandardCatalogKey(serverKey);
+}
+
+/** Every grant-bearing capability must appear in exactly one catalog entry. */
+export function catalogCoverageViolations(): string[] {
+  const problems: string[] = [];
+  const seen = new Map<string, string>();
+  for (const entry of STANDARD_CATALOG) {
+    for (const name of entry.capabilities) {
+      const prior = seen.get(name);
+      if (prior) problems.push(`${name} appears in both "${prior}" and "${entry.key}"`);
+      seen.set(name, entry.key);
+    }
+  }
+  for (const cap of allCapabilities()) {
+    if (cap.grant !== null && !seen.has(cap.name)) {
+      problems.push(`${cap.name} (grant ${cap.grant}) is missing from the catalog`);
+    }
+    if (cap.grant === null && seen.has(cap.name)) {
+      problems.push(`${cap.name} is lifecycle (grant null) but appears in the catalog`);
+    }
+  }
+  for (const name of seen.keys()) {
+    if (!allCapabilities().some((c) => c.name === name)) {
+      problems.push(`catalog names unknown capability ${name}`);
+    }
+  }
+  return problems;
+}

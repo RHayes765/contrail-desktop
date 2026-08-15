@@ -1,10 +1,11 @@
 import {
   createSdkMcpServer,
   tool,
+  type McpServerConfig,
   type Options,
   type SdkMcpToolDefinition,
 } from '@anthropic-ai/claude-agent-sdk';
-import type { BridgeToolResult, SessionContext } from './types.js';
+import type { BridgeToolResult, ExternalMcpServerSpec, SessionContext } from './types.js';
 import { buildSystemPrompt } from './context.js';
 import { MCP_SERVER_NAME, mintableCapabilities, PROJECT_TOOLS, sdkToolName } from './mint.js';
 
@@ -33,11 +34,44 @@ import { MCP_SERVER_NAME, mintableCapabilities, PROJECT_TOOLS, sdkToolName } fro
 
 export type CapabilityInvoker = (name: string, args: unknown) => Promise<BridgeToolResult>;
 
+/**
+ * External (auth_mode: independent) servers pass through to the SDK's MCP
+ * client untouched. Main already resolved per-project enablement and
+ * sanitized keys; this layer's own guard is that no external server may
+ * shadow the first-party 'contrail' namespace or another external key —
+ * a shadowed entry is dropped, never merged.
+ */
+function externalServerEntries(
+  specs: readonly ExternalMcpServerSpec[],
+): Record<string, McpServerConfig> {
+  const entries: Record<string, McpServerConfig> = {};
+  for (const spec of specs) {
+    // Object.hasOwn, not `in`: a server named "Constructor" slugs to a
+    // prototype key and `in` would silently drop it.
+    if (!spec.key || spec.key === MCP_SERVER_NAME || Object.hasOwn(entries, spec.key)) continue;
+    if (spec.transport === 'stdio') {
+      entries[spec.key] = {
+        type: 'stdio',
+        command: spec.urlOrCommand,
+        ...(spec.args ? { args: spec.args } : {}),
+        ...(spec.env ? { env: spec.env } : {}),
+      };
+    } else {
+      entries[spec.key] = {
+        type: spec.transport,
+        url: spec.urlOrCommand,
+        ...(spec.headers ? { headers: spec.headers } : {}),
+      };
+    }
+  }
+  return entries;
+}
+
 export function buildSessionOptions(
   ctx: SessionContext,
   invoke: CapabilityInvoker,
 ): Options {
-  const caps = mintableCapabilities(ctx.bindings);
+  const caps = mintableCapabilities(ctx.bindings, ctx.disabledCatalogKeys ?? []);
 
   const tools: SdkMcpToolDefinition<Record<string, never>>[] = caps.map((cap) =>
     tool(
@@ -68,7 +102,16 @@ export function buildSessionOptions(
     );
   }
 
-  const allowed = [...caps.map((cap) => sdkToolName(cap.name)), ...PROJECT_TOOLS.map((t) => sdkToolName(t.name))];
+  const external = externalServerEntries(ctx.externalServers ?? []);
+
+  const allowed = [
+    ...caps.map((cap) => sdkToolName(cap.name)),
+    ...PROJECT_TOOLS.map((t) => sdkToolName(t.name)),
+    // Server-level allow spec (mcp__{key}) admits every tool the external
+    // server exposes — we cannot know their names ahead of connection, and
+    // the server was explicitly enabled for this project.
+    ...Object.keys(external).map((key) => `mcp__${key}`),
+  ];
 
   return {
     cwd: ctx.cwd,
@@ -86,6 +129,7 @@ export function buildSessionOptions(
         version: '1.0.0',
         tools,
       }),
+      ...external,
     },
     allowedTools: allowed,
     maxTurns: ctx.maxTurns,
