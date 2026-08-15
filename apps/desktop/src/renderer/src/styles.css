@@ -912,3 +912,37 @@ button.danger {
 .flow-node-title { fill: var(--text); font-size: 12px; font-weight: 600; }
 .flow-node-kind { fill: var(--text-dim); font-size: 10.5px; }
 .flow-edge-label { fill: var(--text-dim); font-size: 10px; }
+
+/* ── S6.3: flow diagram v3 — pills, orthogonal edges, fullscreen ─────── */
+
+.flow-canvas-head { display: flex; justify-content: flex-end; }
+
+.flow-canvas-head button, .flow-fullscreen-head button {
+  all: unset; cursor: pointer; padding: 4px 10px; border-radius: 6px;
+  border: 1px solid var(--border); color: var(--text-dim); font-size: 12px;
+}
+.flow-canvas-head button:hover, .flow-fullscreen-head button:hover {
+  color: var(--text); background: var(--bg-hover);
+}
+
+.flow-label-pill { fill: var(--bg); stroke: var(--border); }
+
+.flow-goto { cursor: pointer; }
+.flow-goto-pill { fill: var(--bg); stroke: var(--accent); stroke-width: 1; }
+.flow-goto-pill.fault { stroke: var(--env-production); }
+.flow-goto-text { fill: var(--accent); font-size: 10.5px; }
+.flow-goto:hover .flow-goto-pill { fill: var(--bg-hover); }
+
+.flow-fullscreen {
+  position: fixed; inset: 0; z-index: 50;
+  background: var(--bg);
+  display: flex; flex-direction: column;
+  padding: 14px 18px;
+  gap: 8px;
+}
+
+.flow-fullscreen-head {
+  display: flex; justify-content: space-between; align-items: center;
+}
+
+.flow-fullscreen .flow-scroll { flex: 1; max-height: none; }
