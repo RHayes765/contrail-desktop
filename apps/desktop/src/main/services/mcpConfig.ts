@@ -98,6 +98,7 @@ function serverView(record: CustomMcpServerRecord): CustomMcpServerView {
     args: record.config.args ?? [],
     headerNames: Object.keys(record.config.headers ?? {}),
     envNames: Object.keys(record.config.env ?? {}),
+    hasOauthClient: Boolean(record.config.oauthClientId),
     enabled: record.enabled,
     createdAt: record.createdAt,
   };
@@ -182,11 +183,17 @@ export class McpConfigService {
     args?: string[];
     env?: Record<string, string>;
     headers?: Record<string, string>;
+    oauthClientId?: string;
+    oauthClientSecret?: string;
   }): CustomMcpServerView {
     const config: CustomMcpServerExtras = {};
     if (req.args?.length) config.args = req.args;
     if (req.env && Object.keys(req.env).length) config.env = req.env;
     if (req.headers && Object.keys(req.headers).length) config.headers = req.headers;
+    if (req.oauthClientId?.trim()) {
+      config.oauthClientId = req.oauthClientId.trim();
+      if (req.oauthClientSecret?.trim()) config.oauthClientSecret = req.oauthClientSecret.trim();
+    }
     const record = this.deps.db.addCustomMcpServer({
       name: req.name,
       transport: req.transport,
@@ -209,6 +216,8 @@ export class McpConfigService {
     args?: string[];
     env?: Record<string, string>;
     headers?: Record<string, string>;
+    oauthClientId?: string;
+    oauthClientSecret?: string;
   }): Promise<CustomMcpServerView> {
     const current = this.deps.db.getCustomMcpServer(req.id);
     if (!current) throw new Error('Server not found.');
@@ -221,6 +230,20 @@ export class McpConfigService {
         ? { headers: req.headers }
         : current.config.headers
           ? { headers: current.config.headers }
+          : {}),
+      ...(req.oauthClientId !== undefined
+        ? req.oauthClientId.trim()
+          ? { oauthClientId: req.oauthClientId.trim() }
+          : {} // empty string clears the client
+        : current.config.oauthClientId
+          ? { oauthClientId: current.config.oauthClientId }
+          : {}),
+      ...(req.oauthClientSecret !== undefined
+        ? req.oauthClientSecret.trim()
+          ? { oauthClientSecret: req.oauthClientSecret.trim() }
+          : {}
+        : current.config.oauthClientSecret
+          ? { oauthClientSecret: current.config.oauthClientSecret }
           : {}),
     };
     const updated = this.deps.db.updateCustomMcpServer(req.id, {

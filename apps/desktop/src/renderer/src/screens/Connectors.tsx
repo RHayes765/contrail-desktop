@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   CONNECTOR_PRESETS,
+  OAUTH_LOOPBACK_REDIRECT,
   type ConnectorPresetView,
   type McpServerTestView,
 } from '@contrail/shared';
@@ -166,6 +167,53 @@ function AddServerForm({ onDone }: { onDone: () => void }) {
   );
 }
 
+/** Inline editor for a user-supplied OAuth client (Slack/Google — no auto-registration). */
+function OauthClientForm({ serverId, onDone }: { serverId: string; onDone: () => void }) {
+  const { setOauthClient, authorizeServer } = useMcp();
+  const [clientId, setClientId] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const submit = async () => {
+    if (!clientId.trim()) return;
+    setSaving(true);
+    const ok = await setOauthClient(serverId, clientId.trim(), clientSecret.trim());
+    setSaving(false);
+    if (ok) {
+      onDone();
+      void authorizeServer(serverId);
+    }
+  };
+
+  return (
+    <div className="panel connect-form">
+      <p className="hint">
+        Create an OAuth app with this provider, add the redirect URL{' '}
+        <code>{OAUTH_LOOPBACK_REDIRECT}</code>, then paste its credentials. Saving starts the
+        browser login. The secret stays in Contrail — it never appears in views.
+      </p>
+      <div className="form-row">
+        <label>Client ID</label>
+        <input value={clientId} onChange={(e) => setClientId(e.target.value)} />
+      </div>
+      <div className="form-row">
+        <label>Client secret (if the provider issued one)</label>
+        <input
+          type="password"
+          value={clientSecret}
+          onChange={(e) => setClientSecret(e.target.value)}
+        />
+      </div>
+      <div className="form-actions">
+        <button className="primary" disabled={saving || !clientId.trim()} onClick={() => void submit()}>
+          Save &amp; authorize
+        </button>
+        <button onClick={onDone}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 function TestResultLine({ result }: { result: McpServerTestView | 'testing' }) {
   if (result === 'testing') return <span className="conn-detail meter-dim">Testing connection…</span>;
   const icon = result.status === 'connected' ? '✓' : result.status === 'needs_auth' ? '🔒' : '✗';
@@ -192,6 +240,7 @@ export function ConnectorsScreen() {
   } = useMcp();
   const [adding, setAdding] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const [editingOauth, setEditingOauth] = useState<string | null>(null);
 
   useEffect(() => {
     void refreshServers();
@@ -223,7 +272,8 @@ export function ConnectorsScreen() {
       ) : (
         <div className="panel-list">
           {servers.map((s) => (
-            <div key={s.id} className="row-card">
+            <div key={s.id}>
+            <div className="row-card">
               <div className="conn-main">
                 <div>
                   <span className="conn-alias">{s.name}</span>{' '}
@@ -238,6 +288,7 @@ export function ConnectorsScreen() {
                 <div className="conn-detail meter-dim">
                   {s.headerNames.length > 0 && `headers: ${s.headerNames.join(', ')} · `}
                   {s.envNames.length > 0 && `env: ${s.envNames.join(', ')} · `}
+                  {s.hasOauthClient && 'own OAuth client · '}
                   {s.enabled ? 'available to projects that opt in' : 'off everywhere'}
                 </div>
                 {testResults[s.id] && (
@@ -248,13 +299,21 @@ export function ConnectorsScreen() {
               </div>
               <div className="row-actions">
                 {s.transport !== 'stdio' && (
-                  <button
-                    disabled={testResults[s.id] === 'testing'}
-                    onClick={() => void authorizeServer(s.id)}
-                    title="Sign in with the provider in your browser — Contrail runs the OAuth flow and stores the token in the keychain"
-                  >
-                    Authorize…
-                  </button>
+                  <>
+                    <button
+                      disabled={testResults[s.id] === 'testing'}
+                      onClick={() => void authorizeServer(s.id)}
+                      title="Sign in with the provider in your browser — Contrail runs the OAuth flow and stores the token in the keychain"
+                    >
+                      Authorize…
+                    </button>
+                    <button
+                      onClick={() => setEditingOauth(editingOauth === s.id ? null : s.id)}
+                      title="For providers without automatic registration (Slack, Google): paste an OAuth client from an app you create with them"
+                    >
+                      OAuth client…
+                    </button>
+                  </>
                 )}
                 <button
                   disabled={testResults[s.id] === 'testing'}
@@ -284,6 +343,10 @@ export function ConnectorsScreen() {
                   <button onClick={() => setConfirmRemove(s.id)}>Remove</button>
                 )}
               </div>
+            </div>
+            {editingOauth === s.id && (
+              <OauthClientForm serverId={s.id} onDone={() => setEditingOauth(null)} />
+            )}
             </div>
           ))}
         </div>

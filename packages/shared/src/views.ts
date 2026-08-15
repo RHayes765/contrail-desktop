@@ -417,9 +417,18 @@ export interface CustomMcpServerView {
   args: string[];
   headerNames: string[];
   envNames: string[];
+  /** A user-supplied OAuth client is configured (values never leave main). */
+  hasOauthClient: boolean;
   enabled: boolean;
   createdAt: string;
 }
+
+/**
+ * The fixed loopback redirect for user-supplied OAuth clients — providers
+ * that refuse dynamic registration require the exact URI in their app
+ * config, so it must be stable and documented.
+ */
+export const OAUTH_LOOPBACK_REDIRECT = 'http://127.0.0.1:33418/callback';
 
 export interface ConnectorPresetView {
   kind: 'slack' | 'jira' | 'gmail' | 'gdrive' | 'gcalendar';
@@ -443,35 +452,35 @@ export const CONNECTOR_PRESETS: ConnectorPresetView[] = [
     label: 'Slack',
     transport: 'http',
     urlSuggestion: 'https://mcp.slack.com/mcp',
-    note: 'Slack’s official remote MCP server. OAuth-native — v1 supports header tokens only, so this needs a token your org can issue for header auth; browser OAuth is not supported yet.',
+    note: 'Slack’s official remote MCP server. Slack refuses automatic client registration: create a Slack app (api.slack.com/apps) with the user scopes you need, add the redirect URL shown in “OAuth client…”, paste its client ID + secret there, then Authorize.',
   },
   {
     kind: 'jira',
     label: 'Jira (Atlassian)',
     transport: 'http',
     urlSuggestion: 'https://mcp.atlassian.com/v1/mcp',
-    note: 'Atlassian Rovo MCP Server — works with v1 header auth if your org admin enables API tokens: Authorization=Basic base64(email:api_token), or Authorization=Bearer <service-account key>.',
+    note: 'Atlassian Rovo MCP Server. Just click Authorize — Atlassian supports automatic registration, so the browser login is the whole setup. API-token headers work too (Basic base64(email:api_token)).',
   },
   {
     kind: 'gmail',
     label: 'Gmail',
     transport: 'http',
     urlSuggestion: 'https://gmailmcp.googleapis.com/mcp/v1',
-    note: 'Google’s official Gmail MCP server. OAuth 2.0 only per Google’s docs — not usable with v1 header auth until Contrail supports OAuth flows.',
+    note: 'Google’s official Gmail MCP server. Google requires your own OAuth client: create a Desktop-app client in Google Cloud Console (with the Gmail API enabled), paste its ID + secret under “OAuth client…”, then Authorize.',
   },
   {
     kind: 'gdrive',
     label: 'Google Drive',
     transport: 'http',
     urlSuggestion: 'https://drivemcp.googleapis.com/mcp/v1',
-    note: 'Google’s official Drive MCP server. OAuth 2.0 only per Google’s docs — not usable with v1 header auth until Contrail supports OAuth flows.',
+    note: 'Google’s official Drive MCP server. Google requires your own OAuth client: create a Desktop-app client in Google Cloud Console (with the Drive API enabled), paste its ID + secret under “OAuth client…”, then Authorize.',
   },
   {
     kind: 'gcalendar',
     label: 'Google Calendar',
     transport: 'http',
     urlSuggestion: 'https://calendarmcp.googleapis.com/mcp/v1',
-    note: 'Google’s official Calendar MCP server. OAuth 2.0 only per Google’s docs — not usable with v1 header auth until Contrail supports OAuth flows.',
+    note: 'Google’s official Calendar MCP server. Google requires your own OAuth client: create a Desktop-app client in Google Cloud Console (with the Calendar API enabled), paste its ID + secret under “OAuth client…”, then Authorize.',
   },
 ];
 

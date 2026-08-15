@@ -22,6 +22,13 @@ import { readSecret, writeSecret, deleteSecret, type EngineDeps } from '@contrai
 
 const KEYCHAIN_SERVICE = 'Contrail Desktop';
 const AUTH_TIMEOUT_MS = 180_000;
+/**
+ * Fixed port for user-supplied OAuth clients: providers without dynamic
+ * registration require the exact redirect URI in their app config, so it
+ * must be stable and documented (OAUTH_LOOPBACK_REDIRECT in shared views).
+ * DCR flows keep a random port — the registration names it per flow.
+ */
+const FIXED_LOOPBACK_PORT = 33418;
 
 interface StoredToken {
   access_token: string;
@@ -30,6 +37,8 @@ interface StoredToken {
   expires_at?: number;
   token_endpoint: string;
   client_id: string;
+  /** Present for user-supplied confidential clients (client_secret_post). */
+  client_secret?: string;
   /** RFC 8707 resource indicator (the MCP server URL). */
   resource: string;
 }
@@ -178,17 +187,47 @@ export class McpOAuthService {
       };
     }
 
-    // Loopback FIRST — dynamic registration must name the exact redirect URI.
+    // Loopback FIRST — the redirect URI must be known before registration.
+    // A user-supplied client uses the FIXED port (the exact URI lives in
+    // the provider's app config); DCR flows take any free port.
     if (this.activeFlow) {
       this.activeFlow.close();
       this.activeFlow = null;
     }
-    const { server: loopback, port } = await this.startLoopback();
+    const userClientId = server.config.oauthClientId?.trim();
+    const userClientSecret = server.config.oauthClientSecret?.trim() || undefined;
+    let loopback: http.Server;
+    let port: number;
+    try {
+      ({ server: loopback, port } = await this.startLoopback(
+        userClientId ? FIXED_LOOPBACK_PORT : 0,
+      ));
+    } catch (err) {
+      return {
+        ok: false,
+        detail: userClientId
+          ? `Port ${FIXED_LOOPBACK_PORT} is in use — the fixed OAuth callback port is required for user-supplied clients. (${String(err).slice(0, 120)})`
+          : `Could not open a loopback listener: ${String(err).slice(0, 200)}`,
+      };
+    }
     const redirectUri = `http://127.0.0.1:${port}/callback`;
 
     let clientId: string;
-    const registrationEndpoint = authMeta.registration_endpoint as string | undefined;
-    if (registrationEndpoint) {
+    let clientSecret: string | undefined;
+    if (userClientId) {
+      // Bring-your-own client (Slack, Google — providers without DCR).
+      clientId = userClientId;
+      clientSecret = userClientSecret;
+    } else {
+      const registrationEndpoint = authMeta.registration_endpoint as string | undefined;
+      if (!registrationEndpoint) {
+        loopback.close();
+        return {
+          ok: false,
+          detail:
+            'This provider does not support automatic client registration. Add an OAuth client ID/secret from an app you create with the provider (OAuth client… on the server card), or paste a token header.',
+        };
+      }
       const registered = await fetchJson(registrationEndpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -204,16 +243,11 @@ export class McpOAuthService {
         loopback.close();
         return {
           ok: false,
-          detail: 'Dynamic client registration failed — this provider likely requires a pre-registered app (not supported yet).',
+          detail:
+            'Automatic client registration was refused — add an OAuth client ID/secret from an app you create with the provider instead.',
         };
       }
       clientId = registered.client_id as string;
-    } else {
-      loopback.close();
-      return {
-        ok: false,
-        detail: 'The authorization server does not support dynamic client registration — paste a token header instead.',
-      };
     }
 
     const verifier = b64url(randomBytes(48));
@@ -234,6 +268,10 @@ export class McpOAuthService {
     authUrl.searchParams.set('state', state);
     authUrl.searchParams.set('resource', resource);
     if (scopes) authUrl.searchParams.set('scope', scopes);
+    // Google only issues refresh tokens with offline access + explicit
+    // consent; other providers ignore the unknown parameters.
+    authUrl.searchParams.set('access_type', 'offline');
+    authUrl.searchParams.set('prompt', 'consent');
 
     const code = this.waitForCallback(loopback, state, timeoutMs);
     // waitForCallback wires handlers before we open the browser — no race.
@@ -250,6 +288,7 @@ export class McpOAuthService {
         code: received.code,
         redirect_uri: redirectUri,
         client_id: clientId,
+        ...(clientSecret ? { client_secret: clientSecret } : {}),
         code_verifier: verifier,
         resource,
       }).toString(),
@@ -266,6 +305,7 @@ export class McpOAuthService {
           : undefined,
       token_endpoint: authMeta.token_endpoint as string,
       client_id: clientId,
+      ...(clientSecret ? { client_secret: clientSecret } : {}),
       resource,
     };
     writeSecret(KEYCHAIN_SERVICE, account(serverId), JSON.stringify(stored));
@@ -286,6 +326,7 @@ export class McpOAuthService {
         grant_type: 'refresh_token',
         refresh_token: token.refresh_token,
         client_id: token.client_id,
+        ...(token.client_secret ? { client_secret: token.client_secret } : {}),
         resource: token.resource,
       }).toString(),
     });
@@ -304,11 +345,11 @@ export class McpOAuthService {
     return true;
   }
 
-  private startLoopback(): Promise<{ server: http.Server; port: number }> {
+  private startLoopback(fixedPort: number): Promise<{ server: http.Server; port: number }> {
     return new Promise((resolve, reject) => {
       const server = http.createServer();
       server.on('error', reject);
-      server.listen(0, '127.0.0.1', () => {
+      server.listen(fixedPort, '127.0.0.1', () => {
         const address = server.address();
         if (address && typeof address === 'object') {
           this.activeFlow = server;

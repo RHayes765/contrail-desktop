@@ -146,6 +146,8 @@ export const REQUEST_SCHEMAS = {
     args: z.array(z.string().max(500)).max(64).optional(),
     env: z.record(z.string().max(64), z.string().max(4000)).optional(),
     headers: z.record(z.string().max(64), z.string().max(4000)).optional(),
+    oauthClientId: z.string().max(300).optional(),
+    oauthClientSecret: z.string().max(300).optional(),
   }),
   'mcp:servers:update': z.object({
     id: ID,
@@ -155,6 +157,8 @@ export const REQUEST_SCHEMAS = {
     args: z.array(z.string().max(500)).max(64).optional(),
     env: z.record(z.string().max(64), z.string().max(4000)).optional(),
     headers: z.record(z.string().max(64), z.string().max(4000)).optional(),
+    oauthClientId: z.string().max(300).optional(),
+    oauthClientSecret: z.string().max(300).optional(),
   }),
   'mcp:servers:remove': z.object({ id: ID }),
   'mcp:servers:test': z.object({ id: ID }),
@@ -269,6 +273,8 @@ export interface Contracts {
       args?: string[];
       env?: Record<string, string>;
       headers?: Record<string, string>;
+      oauthClientId?: string;
+      oauthClientSecret?: string;
     };
     res: CustomMcpServerView;
   };
@@ -281,6 +287,8 @@ export interface Contracts {
       args?: string[];
       env?: Record<string, string>;
       headers?: Record<string, string>;
+      oauthClientId?: string;
+      oauthClientSecret?: string;
     };
     res: CustomMcpServerView;
   };

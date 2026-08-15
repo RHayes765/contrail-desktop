@@ -153,8 +153,15 @@ export interface CustomMcpServerExtras {
   args?: string[];
   /** stdio: extra environment variables. */
   env?: Record<string, string>;
-  /** http/sse: request headers (e.g. Authorization) — v1's only remote auth. */
+  /** http/sse: request headers (e.g. Authorization). */
   headers?: Record<string, string>;
+  /**
+   * User-supplied OAuth client, for providers that refuse dynamic client
+   * registration (Slack, Google). The secret is auth material: views carry
+   * only its presence, never the value.
+   */
+  oauthClientId?: string;
+  oauthClientSecret?: string;
 }
 
 export interface CustomMcpServerRecord {
