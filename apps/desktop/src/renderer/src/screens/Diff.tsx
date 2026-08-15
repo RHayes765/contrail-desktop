@@ -7,6 +7,10 @@ import type {
 } from '@contrail/shared';
 import { ipc } from '../lib/ipc.js';
 import { useConnections } from '../stores/connections.js';
+import { Md } from '../components/thread.js';
+import { FlowDiagram, type FlowHighlights } from '../components/FlowDiagram.js';
+
+const SUMMARIZABLE = new Set(['ApexClass', 'ApexTrigger', 'Flow', 'ValidationRule']);
 
 /**
  * The flagship: cross-org metadata diff. Local-first (both sides read the
@@ -363,7 +367,7 @@ export function DiffScreen() {
               {drillLoading ? (
                 <div className="empty">Loading…</div>
               ) : drill ? (
-                <DrillPanel drill={drill} />
+                <DrillPanel drill={drill} connectionA={connA} connectionB={connB} />
               ) : (
                 <div className="empty">Pick an entry to see its changes.</div>
               )}
@@ -388,10 +392,56 @@ function fmtSide(value: unknown): string {
   return String(value);
 }
 
-function DrillPanel({ drill }: { drill: ArtifactDiffView }) {
+type FlowViewMode = 'changes' | 'diagramA' | 'diagramB' | 'raw';
+
+function DrillPanel({
+  drill,
+  connectionA,
+  connectionB,
+}: {
+  drill: ArtifactDiffView;
+  connectionA: string | null;
+  connectionB: string | null;
+}) {
   const [raw, setRaw] = useState(false);
+  const [flowView, setFlowView] = useState<FlowViewMode>('changes');
+  const [summary, setSummary] = useState<string | null>(null);
+  const [summarizing, setSummarizing] = useState(false);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
   const oneSided = drill.presence !== 'both';
   const unreadable = drill.unreadableA || drill.unreadableB;
+  const isFlow = drill.flowGraphA != null || drill.flowGraphB != null;
+
+  const summarize = () => {
+    if (!connectionA || !connectionB || !SUMMARIZABLE.has(drill.type)) return;
+    setSummarizing(true);
+    setSummaryError(null);
+    void ipc
+      .invoke('diff:summarize', {
+        connectionA,
+        connectionB,
+        type: drill.type as 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule',
+        apiName: drill.apiName,
+      })
+      .then((r) => setSummary(r.summary))
+      .catch((err) => setSummaryError(String(err)))
+      .finally(() => setSummarizing(false));
+  };
+
+  // Per-version highlight maps: B's diagram marks added+changed, A's marks
+  // removed+changed — each diagram flags exactly what a viewer of THAT
+  // version needs to notice.
+  const highlightsA: FlowHighlights = {};
+  const highlightsB: FlowHighlights = {};
+  if (drill.flowNodeChanges) {
+    for (const name of drill.flowNodeChanges.changed) {
+      highlightsA[name] = 'changed';
+      highlightsB[name] = 'changed';
+    }
+    for (const name of drill.flowNodeChanges.addedInB) highlightsB[name] = 'added';
+    for (const name of drill.flowNodeChanges.removedInB) highlightsA[name] = 'removed';
+  }
+
   return (
     <>
       <div className="meta-detail-head">
@@ -403,12 +453,62 @@ function DrillPanel({ drill }: { drill: ArtifactDiffView }) {
               ` · only in ${drill.presence === 'a-only' ? drill.aliasA : drill.aliasB}`}
           </div>
         </div>
-        {!oneSided && !unreadable && (
-          <button onClick={() => setRaw((v) => !v)}>{raw ? 'Changes' : 'Raw side-by-side'}</button>
-        )}
+        <div className="meta-detail-actions">
+          {SUMMARIZABLE.has(drill.type) && !summary && !unreadable && (
+            <button disabled={summarizing} onClick={summarize}>
+              {summarizing ? 'Summarizing…' : 'AI summary'}
+            </button>
+          )}
+          {isFlow && !oneSided && !unreadable ? (
+            <div className="seg">
+              {(
+                [
+                  ['changes', 'Changes'],
+                  ['diagramA', drill.aliasA],
+                  ['diagramB', drill.aliasB],
+                  ['raw', 'Raw'],
+                ] as Array<[FlowViewMode, string]>
+              ).map(([mode, label]) => (
+                <button
+                  key={mode}
+                  className={flowView === mode ? 'on' : ''}
+                  onClick={() => setFlowView(mode)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          ) : (
+            !oneSided &&
+            !unreadable && (
+              <button onClick={() => setRaw((v) => !v)}>
+                {raw ? 'Changes' : 'Raw side-by-side'}
+              </button>
+            )
+          )}
+        </div>
       </div>
 
-      {unreadable ? (
+      {summaryError && <div className="notice">{summaryError}</div>}
+      {summary && (
+        <div className="summary-panel">
+          <div className="dep-label">AI summary of the change</div>
+          <Md text={summary} />
+        </div>
+      )}
+
+      {/* One-sided flows: the diagram IS the view (its inspector holds the XML). */}
+      {isFlow && oneSided && !unreadable && (drill.flowGraphA ?? drill.flowGraphB) && (
+        <FlowDiagram graph={(drill.flowGraphA ?? drill.flowGraphB)!} />
+      )}
+      {isFlow && !oneSided && !unreadable && flowView === 'diagramA' && drill.flowGraphA && (
+        <FlowDiagram graph={drill.flowGraphA} highlights={highlightsA} />
+      )}
+      {isFlow && !oneSided && !unreadable && flowView === 'diagramB' && drill.flowGraphB && (
+        <FlowDiagram graph={drill.flowGraphB} highlights={highlightsB} />
+      )}
+
+      {(isFlow && !unreadable && (oneSided || flowView === 'diagramA' || flowView === 'diagramB')) ? null : unreadable ? (
         <div className="empty">
           The snapshot file could not be read in{' '}
           {[drill.unreadableA && drill.aliasA, drill.unreadableB && drill.aliasB]
@@ -418,7 +518,7 @@ function DrillPanel({ drill }: { drill: ArtifactDiffView }) {
         </div>
       ) : oneSided ? (
         <pre className="meta-source">{drill.contentA ?? drill.contentB ?? ''}</pre>
-      ) : raw ? (
+      ) : (isFlow ? flowView === 'raw' : raw) ? (
         <div className="diff-raw">
           <div>
             <div className="dep-label">{drill.aliasA}</div>

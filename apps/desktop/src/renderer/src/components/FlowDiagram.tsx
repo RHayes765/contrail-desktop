@@ -296,16 +296,27 @@ function planEdges(
 
 type FlowNode = FlowGraphView['nodes'][number];
 
+/** Diff-mode node marking: which nodes changed/appeared/disappeared. */
+export type FlowHighlights = Record<string, 'changed' | 'added' | 'removed'>;
+
+const HIGHLIGHT_COLORS: Record<'changed' | 'added' | 'removed', string> = {
+  changed: 'var(--env-scratch)',
+  added: 'var(--env-sandbox)',
+  removed: 'var(--env-production)',
+};
+
 function Canvas({
   graph,
   onJump,
   selected,
   onSelect,
+  highlights,
 }: {
   graph: FlowGraphView;
   onJump: (name: string) => void;
   selected: string | null;
   onSelect: (node: FlowNode) => void;
+  highlights?: FlowHighlights;
 }) {
   const { placed, width, height, depth, stacks } = useMemo(() => layout(graph), [graph]);
   const { drawn, pills } = useMemo(
@@ -370,6 +381,7 @@ function Canvas({
       ))}
       {[...placed.values()].map((node) => {
         const full = graph.nodes.find((n) => n.name === node.name);
+        const mark = highlights?.[node.name];
         return (
           <g
             key={node.name}
@@ -377,6 +389,20 @@ function Canvas({
             className="flow-node-hit"
             onClick={() => full && onSelect(full)}
           >
+            {mark && (
+              <rect
+                x={node.x - 5}
+                y={node.y - 5}
+                width={NODE_W + 10}
+                height={NODE_H + 10}
+                rx={11}
+                fill="none"
+                stroke={HIGHLIGHT_COLORS[mark]}
+                strokeWidth={2.5}
+                strokeDasharray={mark === 'changed' ? '6 4' : undefined}
+                opacity={0.9}
+              />
+            )}
             <rect
               x={node.x}
               y={node.y}
@@ -443,7 +469,13 @@ function InspectorPanel({ node, onClose }: { node: FlowNode; onClose: () => void
   );
 }
 
-export function FlowDiagram({ graph }: { graph: FlowGraphView }) {
+export function FlowDiagram({
+  graph,
+  highlights,
+}: {
+  graph: FlowGraphView;
+  highlights?: FlowHighlights;
+}) {
   const [fullscreen, setFullscreen] = useState(false);
   const [selected, setSelected] = useState<FlowNode | null>(null);
 
@@ -476,6 +508,13 @@ export function FlowDiagram({ graph }: { graph: FlowGraphView }) {
   const body = (
     <>
       {graph.trigger && <p className="conn-detail">Trigger: {graph.trigger}</p>}
+      {highlights && Object.keys(highlights).length > 0 && (
+        <p className="conn-detail flow-legend">
+          <span className="flow-legend-swatch changed" /> changed
+          <span className="flow-legend-swatch added" /> added
+          <span className="flow-legend-swatch removed" /> removed
+        </p>
+      )}
       <div className="flow-stage">
         <div className="flow-scroll">
           <Canvas
@@ -483,6 +522,7 @@ export function FlowDiagram({ graph }: { graph: FlowGraphView }) {
             onJump={jump}
             selected={selected?.name ?? null}
             onSelect={(node) => setSelected((cur) => (cur?.name === node.name ? null : node))}
+            highlights={highlights}
           />
         </div>
         {selected && <InspectorPanel node={selected} onClose={() => setSelected(null)} />}

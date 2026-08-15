@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { parseFlowGraph } from '../metadata/flowgraph.js';
+import { diffFlowNodes, parseFlowGraph } from '../metadata/flowgraph.js';
 
 const SAMPLE = `<?xml version="1.0" encoding="UTF-8"?>
 <Flow xmlns="http://soap.sforce.com/2006/04/metadata">
@@ -138,5 +138,33 @@ describe('inspector props', () => {
       ]),
     );
     expect(lookup?.xml).toContain('<object>Asset</object>');
+  });
+});
+
+describe('diffFlowNodes', () => {
+  const V1 = `<Flow xmlns="x"><label>F</label>
+    <decisions><name>Check</name><label>Check</label>
+      <rules><name>R</name><conditions><leftValueReference>A</leftValueReference><operator>EqualTo</operator><rightValue><stringValue>1</stringValue></rightValue></conditions></rules>
+    </decisions>
+    <assignments><name>SetX</name><label>Set X</label></assignments>
+    <assignments><name>Old</name><label>Old</label></assignments>
+  </Flow>`;
+  const V2 = `<Flow xmlns="x"><label>F</label>
+    <decisions><name>Check</name><label>Check</label>
+      <rules><name>R</name><conditions><leftValueReference>A</leftValueReference><operator>EqualTo</operator><rightValue><stringValue>2</stringValue></rightValue></conditions></rules>
+    </decisions>
+    <assignments><name>SetX</name>
+      <label>Set X</label></assignments>
+    <actionCalls><name>Notify</name><label>Notify</label><actionName>emailSimple</actionName></actionCalls>
+  </Flow>`;
+
+  it('classifies changed, added, and removed nodes; whitespace never counts', () => {
+    const result = diffFlowNodes(parseFlowGraph(V1), parseFlowGraph(V2));
+    expect(result.changed).toEqual(['Check']); // rightValue 1 → 2
+    expect(result.addedInB).toEqual(['Notify']);
+    expect(result.removedInB).toEqual(['Old']);
+    // SetX reformatted only → not changed; identical flows → all empty
+    const same = diffFlowNodes(parseFlowGraph(V1), parseFlowGraph(V1));
+    expect(same).toEqual({ changed: [], addedInB: [], removedInB: [] });
   });
 });

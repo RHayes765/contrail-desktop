@@ -318,3 +318,43 @@ export function parseFlowGraph(xml: string): FlowGraph {
   const unresolved = [...new Set(edges.map((e) => e.to).filter((t) => !defined.has(t)))];
   return { label: flowLabel, processType, status, trigger, nodes, edges, unresolved };
 }
+
+// ── flow-to-flow node comparison (diff drill-in highlighting) ────────────
+
+export interface FlowNodeChanges {
+  /** Present in both versions with different element XML. */
+  changed: string[];
+  /** Only in version B. */
+  addedInB: string[];
+  /** Only in version A. */
+  removedInB: string[];
+}
+
+/** Whitespace-insensitive block equality — reordered elements still differ,
+ * but reformatting alone must not read as a change. */
+function normalizeBlock(xml: string): string {
+  return xml
+    .replace(/>\s+</g, '><') // inter-tag whitespace is pure formatting
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function diffFlowNodes(a: FlowGraph, b: FlowGraph): FlowNodeChanges {
+  const byNameA = new Map(a.nodes.map((n) => [n.name.toLowerCase(), n]));
+  const byNameB = new Map(b.nodes.map((n) => [n.name.toLowerCase(), n]));
+  const changed: string[] = [];
+  const addedInB: string[] = [];
+  const removedInB: string[] = [];
+  for (const node of b.nodes) {
+    const other = byNameA.get(node.name.toLowerCase());
+    if (!other) {
+      addedInB.push(node.name);
+    } else if (normalizeBlock(other.xml) !== normalizeBlock(node.xml)) {
+      changed.push(node.name);
+    }
+  }
+  for (const node of a.nodes) {
+    if (!byNameB.has(node.name.toLowerCase())) removedInB.push(node.name);
+  }
+  return { changed, addedInB, removedInB };
+}

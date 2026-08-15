@@ -88,6 +88,12 @@ export const REQUEST_SCHEMAS = {
     type: z.string().min(1).max(80),
     apiName: z.string().min(1).max(300),
   }),
+  'diff:summarize': z.object({
+    connectionA: ID,
+    connectionB: ID,
+    type: z.enum(['ApexClass', 'ApexTrigger', 'Flow', 'ValidationRule']),
+    apiName: z.string().min(1).max(300),
+  }),
 
   'projects:list': z.object({}),
   'projects:create': z.object({
@@ -171,6 +177,15 @@ export interface Contracts {
   'diff:artifact': {
     req: { connectionA: string; connectionB: string; type: string; apiName: string };
     res: ArtifactDiffView;
+  };
+  'diff:summarize': {
+    req: {
+      connectionA: string;
+      connectionB: string;
+      type: 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule';
+      apiName: string;
+    };
+    res: { summary: string; cached: boolean };
   };
 
   'projects:list': { req: Record<string, never>; res: ProjectView[] };

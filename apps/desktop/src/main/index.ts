@@ -532,10 +532,10 @@ app.whenReady().then(async () => {
 
   if (DIFF_DEMO !== null) {
     // Cross-org scope diff over LOCAL snapshots — zero Salesforce calls.
-    // Arg: "aliasA,aliasB" (both must have synced snapshots).
+    // Arg: "aliasA,aliasB[,Type:ApiName]" (optional explicit drill target).
     try {
-      const [refA, refB] = DIFF_DEMO.split(',').map((s) => s.trim());
-      if (!refA || !refB) throw new Error('--diff-demo expects "aliasA,aliasB"');
+      const [refA, refB, target] = DIFF_DEMO.split(',').map((s) => s.trim());
+      if (!refA || !refB) throw new Error('--diff-demo expects "aliasA,aliasB[,Type:ApiName]"');
       const connA = boot.deps.db.resolveConnection(refA);
       const connB = boot.deps.db.resolveConnection(refB);
       if (!connA || !connB) throw new Error('both aliases must resolve to connections');
@@ -547,11 +547,40 @@ app.whenReady().then(async () => {
       const started = Date.now();
       const scope = await diff.diffScope(connA.id, connB.id);
       const again = await diff.diffScope(connA.id, connB.id); // cache check
-      // Drill-in leg: the first changed entry's full semantic detail.
-      const firstChanged = scope.entries.find((e) => e.status === 'changed');
-      const drill = firstChanged
-        ? diff.diffArtifact(connA.id, connB.id, firstChanged.type, firstChanged.apiName)
-        : null;
+      // Drill-in leg: explicit target when given, else first changed entry.
+      let drillType: string | null = null;
+      let drillName: string | null = null;
+      if (target) {
+        const idx = target.indexOf(':');
+        drillType = target.slice(0, idx);
+        drillName = target.slice(idx + 1);
+      } else {
+        const firstChanged = scope.entries.find((e) => e.status === 'changed');
+        if (firstChanged) {
+          drillType = firstChanged.type;
+          drillName = firstChanged.apiName;
+        }
+      }
+      const drill =
+        drillType && drillName
+          ? diff.diffArtifact(connA.id, connB.id, drillType, drillName)
+          : null;
+      // Diff-aware summary leg for summarizable targets (live Haiku call).
+      let diffSummary: string | null = null;
+      if (
+        drill &&
+        ['ApexClass', 'ApexTrigger', 'Flow', 'ValidationRule'].includes(drill.type)
+      ) {
+        const summaries = new SummaryService(boot.deps, new MetadataService(boot.deps), diff);
+        diffSummary = (
+          await summaries.summarizeDiff(
+            connA.id,
+            connB.id,
+            drill.type as 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule',
+            drill.apiName,
+          )
+        ).summary;
+      }
       smokeWrite({
         ok: true,
         aliases: [scope.aliasA, scope.aliasB],
@@ -568,8 +597,19 @@ app.whenReady().then(async () => {
               format: drill.format,
               change_count: drill.changes?.length ?? drill.hunks?.length ?? 0,
               sample_changes: (drill.changes ?? []).slice(0, 4),
+              flow_nodes:
+                drill.flowGraphA && drill.flowGraphB
+                  ? {
+                      a: drill.flowGraphA.nodes.length,
+                      b: drill.flowGraphB.nodes.length,
+                      changed: drill.flowNodeChanges?.changed.length ?? 0,
+                      added_in_b: drill.flowNodeChanges?.addedInB ?? [],
+                      removed_in_b: drill.flowNodeChanges?.removedInB ?? [],
+                    }
+                  : null,
             }
           : null,
+        diff_summary: diffSummary,
       });
       app.exit(0);
     } catch (err) {
@@ -627,7 +667,7 @@ app.whenReady().then(async () => {
     snapshots,
     metadata,
     diff,
-    summaries: new SummaryService(boot.deps, metadata),
+    summaries: new SummaryService(boot.deps, metadata, diff),
     getWindow: () => mainWindow,
   };
 

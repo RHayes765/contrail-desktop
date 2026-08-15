@@ -285,6 +285,11 @@ export interface ArtifactDiffView {
   linesRemoved: number;
   contentA: string | null;
   contentB: string | null;
+  /** Parsed flow graphs — present for Flow artifacts (per readable side). */
+  flowGraphA: FlowGraphView | null;
+  flowGraphB: FlowGraphView | null;
+  /** Node-level flow comparison for diagram highlighting (both sides present). */
+  flowNodeChanges: { changed: string[]; addedInB: string[]; removedInB: string[] } | null;
 }
 
 // ── agent sessions ───────────────────────────────────────────────────────

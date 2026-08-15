@@ -1,4 +1,5 @@
 import {
+  diffFlowNodes,
   findChildBlock,
   parseFlowGraph,
   parsePermissionSet,
@@ -211,6 +212,13 @@ export class DiffService {
         ? text.slice(0, DIFF_CONTENT_CAP) + '\n[truncated]'
         : text;
 
+    // Flow drill-ins get parsed graphs (from the UNCAPPED content — a
+    // truncated XML would not parse) plus node-level change classification
+    // so the diagrams can highlight what actually moved.
+    const isFlow = type === 'Flow';
+    const graphA = isFlow && contentA ? parseFlowGraph(contentA) : null;
+    const graphB = isFlow && contentB ? parseFlowGraph(contentB) : null;
+
     const base: ArtifactDiffView = {
       type,
       apiName,
@@ -230,6 +238,9 @@ export class DiffService {
       linesRemoved: 0,
       contentA: cap(contentA),
       contentB: cap(contentB),
+      flowGraphA: graphA,
+      flowGraphB: graphB,
+      flowNodeChanges: graphA && graphB ? diffFlowNodes(graphA, graphB) : null,
     };
     if (contentA == null || contentB == null) return base;
 

@@ -112,10 +112,12 @@ export {
 } from './metadata/profiles.js';
 export {
   parseFlowGraph,
+  diffFlowNodes,
   type FlowGraph,
   type FlowGraphNode,
   type FlowGraphEdge,
   type FlowNodeKind,
+  type FlowNodeChanges,
 } from './metadata/flowgraph.js';
 
 // Deploy

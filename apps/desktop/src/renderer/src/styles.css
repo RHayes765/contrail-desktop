@@ -1088,3 +1088,14 @@ button.danger {
 .hunk-line { white-space: pre-wrap; word-break: break-all; }
 .hunk-line.removed { color: var(--env-production); }
 .hunk-line.added { color: var(--env-sandbox); }
+
+/* ── S7.1: flow-diff highlights legend ───────────────────────────────── */
+
+.flow-legend { display: flex; gap: 6px; align-items: center; }
+.flow-legend-swatch {
+  display: inline-block; width: 14px; height: 8px; border-radius: 3px;
+  margin-left: 10px;
+}
+.flow-legend-swatch.changed { border: 2px dashed var(--env-scratch); }
+.flow-legend-swatch.added { border: 2px solid var(--env-sandbox); }
+.flow-legend-swatch.removed { border: 2px solid var(--env-production); }

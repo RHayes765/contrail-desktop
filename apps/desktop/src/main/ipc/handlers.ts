@@ -74,6 +74,15 @@ export function makeHandlers(health: HealthView, services: MainServices) {
       _deps: EngineDeps,
       req: { connectionA: string; connectionB: string; type: string; apiName: string },
     ) => diff.diffArtifact(req.connectionA, req.connectionB, req.type, req.apiName),
+    'diff:summarize': (
+      _deps: EngineDeps,
+      req: {
+        connectionA: string;
+        connectionB: string;
+        type: 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule';
+        apiName: string;
+      },
+    ) => summaries.summarizeDiff(req.connectionA, req.connectionB, req.type, req.apiName),
 
     'projects:list': () => projects.list(),
     'projects:create': (_deps: EngineDeps, req: { name: string; description?: string }) =>
