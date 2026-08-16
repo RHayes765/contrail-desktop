@@ -214,7 +214,7 @@ async function runAgentDemo(b: Bootstrap, question: string): Promise<void> {
       '# Dev Sandbox conventions',
       '',
       '- Naming: all custom fields use the `LF4_` prefix.',
-      '- The integration user for this project is `integration@lanefour.dev`.',
+      '- The integration user for this project is `integration@example.com`.',
       '- Deploy window: weekdays after 4pm Eastern only.',
       '',
     ].join('\n'),
@@ -912,15 +912,19 @@ app.whenReady().then(async () => {
 
   if (NARRATE_DEMO !== null) {
     // The M3 verify: an agent narrating diff_orgs across BOTH bound orgs.
-    // The conquest binding is DEMO-ONLY state in the shared Dev Sandbox
+    // Orgs come from the environment (CONTRAIL_DEMO_ORG_A/B, default
+    // 'dev-org'), never hardcoded — demo scaffolding must not carry
+    // anyone's real org aliases.
+    //
+    // The second binding is DEMO-ONLY state in the shared Dev Sandbox
     // project — it must be removed afterwards, or every future session's
-    // silo silently widens to include a client org.
-    let conquestId: string | null = null;
+    // silo silently widens to include another org.
+    let secondOrgId: string | null = null;
     let projectId: string | null = null;
     const cleanupBinding = (): void => {
-      if (projectId && conquestId) {
+      if (projectId && secondOrgId) {
         try {
-          boot?.deps.db.removeProjectBinding(projectId, conquestId);
+          boot?.deps.db.removeProjectBinding(projectId, secondOrgId);
         } catch {
           /* best effort */
         }
@@ -928,19 +932,27 @@ app.whenReady().then(async () => {
     };
     try {
       if (!NARRATE_DEMO.trim()) throw new Error('--narrate-demo requires a question');
+      const aliasA = process.env.CONTRAIL_DEMO_ORG_A ?? 'dev-org';
+      const aliasB = process.env.CONTRAIL_DEMO_ORG_B;
+      if (!aliasB) {
+        throw new Error(
+          '--narrate-demo needs two orgs: set CONTRAIL_DEMO_ORG_B (and optionally ' +
+            'CONTRAIL_DEMO_ORG_A, default "dev-org") to connection aliases.',
+        );
+      }
       const projects = new ProjectService(boot.deps);
-      const devOrg = boot.deps.db.resolveConnection('dev-org');
-      const conquest = boot.deps.db.resolveConnection('conquest-full');
-      if (!devOrg || !conquest) throw new Error('need dev-org and conquest-full connections');
+      const devOrg = boot.deps.db.resolveConnection(aliasA);
+      const secondOrg = boot.deps.db.resolveConnection(aliasB);
+      if (!devOrg || !secondOrg) throw new Error(`need connections ${aliasA} and ${aliasB}`);
       const project =
         boot.deps.db.findProjectByName('Dev Sandbox') ??
         boot.deps.db.createProject({ name: 'Dev Sandbox' });
       projectId = project.id;
-      conquestId = conquest.id;
+      secondOrgId = secondOrg.id;
       boot.deps.db.removeProjectBinding(project.id, devOrg.id);
       boot.deps.db.addProjectBinding(project.id, devOrg.id, 'dev');
-      boot.deps.db.removeProjectBinding(project.id, conquest.id);
-      boot.deps.db.addProjectBinding(project.id, conquest.id, 'other');
+      boot.deps.db.removeProjectBinding(project.id, secondOrg.id);
+      boot.deps.db.addProjectBinding(project.id, secondOrg.id, 'other');
 
       const events: Array<{ sessionId: string; event: ChatEvent }> = [];
       const errors: string[] = [];
