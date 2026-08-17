@@ -577,3 +577,12 @@ export interface ApiKeyStatusView {
   /** Masked hint for recognition, e.g. "sk-ant-…7f2a". Null when absent. */
   hint: string | null;
 }
+
+/** Rolling-window AI spend against the user's daily cap. */
+export interface BudgetStatusView {
+  capUsd: number;
+  spentUsd: number;
+  remainingUsd: number;
+  byKind: Array<{ kind: string; usd: number; calls: number }>;
+  windowHours: number;
+}

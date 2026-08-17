@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { ApiKeyStatusView } from '@contrail/shared';
+import type { ApiKeyStatusView, BudgetStatusView } from '@contrail/shared';
 import { ipc } from '../lib/ipc.js';
 
 /**
@@ -8,6 +8,99 @@ import { ipc } from '../lib/ipc.js';
  * IPC: this screen can learn whether one is stored (and a masked hint), but
  * never read it back.
  */
+/** Spend against the rolling daily cap — the guard testers actually feel. */
+function BudgetPanel() {
+  const [budget, setBudget] = useState<BudgetStatusView | null>(null);
+  const [capDraft, setCapDraft] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = async (): Promise<void> => {
+    try {
+      const next = await ipc.invoke('settings:budget', {});
+      setBudget(next);
+      setCapDraft(String(next.capUsd));
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const saveCap = async (): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await ipc.invoke('settings:setBudgetCap', { capUsd: Number(capDraft) });
+      setBudget(next);
+      setCapDraft(String(next.capUsd));
+    } catch (err) {
+      setError(String(err).replace(/^Error:\s*/, ''));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pct = budget && budget.capUsd > 0 ? Math.min(100, (budget.spentUsd / budget.capUsd) * 100) : 0;
+
+  return (
+    <div className="panel">
+      <h3>AI spend limit</h3>
+      <p className="hint">
+        Every paid model call — agent turns and AI summaries alike — counts against one rolling
+        24-hour ceiling. A session can never spend past what remains, so the cap holds even with
+        several sessions running or resumed.
+      </p>
+      {budget === null ? (
+        <div className="empty">Loading…</div>
+      ) : (
+        <>
+          <div className="budget-bar">
+            <div
+              className={`budget-fill${pct > 85 ? ' hot' : ''}`}
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+          <p className="conn-detail">
+            ${budget.spentUsd.toFixed(2)} spent of ${budget.capUsd.toFixed(2)} in the last{' '}
+            {budget.windowHours}h · ${budget.remainingUsd.toFixed(2)} left
+          </p>
+          {budget.byKind.length > 0 && (
+            <p className="conn-detail meter-dim">
+              {budget.byKind
+                .map((k) => `${k.kind}: $${k.usd.toFixed(2)} (${k.calls} calls)`)
+                .join(' · ')}
+            </p>
+          )}
+          <div className="form-row">
+            <label>Daily cap (USD)</label>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={capDraft}
+              onChange={(e) => setCapDraft(e.target.value)}
+            />
+          </div>
+          {error && <div className="notice">{error}</div>}
+          <div className="form-actions">
+            <button
+              className="primary"
+              disabled={busy || capDraft === String(budget.capUsd)}
+              onClick={() => void saveCap()}
+            >
+              Save cap
+            </button>
+            <button onClick={() => void load()}>Refresh</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function SettingsScreen() {
   const [status, setStatus] = useState<ApiKeyStatusView | null>(null);
   const [draft, setDraft] = useState('');
@@ -124,6 +217,8 @@ export function SettingsScreen() {
           header.
         </p>
       </div>
+
+      <BudgetPanel />
     </>
   );
 }

@@ -1,5 +1,6 @@
 import type { EngineDeps } from '@contrail/engine';
 import { readApiKey } from './agentRuntime.js';
+import type { BudgetService } from './budget.js';
 import type { DiffService, MetadataService } from './metadata.js';
 
 /**
@@ -28,17 +29,35 @@ const DIFF_SYSTEM_PROMPT =
   'Lead with one sentence naming the essential difference, then tight bullets. If the ' +
   'versions are equivalent in behavior despite textual differences, say so plainly. ' +
   'No preamble.';
+/** Haiku 4.5 list pricing (USD per million tokens) — used to price summaries
+ * for the spend ledger. Approximate by design: the alternative was counting
+ * them as free. */
+const HAIKU_INPUT_USD_PER_MTOK = 1;
+const HAIKU_OUTPUT_USD_PER_MTOK = 5;
 const DIFF_CONTENT_CHARS = 14_000;
 const DIFF_MAX_CHANGES = 100;
 
 export class SummaryService {
-  private readonly cache = new Map<string, string>();
-
   constructor(
     private readonly deps: EngineDeps,
     private readonly metadata: MetadataService,
     private readonly diff?: DiffService,
+    /** Spend guard. Summaries are real money and must be counted. */
+    private readonly budget?: BudgetService,
   ) {}
+
+  /**
+   * The cache lives in SQLite, not memory. It was a Map, so every restart
+   * re-billed the user for summaries they had already paid for — the keys are
+   * content hashes, so a persisted hit is always still correct.
+   */
+  private cacheGet(key: string): string | null {
+    return this.deps.db.getCachedSummary(key);
+  }
+
+  private cachePut(key: string, summary: string): void {
+    this.deps.db.putCachedSummary(key, summary);
+  }
 
   /**
    * Diff-aware summary: explains the DIFFERENCE between two orgs' versions.
@@ -58,7 +77,7 @@ export class SummaryService {
     const hashA = this.deps.db.getArtifact(a.id, type, apiName)?.contentHash ?? 'absent';
     const hashB = this.deps.db.getArtifact(b.id, type, apiName)?.contentHash ?? 'absent';
     const cacheKey = `diff:${type}:${apiName}:${hashA}:${hashB}`;
-    const hit = this.cache.get(cacheKey);
+    const hit = this.cacheGet(cacheKey);
     if (hit) return { summary: hit, cached: true };
 
     const view = this.diff.diffArtifact(a.id, b.id, type, apiName);
@@ -89,7 +108,7 @@ export class SummaryService {
       view.presence === 'both' ? DIFF_SYSTEM_PROMPT : SYSTEM_PROMPT,
       userContent,
     );
-    this.cache.set(cacheKey, summary);
+    this.cachePut(cacheKey, summary);
     return { summary, cached: false };
   }
 
@@ -101,7 +120,7 @@ export class SummaryService {
     const rec = this.deps.db.getArtifact(connectionId, type, apiName);
     if (!rec) throw new Error(`${type} ${apiName} is not in this org's snapshot index.`);
     const cacheKey = `${type}:${apiName}:${rec.contentHash ?? 'nohash'}`;
-    const hit = this.cache.get(cacheKey);
+    const hit = this.cacheGet(cacheKey);
     if (hit) return { summary: hit, cached: true };
 
     // artifact() already handles child-block extraction (validation rules).
@@ -115,13 +134,20 @@ export class SummaryService {
         (detail.lastModifiedDate ? ` (last modified ${detail.lastModifiedDate})` : '') +
         `:\n\n\`\`\`\n${detail.content.slice(0, MAX_CONTENT_CHARS)}\n\`\`\``,
     );
-    this.cache.set(cacheKey, summary);
+    this.cachePut(cacheKey, summary);
     return { summary, cached: false };
   }
 
   private async callModel(system: string, userContent: string): Promise<string> {
     const apiKey = readApiKey();
-    if (!apiKey) throw new Error('No Anthropic API key found — add one before summarizing.');
+    if (!apiKey) {
+      throw new Error(
+        'No Anthropic API key found — add one in Settings before summarizing.',
+      );
+    }
+    // Summaries used to bypass budgeting entirely. They are billed work on the
+    // user's key, so they answer to the same daily ceiling as agent turns.
+    this.budget?.assertCanSpend('this summary');
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -149,6 +175,14 @@ export class SummaryService {
       .join('')
       .trim();
     if (!summary) throw new Error('The model returned an empty summary.');
+    // Price the call from reported usage and put it in the ledger. Haiku
+    // pricing, per million tokens; wrong-but-close beats uncounted.
+    const usage = (data as { usage?: { input_tokens?: number; output_tokens?: number } }).usage;
+    const inTok = usage?.input_tokens ?? 0;
+    const outTok = usage?.output_tokens ?? 0;
+    const costUsd = (inTok / 1_000_000) * HAIKU_INPUT_USD_PER_MTOK +
+      (outTok / 1_000_000) * HAIKU_OUTPUT_USD_PER_MTOK;
+    this.budget?.record('summary', SUMMARY_MODEL, costUsd);
     return summary;
   }
 }

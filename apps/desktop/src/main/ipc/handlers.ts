@@ -10,6 +10,7 @@ import { SummaryService } from '../services/summaries.js';
 import { McpConfigService } from '../services/mcpConfig.js';
 import { DeployService } from '../services/deploys.js';
 import { SettingsService } from '../services/settings.js';
+import { BudgetService } from '../services/budget.js';
 
 /**
  * The complete handler map for the typed IPC registry. Handlers are thin:
@@ -28,12 +29,13 @@ export interface MainServices {
   mcp: McpConfigService;
   deploys: DeployService;
   settings: SettingsService;
+  budget: BudgetService;
   /** The window whose native dialogs (file picker) we parent. */
   getWindow: () => BrowserWindow | null;
 }
 
 export function makeHandlers(health: HealthView, services: MainServices) {
-  const { connections, projects, sessions, snapshots, metadata, diff, summaries, mcp, deploys, settings } =
+  const { connections, projects, sessions, snapshots, metadata, diff, summaries, mcp, deploys, settings, budget } =
     services;
   return {
     'app:health': (deps: EngineDeps): HealthView => ({
@@ -200,5 +202,8 @@ export function makeHandlers(health: HealthView, services: MainServices) {
     'settings:keyStatus': () => settings.keyStatus(),
     'settings:setKey': (_deps: EngineDeps, req: { key: string }) => settings.setKey(req.key),
     'settings:clearKey': () => settings.clearKey(),
+    'settings:budget': () => budget.status(),
+    'settings:setBudgetCap': (_deps: EngineDeps, req: { capUsd: number }) =>
+      budget.setDailyCapUsd(req.capUsd),
   };
 }

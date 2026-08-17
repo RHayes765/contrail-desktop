@@ -25,6 +25,7 @@ import type {
 import { resolveSessionMcp } from './mcpConfig.js';
 import { refreshMcpTokenIfExpired } from './mcpOauth.js';
 import type { DeployService } from './deploys.js';
+import type { BudgetService } from './budget.js';
 import {
   CHAT_MODELS,
   type ChatEvent,
@@ -519,6 +520,12 @@ export class AgentSessionManager {
 
   /** Native-approval service, attached after construction (index.ts wires it). */
   private deployService: DeployService | null = null;
+  /** Spend guard, attached after construction. */
+  private budget: BudgetService | null = null;
+
+  setBudgetService(service: BudgetService): void {
+    this.budget = service;
+  }
 
   setDeployService(service: DeployService): void {
     this.deployService = service;
@@ -745,7 +752,12 @@ export class AgentSessionManager {
       effort,
       maxTurns: CHAT_MAX_TURNS,
       // Budget scales with the model: a Fable turn costs what a Haiku session does.
-      maxBudgetUsd: catalog.maxBudgetUsd,
+      // Never more than the model's own cap, never more than what's left of
+      // today's allowance — so no session can cross the daily line, and a
+      // resume cannot mint a fresh full budget the way it used to.
+      maxBudgetUsd: this.budget
+        ? this.budget.allowanceForSession(catalog.maxBudgetUsd)
+        : catalog.maxBudgetUsd,
       disabledCatalogKeys: mcp.disabledCatalogKeys,
       externalServers: mcp.externalServers,
       externalServerIds: mcp.externalServerIds,
@@ -836,8 +848,11 @@ export class AgentSessionManager {
       model: modelId,
       effort: (rec.effort as EffortLevel | null) ?? undefined,
       maxTurns: CHAT_MAX_TURNS,
-      // A fresh budget for the resumed run; the row keeps the lifetime total.
-      maxBudgetUsd: CHAT_MODELS[modelId].maxBudgetUsd,
+      // NOT a fresh full budget: the run gets whatever the daily allowance
+      // still permits (the row keeps the lifetime total for display).
+      maxBudgetUsd: this.budget
+        ? this.budget.allowanceForSession(CHAT_MODELS[modelId].maxBudgetUsd)
+        : CHAT_MODELS[modelId].maxBudgetUsd,
       disabledCatalogKeys: mcp.disabledCatalogKeys,
       externalServers: mcp.externalServers,
       externalServerIds: mcp.externalServerIds,
@@ -1168,6 +1183,9 @@ export class AgentSessionManager {
       entry.usage.cacheReadTokens += event.cacheReadTokens;
       entry.usage.costUsd += event.costUsd;
       this.deps.db.updateAgentSessionUsage(entry.sessionId, entry.usage);
+      // Into the ledger too — the daily guard counts agent turns and summaries
+      // against one number.
+      this.budget?.record('session', entry.ctx.model, event.costUsd, entry.sessionId);
       this.writeTranscript(entry, { kind: 'usage', ...entry.usage });
     } else if (event.type === 'text') {
       this.writeTranscript(entry, { kind: 'assistant', text: event.text });

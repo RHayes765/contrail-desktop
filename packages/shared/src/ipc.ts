@@ -7,6 +7,7 @@ import type {
   ConnectionView,
   ConnectOutcomeView,
   ApiKeyStatusView,
+  BudgetStatusView,
   CustomMcpServerView,
   DeployRequestView,
   DiffScopeView,
@@ -175,6 +176,8 @@ export const REQUEST_SCHEMAS = {
   // The key travels renderer→main ONLY. Nothing ever returns it.
   'settings:setKey': z.object({ key: z.string().min(10).max(500) }),
   'settings:clearKey': z.object({}),
+  'settings:budget': z.object({}),
+  'settings:setBudgetCap': z.object({ capUsd: z.number().min(0).max(1000) }),
 } as const;
 
 export type Channel = keyof typeof REQUEST_SCHEMAS;
@@ -319,6 +322,8 @@ export interface Contracts {
   'settings:keyStatus': { req: Record<string, never>; res: ApiKeyStatusView };
   'settings:setKey': { req: { key: string }; res: ApiKeyStatusView };
   'settings:clearKey': { req: Record<string, never>; res: ApiKeyStatusView };
+  'settings:budget': { req: Record<string, never>; res: BudgetStatusView };
+  'settings:setBudgetCap': { req: { capUsd: number }; res: BudgetStatusView };
 }
 
 // Compile-time check: every contract has a schema and vice versa.

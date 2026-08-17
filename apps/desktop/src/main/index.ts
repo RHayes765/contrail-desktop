@@ -15,6 +15,7 @@ import { SummaryService } from './services/summaries.js';
 import { McpConfigService, resolveSessionMcp } from './services/mcpConfig.js';
 import { DeployService, type DeployAlert } from './services/deploys.js';
 import { SettingsService } from './services/settings.js';
+import { BudgetService } from './services/budget.js';
 
 /**
  * A path a CHILD PROCESS must be able to execute. utilityProcess.fork()
@@ -283,6 +284,18 @@ function createWindow(): void {
   }
 }
 
+/**
+ * Attach the cross-cutting services every manager needs. Demos construct
+ * their own AgentSessionManager, and forgetting this is how a demo ends up
+ * exercising a DIFFERENT code path than the app — the budget ledger stayed
+ * empty through a real paid session exactly that way.
+ */
+function attachSessionServices(manager: AgentSessionManager, deps: Bootstrap['deps']): BudgetService {
+  const budget = new BudgetService(deps);
+  manager.setBudgetService(budget);
+  return budget;
+}
+
 // ── the Session 4 live demo (headless spec demo, budget-capped) ──────────
 
 /**
@@ -336,6 +349,7 @@ async function runAgentDemo(b: Bootstrap, question: string): Promise<void> {
   };
 
   const manager = new AgentSessionManager(b.deps, projects, runtimeChildPath(), push);
+  attachSessionServices(manager, b.deps);
   sessionManager = manager;
 
   const view = await manager.start(project.id);
@@ -467,6 +481,7 @@ async function runMcpDemo(b: Bootstrap): Promise<void> {
       }
     };
     const manager = new AgentSessionManager(b.deps, projects, runtimeChildPath(), push);
+    attachSessionServices(manager, b.deps);
     sessionManager = manager;
     const view = await manager.start(project.id, 'claude-haiku-4-5');
     const turn = new Promise<void>((resolve, reject) => {
@@ -788,6 +803,7 @@ async function runApproveDemo(b: Bootstrap): Promise<void> {
   };
 
   const manager = new AgentSessionManager(b.deps, projects, runtimeChildPath(), push);
+  attachSessionServices(manager, b.deps);
   sessionManager = manager;
   const deployService = new DeployService(b.deps, push);
   deployServiceRef.current = deployService;
@@ -897,6 +913,7 @@ async function runSnapshotDemo(b: Bootstrap, question: string): Promise<void> {
   b.deps.db.addProjectBinding(project.id, devOrg.id, 'dev');
 
   const manager = new AgentSessionManager(b.deps, projects, runtimeChildPath(), push);
+  attachSessionServices(manager, b.deps);
   sessionManager = manager;
   const view = await manager.start(project.id);
   const turn = new Promise<void>((resolve, reject) => {
@@ -1081,6 +1098,7 @@ ${logFilePath()}`,
         }
       };
       const manager = new AgentSessionManager(boot.deps, projects, runtimeChildPath(), push);
+      attachSessionServices(manager, boot.deps);
       sessionManager = manager;
       const view = await manager.start(project.id);
       const turn = new Promise<void>((resolve, reject) => {
@@ -1312,6 +1330,10 @@ ${logFilePath()}`,
     log('warn', 'closed deploy executions stranded by a previous run', { count: stranded });
   }
 
+  const budget = new BudgetService(boot.deps);
+  budget.logPolicy();
+  sessionManager.setBudgetService(budget);
+
   const services: MainServices = {
     connections,
     projects,
@@ -1319,9 +1341,10 @@ ${logFilePath()}`,
     snapshots,
     metadata,
     diff,
-    summaries: new SummaryService(boot.deps, metadata, diff),
+    summaries: new SummaryService(boot.deps, metadata, diff, budget),
     deploys: deployService,
     settings: new SettingsService(boot.deps),
+    budget,
     mcp: new McpConfigService(boot.deps, async (serverId, scopedProjectId) => {
       // External tools can't be gated per call — revocation ends the
       // live sessions that resolved the server (see McpConfigService).

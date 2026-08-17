@@ -1209,3 +1209,19 @@ button.danger {
   gap: 14px;
   cursor: default;
 }
+
+/* Spend meter on the Settings screen. */
+.budget-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  margin: 10px 0 8px;
+}
+.budget-fill {
+  height: 100%;
+  background: var(--env-sandbox);
+  transition: width 200ms ease;
+}
+.budget-fill.hot { background: var(--env-production); }

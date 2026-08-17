@@ -18,7 +18,7 @@ import type {
   ServerToggleRecord,
 } from './types.js';
 
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 /**
  * Local SQLite store: connection metadata and the audit log (P0.1); the
@@ -310,6 +310,39 @@ export class ContrailDb {
         // confirmation code NEVER appears in this JSON.
         this.db.exec(`ALTER TABLE deploy_requests ADD COLUMN review_json TEXT;`);
       }
+      if (current < 10) {
+        // v10 (desktop-owned, all NEW tables — freeze-contract safe):
+        //   spend_events  — THE model-spend ledger. Every paid call lands here,
+        //                   so a rolling window can be enforced. Session rows
+        //                   keep their own totals for the sessions list; this
+        //                   table is what the budget guard reads.
+        //   app_settings  — small kv for user-editable app policy (the cap).
+        //   summary_cache — AI summaries survive a restart. Without this, the
+        //                   in-memory cache died with the process and browsing
+        //                   the same artifact again re-billed the user.
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS spend_events (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL DEFAULT 'default',
+            ts           TEXT NOT NULL,
+            kind         TEXT NOT NULL,
+            model        TEXT,
+            cost_usd     REAL NOT NULL,
+            session_id   TEXT,
+            detail       TEXT
+          );
+          CREATE INDEX IF NOT EXISTS idx_spend_ts ON spend_events (ts);
+          CREATE TABLE IF NOT EXISTS app_settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS summary_cache (
+            cache_key  TEXT PRIMARY KEY,
+            summary    TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          );
+        `);
+      }
       this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     });
     tx();
@@ -433,6 +466,84 @@ export class ContrailDb {
         .prepare(`SELECT connection_id, env_role FROM project_bindings WHERE project_id = ?`)
         .all(projectId) as Array<{ connection_id: string; env_role: string }>
     ).map((r) => ({ connectionId: r.connection_id, envRole: r.env_role }));
+  }
+
+  // ── spend ledger, app settings, summary cache (v10) ────────────────────
+
+  /**
+   * Record money actually spent on a model call. Everything paid goes here —
+   * agent turns AND AI summaries — because a budget that only counts one of
+   * them is not a budget.
+   */
+  recordSpend(input: {
+    kind: 'session' | 'summary';
+    model: string | null;
+    costUsd: number;
+    sessionId?: string | null;
+    detail?: string | null;
+  }): void {
+    if (!(input.costUsd > 0)) return; // free/cached calls are not ledger events
+    this.db
+      .prepare(
+        `INSERT INTO spend_events (id, workspace_id, ts, kind, model, cost_usd, session_id, detail)
+         VALUES (?, 'default', ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        new Date().toISOString(),
+        input.kind,
+        input.model,
+        input.costUsd,
+        input.sessionId ?? null,
+        input.detail ?? null,
+      );
+  }
+
+  /** Spend in a rolling window, total and split by kind. */
+  spendSince(sinceIso: string): {
+    totalUsd: number;
+    byKind: Array<{ kind: string; usd: number; calls: number }>;
+  } {
+    const rows = this.db
+      .prepare(
+        `SELECT kind, SUM(cost_usd) AS usd, COUNT(*) AS calls
+         FROM spend_events WHERE ts >= ? GROUP BY kind`,
+      )
+      .all(sinceIso) as Array<{ kind: string; usd: number | null; calls: number }>;
+    const byKind = rows.map((r) => ({ kind: r.kind, usd: r.usd ?? 0, calls: r.calls }));
+    return { totalUsd: byKind.reduce((n, r) => n + r.usd, 0), byKind };
+  }
+
+  getAppSetting(key: string): string | null {
+    const row = this.db.prepare(`SELECT value FROM app_settings WHERE key = ?`).get(key) as
+      | { value: string }
+      | undefined;
+    return row?.value ?? null;
+  }
+
+  setAppSetting(key: string, value: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO app_settings (key, value) VALUES (?, ?)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+      )
+      .run(key, value);
+  }
+
+  getCachedSummary(cacheKey: string): string | null {
+    const row = this.db
+      .prepare(`SELECT summary FROM summary_cache WHERE cache_key = ?`)
+      .get(cacheKey) as { summary: string } | undefined;
+    return row?.summary ?? null;
+  }
+
+  putCachedSummary(cacheKey: string, summary: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO summary_cache (cache_key, summary, created_at) VALUES (?, ?, ?)
+         ON CONFLICT (cache_key) DO UPDATE SET summary = excluded.summary`,
+      )
+      .run(cacheKey, summary, new Date().toISOString());
   }
 
   // ── MCP server toggles & custom servers (S8) ───────────────────────────
