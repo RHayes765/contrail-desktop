@@ -904,6 +904,19 @@ export class AgentSessionManager {
       entry.transcript = null;
     });
 
+    // Drain AND log the child's pipes. Two reasons this is not optional:
+    // an undrained pipe wedges the child once the buffer fills, and without
+    // the log a runtime that dies before its first message (bad bundle path,
+    // unresolvable SDK, un-spawnable claude binary) leaves no evidence at all.
+    const pipe = (stream: NodeJS.ReadableStream | null, kind: 'stdout' | 'stderr'): void => {
+      stream?.on('data', (chunk: Buffer) => {
+        const text = chunk.toString('utf8').trim();
+        if (text) log(kind === 'stderr' ? 'warn' : 'info', `runtime ${kind}`, { sessionId, text });
+      });
+    };
+    pipe(child.stdout, 'stdout');
+    pipe(child.stderr, 'stderr');
+
     child.on('message', (raw: ToMain) => {
       void this.onChildMessage(entry, raw);
     });

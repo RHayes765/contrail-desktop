@@ -1,0 +1,60 @@
+# electron-builder configuration. Lives in YAML rather than package.json so
+# every non-obvious setting can carry the reason it exists.
+
+appId: com.lanefour.contrail # MUST match the AppUserModelId set in src/main/index.ts,
+# or Windows completion toasts silently stop working in packaged builds.
+productName: Contrail
+
+directories:
+  output: release
+  buildResources: build
+
+# NO source rebuild. Both native addons (better-sqlite3 v13, @napi-rs/keyring)
+# ship N-API/ABI-stable prebuilds that load under Electron as-is — the whole
+# reason v13 was adopted. electron-builder otherwise runs @electron/rebuild,
+# which drags in node-gyp and demands a Visual Studio toolchain nobody
+# building this needs. Mirrors `allowBuilds: better-sqlite3: false` in
+# pnpm-workspace.yaml.
+npmRebuild: false
+
+# Everything the app actually needs at runtime; src/ and sourcemaps stay out.
+files:
+  - out/**
+  - package.json
+  - '!**/*.map'
+
+# Files the OS must be able to exec/dlopen CANNOT live inside app.asar:
+#   - claude.exe (~293 MB): the Agent SDK spawns it as a child process. Inside
+#     asar, fs.existsSync() lies (returns true) while the process loader fails,
+#     so a missing unpack shows up as a spawn error mid-conversation.
+#   - the two .node addons: dlopen needs a real filesystem path.
+# NO asar. This is deliberate, and it was proven the hard way:
+#
+#   1. utilityProcess.fork() cannot load a script from inside app.asar. It
+#      fails SILENTLY — no spawn event, no exit, no output; the caller just
+#      hangs. Contrail forks two workers (the metadata CPU worker and the
+#      agent session child), so both must be real files.
+#   2. Unpacking only those two scripts does not work either: an unpacked
+#      script cannot resolve its dependencies back INTO the asar
+#      (ERR_MODULE_NOT_FOUND). The child's closure is agent-runtime →
+#      engine → better-sqlite3/keyring/xml/zip + the Agent SDK — i.e. very
+#      nearly all of node_modules.
+#
+# Partial unpacking is therefore a dependency-closure trap. Since the app
+# already ships a 293 MB claude.exe that must live on the real filesystem,
+# asar buys almost nothing here while costing a whole class of silent
+# failure. Revisit only if the child is ever bundled into a single file
+# (esbuild) so its dependency closure collapses to nothing.
+asar: false
+
+win:
+  target: nsis
+  # Space-free artifact name: electron-updater rewrites spaces when building
+  # download URLs, a known source of update 404s. Old blockmap URLs derive
+  # from this template too, so it must not change after the first release.
+  artifactName: Contrail-Setup-${version}.${ext}
+
+nsis:
+  oneClick: true
+  perMachine: false # per-user install = no UAC prompt, no "unknown publisher" elevation dialog
+  allowToChangeInstallationDirectory: false

@@ -9,3 +9,5 @@ allowBuilds:
   better-sqlite3: false
   esbuild: true
   electron: true
+  # Squirrel.Windows only — we target NSIS, so its install step is dead weight.
+  electron-winstaller: false

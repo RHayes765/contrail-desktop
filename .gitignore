@@ -11,3 +11,6 @@ coverage/
 
 # local diagnostic outputs
 *-diag.json
+
+# packaged output
+apps/desktop/release/

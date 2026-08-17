@@ -15,9 +15,21 @@ import { SummaryService } from './services/summaries.js';
 import { McpConfigService, resolveSessionMcp } from './services/mcpConfig.js';
 import { DeployService, type DeployAlert } from './services/deploys.js';
 
+/**
+ * A path a CHILD PROCESS must be able to execute. utilityProcess.fork()
+ * cannot load scripts from inside app.asar (it hangs with no spawn, no exit,
+ * and no output), so anything forked must resolve to the unpacked copy.
+ * electron-builder writes those under resources/app.asar.unpacked/.
+ */
+function forkable(scriptPath: string): string {
+  if (!scriptPath.includes('app.asar')) return scriptPath;
+  const unpacked = scriptPath.replace('app.asar', 'app.asar.unpacked');
+  return fs.existsSync(unpacked) ? unpacked : scriptPath;
+}
+
 /** The snapshot CPU worker bundle (built as a second main entry). */
 function snapshotWorkerPath(): string {
-  return path.join(import.meta.dirname, 'snapshotWorker.js');
+  return forkable(path.join(import.meta.dirname, 'snapshotWorker.js'));
 }
 
 // Windows toasts need an AppUserModelID; unpackaged dev builds borrow the
@@ -127,17 +139,33 @@ let mainWindow: BrowserWindow | null = null;
 let sessionManager: AgentSessionManager | null = null;
 let workerBridge: SnapshotWorkerBridge | null = null;
 
-/** Where the runtime child bundle lives (dev layout; packaging revisits this). */
+/**
+ * Where the runtime child bundle lives. Two real layouts:
+ *   dev       — the pnpm workspace: <repo>/packages/agent-runtime/dist/child.js
+ *   packaged  — electron-builder collects the workspace package into the app's
+ *               own node_modules: <app.asar>/node_modules/@contrail/agent-runtime/dist/child.js
+ * Verified against a real `electron-builder --dir` tree; a wrong path here
+ * fails every session start, so it asserts rather than trusting the guess.
+ */
 function runtimeChildPath(): string {
-  return path.join(
+  const packaged = path.join(
     app.getAppPath(),
-    '..',
-    '..',
-    'packages',
+    'node_modules',
+    '@contrail',
     'agent-runtime',
     'dist',
     'child.js',
   );
+  const dev = path.join(app.getAppPath(), '..', '..', 'packages', 'agent-runtime', 'dist', 'child.js');
+  const resolved = forkable(app.isPackaged ? packaged : dev);
+  // asar-aware existence check: Electron's fs shim reports unpacked files too.
+  if (!fs.existsSync(resolved)) {
+    log('error', 'agent runtime child bundle is missing — sessions cannot start', {
+      resolved,
+      packaged: app.isPackaged,
+    });
+  }
+  return resolved;
 }
 
 function createWindow(): void {

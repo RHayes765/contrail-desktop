@@ -2,6 +2,7 @@
   "name": "@contrail/desktop",
   "version": "0.1.0",
   "description": "Contrail — the Salesforce AI harness. Desktop app.",
+  "author": "Ryley Hayes",
   "license": "UNLICENSED",
   "private": true,
   "type": "module",
@@ -12,7 +13,9 @@
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "test": "vitest run",
     "start": "electron .",
-    "smoke": "electron-vite build && electron . --smoke"
+    "smoke": "electron-vite build && electron . --smoke",
+    "pack:dir": "electron-builder --dir --win",
+    "pack:win": "electron-builder --win nsis"
   },
   "dependencies": {
     "@contrail/agent-runtime": "workspace:*",
@@ -31,6 +34,7 @@
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.0.5",
     "electron": "^43.4.0",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "typescript": "^5.9.3",
     "vite": "^8.2.1",
