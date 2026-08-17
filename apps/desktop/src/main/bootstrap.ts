@@ -8,6 +8,7 @@ import {
 import type { HealthView } from '@contrail/shared';
 import { openBrowserViaShell } from './services/connections.js';
 import { NativeApprovalPresenter } from './services/deploys.js';
+import { SettingsService } from './services/settings.js';
 
 /**
  * Main-process bootstrap: verify the two native modules load under Electron's
@@ -67,6 +68,8 @@ export function bootstrap(
     appVersion,
     dataDir: dataDir(),
     dbFile: deps.db.file,
+    // Presence only — never the key. Drives the first-run banner.
+    apiKeyPresent: new SettingsService(deps).keyStatus().present,
     schemaVersion,
     nativeModules: { betterSqlite3: sqlite, keyring },
     connectionCount,

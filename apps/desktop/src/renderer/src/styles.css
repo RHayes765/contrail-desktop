@@ -1198,3 +1198,14 @@ button.danger {
 .env-badge.env-prod { background: var(--env-production); }
 .env-badge.env-dev { background: var(--env-sandbox); }
 .env-badge.env-other { background: var(--env-other); }
+
+/* Settings sits at the bottom of the sidebar, away from the work screens. */
+.sidebar-spacer { flex: 1; }
+
+.setup-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  cursor: default;
+}

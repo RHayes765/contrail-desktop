@@ -9,6 +9,7 @@ import { DiffService, MetadataService } from '../services/metadata.js';
 import { SummaryService } from '../services/summaries.js';
 import { McpConfigService } from '../services/mcpConfig.js';
 import { DeployService } from '../services/deploys.js';
+import { SettingsService } from '../services/settings.js';
 
 /**
  * The complete handler map for the typed IPC registry. Handlers are thin:
@@ -26,12 +27,13 @@ export interface MainServices {
   summaries: SummaryService;
   mcp: McpConfigService;
   deploys: DeployService;
+  settings: SettingsService;
   /** The window whose native dialogs (file picker) we parent. */
   getWindow: () => BrowserWindow | null;
 }
 
 export function makeHandlers(health: HealthView, services: MainServices) {
-  const { connections, projects, sessions, snapshots, metadata, diff, summaries, mcp, deploys } =
+  const { connections, projects, sessions, snapshots, metadata, diff, summaries, mcp, deploys, settings } =
     services;
   return {
     'app:health': (deps: EngineDeps): HealthView => ({
@@ -194,5 +196,9 @@ export function makeHandlers(health: HealthView, services: MainServices) {
       deploys.approve(req.id, req.comment),
     'deploys:reject': (_deps: EngineDeps, req: { id: string; comment?: string }) =>
       deploys.reject(req.id, req.comment),
+
+    'settings:keyStatus': () => settings.keyStatus(),
+    'settings:setKey': (_deps: EngineDeps, req: { key: string }) => settings.setKey(req.key),
+    'settings:clearKey': () => settings.clearKey(),
   };
 }

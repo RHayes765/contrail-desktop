@@ -20,10 +20,29 @@ function safeJson(value: unknown): string {
   }
 }
 
+/**
+ * An extra destination for log lines. The desktop app installs a file sink:
+ * in a packaged GUI app stderr goes nowhere, so without this a crash leaves
+ * the user nothing to send back. Never throws into the caller.
+ */
+export type LogSink = (line: string) => void;
+
+let sink: LogSink | null = null;
+
+export function setLogSink(next: LogSink | null): void {
+  sink = next;
+}
+
 export function log(level: LogLevel, message: string, extra?: unknown): void {
   if (LEVEL_ORDER[level] < LEVEL_ORDER[activeLevel()]) return;
   const suffix = extra === undefined ? '' : ` ${safeJson(extra)}`;
-  process.stderr.write(
-    `[contrail ${new Date().toISOString()}] ${level.toUpperCase()} ${message}${suffix}\n`,
-  );
+  const line = `[contrail ${new Date().toISOString()}] ${level.toUpperCase()} ${message}${suffix}\n`;
+  process.stderr.write(line);
+  if (sink) {
+    try {
+      sink(line);
+    } catch {
+      // A failing log destination must never break the operation being logged.
+    }
+  }
 }

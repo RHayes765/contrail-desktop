@@ -6,6 +6,7 @@ import type {
   ChatEvent,
   ConnectionView,
   ConnectOutcomeView,
+  ApiKeyStatusView,
   CustomMcpServerView,
   DeployRequestView,
   DiffScopeView,
@@ -169,6 +170,11 @@ export const REQUEST_SCHEMAS = {
   'deploys:get': z.object({ id: ID }),
   'deploys:approve': z.object({ id: ID, comment: z.string().max(1000).optional() }),
   'deploys:reject': z.object({ id: ID, comment: z.string().max(1000).optional() }),
+
+  'settings:keyStatus': z.object({}),
+  // The key travels renderer→main ONLY. Nothing ever returns it.
+  'settings:setKey': z.object({ key: z.string().min(10).max(500) }),
+  'settings:clearKey': z.object({}),
 } as const;
 
 export type Channel = keyof typeof REQUEST_SCHEMAS;
@@ -309,6 +315,10 @@ export interface Contracts {
   'deploys:get': { req: { id: string }; res: DeployRequestView };
   'deploys:approve': { req: { id: string; comment?: string }; res: DeployRequestView };
   'deploys:reject': { req: { id: string; comment?: string }; res: DeployRequestView };
+
+  'settings:keyStatus': { req: Record<string, never>; res: ApiKeyStatusView };
+  'settings:setKey': { req: { key: string }; res: ApiKeyStatusView };
+  'settings:clearKey': { req: Record<string, never>; res: ApiKeyStatusView };
 }
 
 // Compile-time check: every contract has a schema and vice versa.

@@ -51,6 +51,8 @@ export interface HealthView {
   dataDir: string;
   /** The database file the engine ACTUALLY opened (better-sqlite3 db.name). */
   dbFile: string;
+  /** Is an Anthropic API key stored? Presence only — the key never crosses IPC. */
+  apiKeyPresent: boolean;
   schemaVersion: number;
   nativeModules: {
     betterSqlite3: { ok: boolean; detail: string };
@@ -562,4 +564,16 @@ export interface DeployRequestView {
   warnings: string[];
   /** Human summary of the terminal outcome; null while pending. */
   resultSummary: string | null;
+}
+
+/**
+ * API-key status for the Settings screen. Presence and problems only — the
+ * key itself is never returned to the renderer, by construction.
+ */
+export interface ApiKeyStatusView {
+  present: boolean;
+  /** Set when the credential store itself failed (locked / policy-blocked). */
+  storeError: string | null;
+  /** Masked hint for recognition, e.g. "sk-ant-…7f2a". Null when absent. */
+  hint: string | null;
 }

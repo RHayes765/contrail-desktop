@@ -1,7 +1,7 @@
-import { app, BrowserWindow, Notification, shell } from 'electron';
+import { app, BrowserWindow, Notification, dialog, shell } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
-import { log } from '@contrail/engine';
+import { dataDir, log, setLogSink } from '@contrail/engine';
 import type { ChatEvent, PushChannel, PushEvents } from '@contrail/shared';
 import { bootstrap, type Bootstrap } from './bootstrap.js';
 import { registerHandlers } from './ipc/registry.js';
@@ -14,6 +14,7 @@ import { DiffService, MetadataService } from './services/metadata.js';
 import { SummaryService } from './services/summaries.js';
 import { McpConfigService, resolveSessionMcp } from './services/mcpConfig.js';
 import { DeployService, type DeployAlert } from './services/deploys.js';
+import { SettingsService } from './services/settings.js';
 
 /**
  * A path a CHILD PROCESS must be able to execute. utilityProcess.fork()
@@ -110,6 +111,52 @@ const HEADLESS =
   MCP_CALL_DIAG !== null ||
   APPROVE_DEMO;
 
+/**
+ * The log FILE. In a packaged GUI app stderr goes nowhere, so without this a
+ * crash leaves the user nothing to send back. Appends to a per-day file under
+ * the data dir and keeps the last week; any failure here is swallowed, because
+ * logging must never be the thing that breaks the app.
+ */
+const LOG_RETENTION_DAYS = 7;
+
+function logFilePath(): string {
+  const day = new Date().toISOString().slice(0, 10);
+  return path.join(dataDir(), 'logs', `contrail-${day}.log`);
+}
+
+function installFileLog(): void {
+  try {
+    const file = logFilePath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    // appendFileSync, NOT a WriteStream: a stream buffers, and app.exit() or a
+    // hard crash discards the buffer — losing exactly the lines that explain
+    // the crash. Log volume is low enough that synchronous appends are free.
+    let broken = false;
+    setLogSink((line) => {
+      if (broken) return;
+      try {
+        fs.appendFileSync(file, line);
+      } catch {
+        broken = true; // disk full / permissions — stop trying, keep running
+      }
+    });
+
+    // Prune old days. Cheap, once per launch.
+    const cutoff = Date.now() - LOG_RETENTION_DAYS * 86_400_000;
+    for (const name of fs.readdirSync(path.dirname(file))) {
+      if (!/^contrail-\d{4}-\d{2}-\d{2}\.log$/.test(name)) continue;
+      const full = path.join(path.dirname(file), name);
+      try {
+        if (fs.statSync(full).mtimeMs < cutoff) fs.unlinkSync(full);
+      } catch {
+        /* a file we cannot stat or remove is not worth failing over */
+      }
+    }
+  } catch {
+    /* no log file — stderr still works for dev */
+  }
+}
+
 function smokeWrite(payload: unknown): void {
   const text = JSON.stringify(payload, null, 2) + '\n';
   if (SMOKE_OUT) fs.writeFileSync(SMOKE_OUT, text);
@@ -126,6 +173,30 @@ if (HEADLESS) {
   process.on('unhandledRejection', (reason) => {
     smokeWrite({ ok: false, error: `unhandled rejection: ${String(reason)}` });
     app.exit(1);
+  });
+}
+
+installFileLog();
+log('info', 'Contrail starting', {
+  version: app.getVersion(),
+  packaged: app.isPackaged,
+  dataDir: dataDir(),
+  electron: process.versions.electron,
+  platform: `${process.platform}-${process.arch}`,
+});
+
+if (!HEADLESS) {
+  // Windowed mode had NO top-level handlers: an unexpected throw died silently
+  // with the window already up. Log it, tell the user, and name the log file.
+  process.on('uncaughtException', (err) => {
+    log('error', 'uncaught exception', { err: String(err), stack: (err as Error)?.stack });
+    dialog.showErrorBox('Contrail hit an unexpected error', `${String(err)}
+
+Log file:
+${logFilePath()}`);
+  });
+  process.on('unhandledRejection', (reason) => {
+    log('error', 'unhandled rejection', { reason: String(reason) });
   });
 }
 
@@ -868,7 +939,18 @@ app.whenReady().then(async () => {
       app.exit(1);
       return;
     }
-    throw err;
+    // Windowed mode: a thrown error here produced NO window and NO dialog —
+    // the app simply appeared not to launch. Say what happened, and where the
+    // log is, before quitting.
+    dialog.showErrorBox(
+      'Contrail could not start',
+      `${String(err)}
+
+Log file:
+${logFilePath()}`,
+    );
+    app.exit(1);
+    return;
   }
 
   if (SMOKE) {
@@ -1239,6 +1321,7 @@ app.whenReady().then(async () => {
     diff,
     summaries: new SummaryService(boot.deps, metadata, diff),
     deploys: deployService,
+    settings: new SettingsService(boot.deps),
     mcp: new McpConfigService(boot.deps, async (serverId, scopedProjectId) => {
       // External tools can't be gated per call — revocation ends the
       // live sessions that resolved the server (see McpConfigService).

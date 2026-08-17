@@ -47,11 +47,12 @@ export {
   type GrantSet,
 } from './core/grants.js';
 export { assertGrant } from './core/gate.js';
-export { log } from './core/log.js';
+export { log, setLogSink, type LogSink } from './core/log.js';
 export {
   probeBetterSqlite3,
   probeKeyring,
   readSecret,
+  readSecretResult,
   writeSecret,
   deleteSecret,
   type NativeProbe,

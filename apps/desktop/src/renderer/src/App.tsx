@@ -12,6 +12,7 @@ import { MetadataScreen } from './screens/Metadata.js';
 import { DiffScreen } from './screens/Diff.js';
 import { ConnectorsScreen } from './screens/Connectors.js';
 import { DeploysScreen } from './screens/Deploys.js';
+import { SettingsScreen } from './screens/Settings.js';
 
 export function App() {
   const [health, setHealth] = useState<HealthView | null>(null);
@@ -74,8 +75,29 @@ export function App() {
         >
           Connectors
         </button>
+        <div className="sidebar-spacer" />
+        <button
+          className={screen === 'settings' ? 'active' : ''}
+          onClick={() => useNav.setState({ screen: 'settings', sessionId: null })}
+        >
+          Settings
+        </button>
       </nav>
       <main className={`content${fullBleed ? ' content-chat' : ''}`}>
+        {health && !health.apiKeyPresent && screen !== 'settings' && (
+          <div className="notice setup-banner">
+            <span>
+              <strong>Add your Anthropic API key to get started.</strong> Sessions cannot run
+              without one — Contrail uses your own key.
+            </span>
+            <button
+              className="primary"
+              onClick={() => useNav.setState({ screen: 'settings', sessionId: null })}
+            >
+              Open Settings →
+            </button>
+          </div>
+        )}
         {error ? (
           <div className="empty">Engine error: {error}</div>
         ) : screen === 'connections' ? (
@@ -96,6 +118,8 @@ export function App() {
           <ConnectorsScreen />
         ) : screen === 'deploys' ? (
           <DeploysScreen />
+        ) : screen === 'settings' ? (
+          <SettingsScreen />
         ) : (
           <ProjectsScreen />
         )}

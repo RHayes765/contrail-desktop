@@ -722,7 +722,7 @@ export class AgentSessionManager {
     const apiKey = readApiKey();
     if (!apiKey) {
       throw new Error(
-        'No Anthropic API key found. Add one in Settings before starting a session.',
+        'No Anthropic API key found. Add one in Settings (bottom of the sidebar) before starting a session.',
       );
     }
 
@@ -812,7 +812,9 @@ export class AgentSessionManager {
 
     const apiKey = readApiKey();
     if (!apiKey) {
-      throw new Error('No Anthropic API key found. Add one in Settings before resuming.');
+      throw new Error(
+        'No Anthropic API key found. Add one in Settings (bottom of the sidebar) before resuming.',
+      );
     }
 
     // Bindings and grants re-resolve from TODAY's state — a resumed session

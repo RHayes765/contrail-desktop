@@ -60,6 +60,29 @@ export function readSecret(service: string, account: string): string | null {
   }
 }
 
+/**
+ * Like readSecret, but distinguishes "nothing stored" from "the credential
+ * store itself failed" (locked, policy-blocked, missing service). readSecret
+ * collapses both to null, which sends a user hunting for a key they already
+ * set — so anything that reports status to a human should use this instead.
+ */
+export function readSecretResult(
+  service: string,
+  account: string,
+): { ok: true; value: string | null } | { ok: false; error: string } {
+  try {
+    return { ok: true, value: entry(service, account).getPassword() };
+  } catch (err) {
+    const message = String(err);
+    // @napi-rs/keyring throws "No matching entry found..." for absence, which
+    // is a normal empty state rather than a store failure.
+    if (/no matching entry|not found|no such/i.test(message)) {
+      return { ok: true, value: null };
+    }
+    return { ok: false, error: message.slice(0, 300) };
+  }
+}
+
 export function writeSecret(service: string, account: string, value: string): void {
   entry(service, account).setPassword(value);
 }
