@@ -21,6 +21,7 @@ import type {
   ProjectMcpView,
   ProjectNoteView,
   ProjectView,
+  SavedSummaryView,
   SessionView,
   SnapshotStatusView,
   TranscriptView,
@@ -81,6 +82,8 @@ export const REQUEST_SCHEMAS = {
     connectionId: ID,
     type: z.enum(['ApexClass', 'ApexTrigger', 'Flow', 'ValidationRule']),
     apiName: z.string().min(1).max(300),
+    /** Regenerate even when a saved summary exists (the Refresh button). */
+    refresh: z.boolean().optional(),
   }),
 
   'diff:scope': z.object({
@@ -99,6 +102,7 @@ export const REQUEST_SCHEMAS = {
     connectionB: ID,
     type: z.enum(['ApexClass', 'ApexTrigger', 'Flow', 'ValidationRule']),
     apiName: z.string().min(1).max(300),
+    refresh: z.boolean().optional(),
   }),
 
   'projects:list': z.object({}),
@@ -216,8 +220,10 @@ export interface Contracts {
       connectionId: string;
       type: 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule';
       apiName: string;
+      refresh?: boolean;
     };
-    res: { summary: string; cached: boolean };
+    /** `cached` = served from storage, i.e. nothing was billed for this call. */
+    res: SavedSummaryView & { cached: boolean };
   };
 
   'diff:scope': {
@@ -234,8 +240,9 @@ export interface Contracts {
       connectionB: string;
       type: 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule';
       apiName: string;
+      refresh?: boolean;
     };
-    res: { summary: string; cached: boolean };
+    res: SavedSummaryView & { cached: boolean };
   };
 
   'projects:list': { req: Record<string, never>; res: ProjectView[] };

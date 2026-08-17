@@ -192,3 +192,19 @@ export interface ServerToggleRecord {
   serverKey: string;
   enabled: boolean;
 }
+
+/** A saved AI summary, addressed by what it describes (see db v11). */
+export interface SavedSummaryRecord {
+  kind: 'artifact' | 'diff';
+  connectionId: string;
+  /** '' for a single-artifact summary; org B for a diff summary. */
+  connectionBId: string;
+  type: string;
+  apiName: string;
+  /** Content hash at generation time — the basis for the staleness check. */
+  contentHash: string | null;
+  contentHashB: string | null;
+  summary: string;
+  model: string | null;
+  createdAt: string;
+}

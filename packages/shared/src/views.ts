@@ -155,6 +155,19 @@ export interface DependencyRefView {
   name: string;
 }
 
+/**
+ * A stored AI summary. `stale` means the thing it describes has changed since
+ * it was written — the summary is still shown (it is usually still mostly
+ * right), but labelled, because silently showing a stale explanation of code
+ * is worse than showing none.
+ */
+export interface SavedSummaryView {
+  summary: string;
+  createdAt: string;
+  model: string | null;
+  stale: boolean;
+}
+
 export interface ArtifactDetailView {
   type: string;
   apiName: string;
@@ -172,6 +185,8 @@ export interface ArtifactDetailView {
   permissionSet: unknown | null;
   /** Parsed node/edge graph — present only for Flow artifacts. */
   flowGraph: FlowGraphView | null;
+  /** A previously generated summary, if one was saved. Survives restarts. */
+  savedSummary: SavedSummaryView | null;
 }
 
 /** Structural mirror of the engine's parsed flow graph (shared stays engine-free). */
@@ -294,6 +309,8 @@ export interface ArtifactDiffView {
   flowGraphB: FlowGraphView | null;
   /** Node-level flow comparison for diagram highlighting (both sides present). */
   flowNodeChanges: { changed: string[]; addedInB: string[]; removedInB: string[] } | null;
+  /** A previously generated diff summary for this org pair, if one was saved. */
+  savedSummary: SavedSummaryView | null;
 }
 
 // ── agent sessions ───────────────────────────────────────────────────────

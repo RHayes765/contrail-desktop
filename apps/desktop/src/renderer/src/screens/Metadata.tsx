@@ -11,6 +11,7 @@ import { ipc } from '../lib/ipc.js';
 import { useConnections } from '../stores/connections.js';
 import { Md } from '../components/thread.js';
 import { FlowDiagram } from '../components/FlowDiagram.js';
+import { SummaryButton, SummaryPanel, useSummary } from '../components/summary.js';
 
 const SUMMARIZABLE = new Set(['ApexClass', 'ApexTrigger', 'Flow', 'ValidationRule']);
 
@@ -98,24 +99,17 @@ export function MetadataScreen() {
   const [detail, setDetail] = useState<ArtifactDetailView | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [rawXml, setRawXml] = useState(false);
-  const [summary, setSummary] = useState<string | null>(null);
-  const [summarizing, setSummarizing] = useState(false);
-  const [summaryError, setSummaryError] = useState<string | null>(null);
 
-  const summarize = () => {
-    if (!connectionId || !detail || !SUMMARIZABLE.has(detail.type)) return;
-    setSummarizing(true);
-    setSummaryError(null);
-    void ipc
-      .invoke('metadata:summarize', {
-        connectionId,
-        type: detail.type as 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule',
-        apiName: detail.apiName,
-      })
-      .then((r) => setSummary(r.summary))
-      .catch((err) => setSummaryError(String(err)))
-      .finally(() => setSummarizing(false));
-  };
+  // The saved summary arrives with the artifact, so reopening it costs nothing.
+  const summary = useSummary(detail?.savedSummary ?? null, (refresh) => {
+    if (!connectionId || !detail) return Promise.reject(new Error('No artifact selected.'));
+    return ipc.invoke('metadata:summarize', {
+      connectionId,
+      type: detail.type as 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule',
+      apiName: detail.apiName,
+      refresh,
+    });
+  });
 
   useEffect(() => {
     void refresh();
@@ -176,8 +170,6 @@ export function MetadataScreen() {
     setDetail(null);
     setDetailError(null);
     setRawXml(false);
-    setSummary(null);
-    setSummaryError(null);
     setSelectedType(type);
     void ipc
       .invoke('metadata:artifact', { connectionId, type, apiName })
@@ -285,11 +277,7 @@ export function MetadataScreen() {
                   </div>
                 </div>
                 <div className="meta-detail-actions">
-                  {SUMMARIZABLE.has(detail.type) && !summary && (
-                    <button disabled={summarizing} onClick={summarize}>
-                      {summarizing ? 'Summarizing…' : 'AI summary'}
-                    </button>
-                  )}
+                  {SUMMARIZABLE.has(detail.type) && <SummaryButton state={summary} />}
                   {(permissionSet || detail.flowGraph) && (
                     <button onClick={() => setRawXml((v) => !v)}>
                       {rawXml ? (detail.flowGraph ? 'Diagram' : 'Parsed view') : 'Raw XML'}
@@ -298,13 +286,7 @@ export function MetadataScreen() {
                 </div>
               </div>
 
-              {summaryError && <div className="notice">{summaryError}</div>}
-              {summary && (
-                <div className="summary-panel">
-                  <div className="dep-label">AI summary</div>
-                  <Md text={summary} />
-                </div>
-              )}
+              <SummaryPanel label="AI summary" state={summary} />
 
               <div className="dep-panel">
                 <DepSection

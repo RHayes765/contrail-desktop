@@ -693,7 +693,7 @@ async function runMcpCallDiag(b: Bootstrap, serverName: string): Promise<void> {
     },
   });
   const sid = initRes.headers.get('mcp-session-id');
-  const sh = sid ? { 'mcp-session-id': sid } : {};
+  const sh: Record<string, string> = sid ? { 'mcp-session-id': sid } : {};
   const initBody = (await parse(initRes)) as { result?: { serverInfo?: { name?: string } } };
   await post({ jsonrpc: '2.0', method: 'notifications/initialized' }, sh);
   const listRes = await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, sh);

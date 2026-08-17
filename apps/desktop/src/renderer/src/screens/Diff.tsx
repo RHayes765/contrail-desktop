@@ -9,6 +9,7 @@ import { ipc } from '../lib/ipc.js';
 import { useConnections } from '../stores/connections.js';
 import { Md } from '../components/thread.js';
 import { FlowDiagram, type FlowHighlights } from '../components/FlowDiagram.js';
+import { SummaryButton, SummaryPanel, useSummary } from '../components/summary.js';
 
 const SUMMARIZABLE = new Set(['ApexClass', 'ApexTrigger', 'Flow', 'ValidationRule']);
 
@@ -405,28 +406,21 @@ function DrillPanel({
 }) {
   const [raw, setRaw] = useState(false);
   const [flowView, setFlowView] = useState<FlowViewMode>('changes');
-  const [summary, setSummary] = useState<string | null>(null);
-  const [summarizing, setSummarizing] = useState(false);
-  const [summaryError, setSummaryError] = useState<string | null>(null);
   const oneSided = drill.presence !== 'both';
   const unreadable = drill.unreadableA || drill.unreadableB;
   const isFlow = drill.flowGraphA != null || drill.flowGraphB != null;
 
-  const summarize = () => {
-    if (!connectionA || !connectionB || !SUMMARIZABLE.has(drill.type)) return;
-    setSummarizing(true);
-    setSummaryError(null);
-    void ipc
-      .invoke('diff:summarize', {
-        connectionA,
-        connectionB,
-        type: drill.type as 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule',
-        apiName: drill.apiName,
-      })
-      .then((r) => setSummary(r.summary))
-      .catch((err) => setSummaryError(String(err)))
-      .finally(() => setSummarizing(false));
-  };
+  // Diff summaries are saved per org pair; either side changing marks it stale.
+  const summary = useSummary(drill.savedSummary, (refresh) => {
+    if (!connectionA || !connectionB) return Promise.reject(new Error('Pick both orgs first.'));
+    return ipc.invoke('diff:summarize', {
+      connectionA,
+      connectionB,
+      type: drill.type as 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule',
+      apiName: drill.apiName,
+      refresh,
+    });
+  });
 
   // Per-version highlight maps: B's diagram marks added+changed, A's marks
   // removed+changed — each diagram flags exactly what a viewer of THAT
@@ -454,11 +448,7 @@ function DrillPanel({
           </div>
         </div>
         <div className="meta-detail-actions">
-          {SUMMARIZABLE.has(drill.type) && !summary && !unreadable && (
-            <button disabled={summarizing} onClick={summarize}>
-              {summarizing ? 'Summarizing…' : 'AI summary'}
-            </button>
-          )}
+          {SUMMARIZABLE.has(drill.type) && !unreadable && <SummaryButton state={summary} />}
           {isFlow && !oneSided && !unreadable ? (
             <div className="seg">
               {(
@@ -489,13 +479,7 @@ function DrillPanel({
         </div>
       </div>
 
-      {summaryError && <div className="notice">{summaryError}</div>}
-      {summary && (
-        <div className="summary-panel">
-          <div className="dep-label">AI summary of the change</div>
-          <Md text={summary} />
-        </div>
-      )}
+      <SummaryPanel label="AI summary of the change" state={summary} />
 
       {/* One-sided flows: the diagram IS the view (its inspector holds the XML). */}
       {isFlow && oneSided && !unreadable && (drill.flowGraphA ?? drill.flowGraphB) && (

@@ -909,6 +909,30 @@ button.danger {
   margin-bottom: 12px;
   font-size: 13px;
 }
+/* An outdated summary is still worth reading, but it must not look current. */
+.summary-panel.stale { border-left-color: var(--env-scratch); }
+.summary-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.summary-meta { display: flex; align-items: baseline; gap: 10px; font-size: 11px; }
+.summary-stale {
+  margin: 6px 0 2px;
+  color: var(--env-scratch);
+  font-size: 12px;
+}
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-size: 11px;
+  cursor: pointer;
+}
+.link-btn:hover:not(:disabled) { text-decoration: underline; }
+.link-btn:disabled { color: var(--text-dim); cursor: default; }
 
 .flow-canvas { display: flex; flex-direction: column; gap: 6px; }
 .flow-scroll {

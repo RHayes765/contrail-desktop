@@ -1,13 +1,20 @@
 import type { EngineDeps } from '@contrail/engine';
+import type { SavedSummaryView } from '@contrail/shared';
 import { readApiKey } from './agentRuntime.js';
 import type { BudgetService } from './budget.js';
 import type { DiffService, MetadataService } from './metadata.js';
+import { artifactHash, readSavedSummary } from './savedSummary.js';
 
 /**
  * One-shot artifact summaries. The content is LOCAL (snapshot) and no tools
  * are needed, so this is a single direct Messages-API call on Haiku — no
- * agent session, no runtime process, ~a tenth of a cent. Cached by content
- * hash: re-summarize only when the artifact actually changed.
+ * agent session, no runtime process, ~a tenth of a cent.
+ *
+ * Summaries are SAVED, not cached: one row per thing summarized, kept across
+ * restarts, and shown again when the artifact is reopened. A stored summary is
+ * returned even when the artifact has since changed — flagged `stale` rather
+ * than quietly regenerated, so the user decides whether a refresh is worth the
+ * money.
  */
 
 const SUMMARY_MODEL = 'claude-haiku-4-5';
@@ -47,38 +54,34 @@ export class SummaryService {
   ) {}
 
   /**
-   * The cache lives in SQLite, not memory. It was a Map, so every restart
-   * re-billed the user for summaries they had already paid for — the keys are
-   * content hashes, so a persisted hit is always still correct.
-   */
-  private cacheGet(key: string): string | null {
-    return this.deps.db.getCachedSummary(key);
-  }
-
-  private cachePut(key: string, summary: string): void {
-    this.deps.db.putCachedSummary(key, summary);
-  }
-
-  /**
    * Diff-aware summary: explains the DIFFERENCE between two orgs' versions.
    * One-sided artifacts fall back to a single-version summary framed as
-   * "exists only in X". Cached by the content-hash pair.
+   * "exists only in X". Saved per org pair; either side changing makes it stale.
    */
   async summarizeDiff(
     connectionA: string,
     connectionB: string,
     type: 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule',
     apiName: string,
-  ): Promise<{ summary: string; cached: boolean }> {
+    refresh = false,
+  ): Promise<SavedSummaryView & { cached: boolean }> {
     if (!this.diff) throw new Error('diff summaries are not wired in this mode');
     const a = this.deps.db.resolveConnection(connectionA);
     const b = this.deps.db.resolveConnection(connectionB);
     if (!a || !b) throw new Error('Both connections must exist.');
-    const hashA = this.deps.db.getArtifact(a.id, type, apiName)?.contentHash ?? 'absent';
-    const hashB = this.deps.db.getArtifact(b.id, type, apiName)?.contentHash ?? 'absent';
-    const cacheKey = `diff:${type}:${apiName}:${hashA}:${hashB}`;
-    const hit = this.cacheGet(cacheKey);
-    if (hit) return { summary: hit, cached: true };
+    const key = {
+      kind: 'diff' as const,
+      connectionId: a.id,
+      connectionBId: b.id,
+      type,
+      apiName,
+    };
+    const hashA = artifactHash(this.deps, a.id, type, apiName);
+    const hashB = artifactHash(this.deps, b.id, type, apiName);
+    if (!refresh) {
+      const saved = readSavedSummary(this.deps, key, hashA, hashB);
+      if (saved) return { ...saved, cached: true };
+    }
 
     const view = this.diff.diffArtifact(a.id, b.id, type, apiName);
     if (view.unreadableA || view.unreadableB) {
@@ -108,23 +111,29 @@ export class SummaryService {
       view.presence === 'both' ? DIFF_SYSTEM_PROMPT : SYSTEM_PROMPT,
       userContent,
     );
-    this.cachePut(cacheKey, summary);
-    return { summary, cached: false };
+    return this.save(key, summary, hashA, hashB);
   }
 
   async summarize(
     connectionId: string,
     type: 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule',
     apiName: string,
-  ): Promise<{ summary: string; cached: boolean }> {
-    const rec = this.deps.db.getArtifact(connectionId, type, apiName);
+    refresh = false,
+  ): Promise<SavedSummaryView & { cached: boolean }> {
+    // Resolve first: rows are keyed by connection id, so calling this with an
+    // alias must not create a second summary for the same artifact.
+    const conn = this.deps.db.resolveConnection(connectionId);
+    if (!conn) throw new Error(`Connection ${connectionId} not found.`);
+    const rec = this.deps.db.getArtifact(conn.id, type, apiName);
     if (!rec) throw new Error(`${type} ${apiName} is not in this org's snapshot index.`);
-    const cacheKey = `${type}:${apiName}:${rec.contentHash ?? 'nohash'}`;
-    const hit = this.cacheGet(cacheKey);
-    if (hit) return { summary: hit, cached: true };
+    const key = { kind: 'artifact' as const, connectionId: conn.id, type, apiName };
+    if (!refresh) {
+      const saved = readSavedSummary(this.deps, key, rec.contentHash);
+      if (saved) return { ...saved, cached: true };
+    }
 
     // artifact() already handles child-block extraction (validation rules).
-    const detail = this.metadata.artifact(connectionId, type, apiName);
+    const detail = this.metadata.artifact(conn.id, type, apiName);
     if (!detail.content) {
       throw new Error('No source on disk to summarize — sync this org first.');
     }
@@ -134,8 +143,46 @@ export class SummaryService {
         (detail.lastModifiedDate ? ` (last modified ${detail.lastModifiedDate})` : '') +
         `:\n\n\`\`\`\n${detail.content.slice(0, MAX_CONTENT_CHARS)}\n\`\`\``,
     );
-    this.cachePut(cacheKey, summary);
-    return { summary, cached: false };
+    return this.save(key, summary, rec.contentHash);
+  }
+
+  /**
+   * Persist a freshly generated summary alongside the hashes it describes, and
+   * hand it back as the view. Fresh output is never stale by definition.
+   */
+  private save(
+    key: {
+      kind: 'artifact' | 'diff';
+      connectionId: string;
+      connectionBId?: string;
+      type: string;
+      apiName: string;
+    },
+    summary: string,
+    contentHash: string | null,
+    contentHashB: string | null = null,
+  ): SavedSummaryView & { cached: boolean } {
+    this.deps.db.putSavedSummary({
+      kind: key.kind,
+      connectionId: key.connectionId,
+      connectionBId: key.connectionBId ?? '',
+      type: key.type,
+      apiName: key.apiName,
+      contentHash,
+      contentHashB,
+      summary,
+      model: SUMMARY_MODEL,
+    });
+    // Read back rather than re-deriving the timestamp: whatever the row says
+    // is what the UI will show on the next load.
+    const saved = readSavedSummary(this.deps, key, contentHash, contentHashB);
+    return {
+      summary,
+      createdAt: saved?.createdAt ?? new Date().toISOString(),
+      model: SUMMARY_MODEL,
+      stale: false,
+      cached: false,
+    };
   }
 
   private async callModel(system: string, userContent: string): Promise<string> {

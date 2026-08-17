@@ -302,9 +302,9 @@ export function ConnectorsScreen() {
                       .join(', ')}
                   </div>
                 )}
-                {testResults[s.id] && (
+                {testResults[s.id] !== undefined && (
                   <div>
-                    <TestResultLine result={testResults[s.id]} />
+                    <TestResultLine result={testResults[s.id]!} />
                   </div>
                 )}
               </div>

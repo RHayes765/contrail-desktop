@@ -5,6 +5,7 @@ import {
   parsePermissionSet,
   queryDependencies,
   semanticDiff,
+  type ConnectionRecord,
   type DiffLimits,
   type EngineDeps,
 } from '@contrail/engine';
@@ -17,6 +18,7 @@ import type {
   MetadataTypeCountView,
 } from '@contrail/shared';
 import type { DiffPair, DiffPairResult } from '../workers/snapshotWorker.js';
+import { readSavedSummary } from './savedSummary.js';
 import type { SnapshotWorkerBridge } from './snapshots.js';
 
 /**
@@ -79,7 +81,7 @@ export class MetadataService {
   }
 
   artifact(connectionId: string, type: string, apiName: string): ArtifactDetailView {
-    this.mustResolve(connectionId);
+    const conn = this.mustResolve(connectionId);
     const rec = this.deps.db.getArtifact(connectionId, type, apiName);
     if (!rec) throw new Error(`${type} ${apiName} is not in this org's snapshot index.`);
 
@@ -135,13 +137,20 @@ export class MetadataService {
       permissionSet:
         rec.type === 'PermissionSet' && content ? parsePermissionSet(content) : null,
       flowGraph: rec.type === 'Flow' && content ? parseFlowGraph(content) : null,
+      // A summary generated in an earlier run comes back with the artifact —
+      // paid work should not vanish when the window closes.
+      savedSummary: readSavedSummary(
+        this.deps,
+        { kind: 'artifact', connectionId: conn.id, type: rec.type, apiName: rec.apiName },
+        rec.contentHash,
+      ),
     };
   }
 
-  private mustResolve(connectionId: string): void {
-    if (!this.deps.db.resolveConnection(connectionId)) {
-      throw new Error(`Connection ${connectionId} not found.`);
-    }
+  private mustResolve(connectionId: string): ConnectionRecord {
+    const conn = this.deps.db.resolveConnection(connectionId);
+    if (!conn) throw new Error(`Connection ${connectionId} not found.`);
+    return conn;
   }
 }
 
@@ -253,6 +262,14 @@ export class DiffService {
       flowGraphA: graphA,
       flowGraphB: graphB,
       flowNodeChanges: graphA && graphB ? diffFlowNodes(graphA, graphB) : null,
+      // Diff summaries belong to the org PAIR, and either side moving makes
+      // the explanation outdated.
+      savedSummary: readSavedSummary(
+        this.deps,
+        { kind: 'diff', connectionId: a.id, connectionBId: b.id, type, apiName },
+        recA ? recA.contentHash : 'absent',
+        recB ? recB.contentHash : 'absent',
+      ),
     };
     if (contentA == null || contentB == null) return base;
 

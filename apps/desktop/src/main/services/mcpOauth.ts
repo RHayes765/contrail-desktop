@@ -150,7 +150,7 @@ async function discoverResourceMetadata(
     });
     const challenge = res.headers.get('www-authenticate') ?? '';
     const match = /resource_metadata="([^"]+)"/i.exec(challenge);
-    if (match) {
+    if (match?.[1]) {
       const meta = await fetchJson(match[1]);
       if (meta) return meta;
     }

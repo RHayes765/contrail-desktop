@@ -73,8 +73,9 @@ export function makeHandlers(health: HealthView, services: MainServices) {
         connectionId: string;
         type: 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule';
         apiName: string;
+        refresh?: boolean;
       },
-    ) => summaries.summarize(req.connectionId, req.type, req.apiName),
+    ) => summaries.summarize(req.connectionId, req.type, req.apiName, req.refresh ?? false),
     'diff:scope': (
       _deps: EngineDeps,
       req: { connectionA: string; connectionB: string; types?: string[] },
@@ -90,8 +91,16 @@ export function makeHandlers(health: HealthView, services: MainServices) {
         connectionB: string;
         type: 'ApexClass' | 'ApexTrigger' | 'Flow' | 'ValidationRule';
         apiName: string;
+        refresh?: boolean;
       },
-    ) => summaries.summarizeDiff(req.connectionA, req.connectionB, req.type, req.apiName),
+    ) =>
+      summaries.summarizeDiff(
+        req.connectionA,
+        req.connectionB,
+        req.type,
+        req.apiName,
+        req.refresh ?? false,
+      ),
 
     'projects:list': () => projects.list(),
     'projects:create': (_deps: EngineDeps, req: { name: string; description?: string }) =>

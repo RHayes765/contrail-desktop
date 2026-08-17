@@ -26,8 +26,8 @@ afterEach(() => {
 });
 
 describe('schema v6', () => {
-  it('fresh databases land on user_version 10', () => {
-    expect(db.schemaVersion()).toBe(10);
+  it('fresh databases land on user_version 11', () => {
+    expect(db.schemaVersion()).toBe(11);
   });
 
   it('creates every desktop table', () => {
@@ -109,8 +109,85 @@ describe('schema v6', () => {
   it('reopening an already-v6 database is a no-op migration', () => {
     db.close();
     const again = new ContrailDb(dbPath);
-    expect(again.schemaVersion()).toBe(10);
+    expect(again.schemaVersion()).toBe(11);
     again.close();
     db = new ContrailDb(dbPath); // for afterEach
+  });
+});
+
+/**
+ * The v10 → v11 UPGRADE step, not just the end state. Fresh databases run
+ * every migration at once, which is exactly the path a teammate's existing
+ * install will NOT take: theirs holds real data at an older version. This
+ * rewinds a live database to the v10 shape and steps it forward.
+ */
+describe('v10 → v11 upgrade on an existing database', () => {
+  it('replaces the hash-keyed cache with addressable summaries, data intact', () => {
+    const conn = db.insertConnection({
+      alias: 'keep-me',
+      instanceUrl: 'https://example.my.salesforce.com',
+      loginUrl: 'https://test.salesforce.com',
+      orgId: '00Dxx',
+      orgName: 'Keep',
+      orgType: 'sandbox',
+      isSandbox: true,
+      username: 'u@example.com',
+      userId: '005xx',
+      grants: {
+        metadata_read: true,
+        metadata_write: false,
+        diagnostics_read: false,
+        data_read: false,
+        data_write: false,
+      },
+    });
+    db.close();
+
+    // Rewind: put the v10 table back, take v11's away, drop the version.
+    const raw = new Database(dbPath);
+    raw.exec(`
+      DROP TABLE IF EXISTS artifact_summaries;
+      CREATE TABLE summary_cache (
+        cache_key  TEXT PRIMARY KEY,
+        summary    TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO summary_cache VALUES ('Flow:Old:hash', 'stale cached text', '2026-01-01T00:00:00Z');
+    `);
+    raw.pragma('user_version = 10');
+    raw.close();
+
+    db = new ContrailDb(dbPath);
+    expect(db.schemaVersion()).toBe(11);
+
+    const check = new Database(dbPath, { readonly: true });
+    const tables = (
+      check.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{
+        name: string;
+      }>
+    ).map((r) => r.name);
+    check.close();
+    expect(tables).toContain('artifact_summaries');
+    expect(tables).not.toContain('summary_cache');
+
+    // Migration must not disturb anything else in the file.
+    expect(db.resolveConnection('keep-me')?.id).toBe(conn.id);
+
+    // And the new table works immediately after the upgrade.
+    const key = {
+      kind: 'artifact' as const,
+      connectionId: conn.id,
+      type: 'Flow',
+      apiName: 'Old',
+    };
+    db.putSavedSummary({
+      ...key,
+      connectionBId: '',
+      contentHash: 'hash',
+      contentHashB: null,
+      summary: 'new text',
+      model: 'claude-haiku-4-5',
+    });
+    expect(db.getSavedSummary(key)?.summary).toBe('new text');
   });
 });

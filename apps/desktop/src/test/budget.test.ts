@@ -117,14 +117,18 @@ describe('the cap is user policy, persisted and validated', () => {
   });
 });
 
-describe('the summary cache survives a restart (it was in-memory)', () => {
-  it('a persisted hit is returned by a fresh service on the same database', () => {
-    db.putCachedSummary('Flow:Foo:hash123', 'the summary');
-    expect(db.getCachedSummary('Flow:Foo:hash123')).toBe('the summary');
+describe('saved summaries survive a restart (they were in-memory)', () => {
+  it('a stored summary is readable by a fresh handle on the same database', () => {
+    const key = { kind: 'artifact' as const, connectionId: 'conn-1', type: 'Flow', apiName: 'Foo' };
+    db.putSavedSummary({ ...key, connectionBId: '', contentHash: 'hash123', contentHashB: null, summary: 'the summary', model: 'claude-haiku-4-5' });
+    expect(db.getSavedSummary(key)?.summary).toBe('the summary');
     // Reopening the same file keeps it — no re-billing after a restart.
     db.close();
     const reopened = new ContrailDb(path.join(tmp, 'test.db'));
-    expect(reopened.getCachedSummary('Flow:Foo:hash123')).toBe('the summary');
+    const saved = reopened.getSavedSummary(key);
+    expect(saved?.summary).toBe('the summary');
+    // The hash rides along as DATA, so staleness stays decidable after restart.
+    expect(saved?.contentHash).toBe('hash123');
     reopened.close();
     db = new ContrailDb(path.join(tmp, 'test.db')); // so afterEach can close
   });

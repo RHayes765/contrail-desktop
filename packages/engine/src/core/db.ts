@@ -15,10 +15,11 @@ import type {
   ProjectDocRecord,
   ProjectNoteRecord,
   ProjectRecord,
+  SavedSummaryRecord,
   ServerToggleRecord,
 } from './types.js';
 
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 
 /**
  * Local SQLite store: connection metadata and the audit log (P0.1); the
@@ -343,6 +344,38 @@ export class ContrailDb {
           );
         `);
       }
+      if (current < 11) {
+        // v11 (desktop-owned): saved AI summaries, ADDRESSABLE by what they
+        // describe rather than by a content hash. v10's summary_cache keyed on
+        // the hash, which made it a pure cache: a changed artifact simply
+        // missed, so a saved summary could never be shown OR reported as
+        // outdated. Storing the hash as DATA instead of identity lets the app
+        // load the summary it has and tell the user it is stale.
+        //
+        // Dropping summary_cache is safe: it shipped hours earlier, is
+        // desktop-owned, and nothing else reads it.
+        this.db.exec(`
+          DROP TABLE IF EXISTS summary_cache;
+          CREATE TABLE IF NOT EXISTS artifact_summaries (
+            id              TEXT PRIMARY KEY,
+            workspace_id    TEXT NOT NULL DEFAULT 'default',
+            kind            TEXT NOT NULL,
+            connection_id   TEXT NOT NULL,
+            -- '' rather than NULL: SQLite treats NULLs as distinct in UNIQUE,
+            -- which would let duplicate rows accumulate (the same trap
+            -- mcp_server_toggles has with a nullable project_id).
+            connection_b_id TEXT NOT NULL DEFAULT '',
+            type            TEXT NOT NULL,
+            api_name        TEXT NOT NULL,
+            content_hash    TEXT,
+            content_hash_b  TEXT,
+            summary         TEXT NOT NULL,
+            model           TEXT,
+            created_at      TEXT NOT NULL,
+            UNIQUE (kind, connection_id, connection_b_id, type, api_name)
+          );
+        `);
+      }
       this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     });
     tx();
@@ -530,20 +563,75 @@ export class ContrailDb {
       .run(key, value);
   }
 
-  getCachedSummary(cacheKey: string): string | null {
+  /**
+   * The saved summary for one artifact (or one org-pair diff), addressed by
+   * what it describes. The hashes it was generated from come back with it so
+   * the caller can decide whether it is still current.
+   */
+  getSavedSummary(key: {
+    kind: 'artifact' | 'diff';
+    connectionId: string;
+    connectionBId?: string;
+    type: string;
+    apiName: string;
+  }): SavedSummaryRecord | null {
     const row = this.db
-      .prepare(`SELECT summary FROM summary_cache WHERE cache_key = ?`)
-      .get(cacheKey) as { summary: string } | undefined;
-    return row?.summary ?? null;
+      .prepare(
+        `SELECT kind, connection_id, connection_b_id, type, api_name, content_hash,
+                content_hash_b, summary, model, created_at
+         FROM artifact_summaries
+         WHERE kind = ? AND connection_id = ? AND connection_b_id = ? AND type = ? AND api_name = ?`,
+      )
+      .get(
+        key.kind,
+        key.connectionId,
+        key.connectionBId ?? '',
+        key.type,
+        key.apiName,
+      ) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      kind: row.kind as SavedSummaryRecord['kind'],
+      connectionId: row.connection_id as string,
+      connectionBId: row.connection_b_id as string,
+      type: row.type as string,
+      apiName: row.api_name as string,
+      contentHash: (row.content_hash as string | null) ?? null,
+      contentHashB: (row.content_hash_b as string | null) ?? null,
+      summary: row.summary as string,
+      model: (row.model as string | null) ?? null,
+      createdAt: row.created_at as string,
+    };
   }
 
-  putCachedSummary(cacheKey: string, summary: string): void {
+  /** Upsert — one saved summary per thing summarized; regenerating replaces it. */
+  putSavedSummary(rec: Omit<SavedSummaryRecord, 'createdAt'>): void {
     this.db
       .prepare(
-        `INSERT INTO summary_cache (cache_key, summary, created_at) VALUES (?, ?, ?)
-         ON CONFLICT (cache_key) DO UPDATE SET summary = excluded.summary`,
+        `INSERT INTO artifact_summaries
+           (id, workspace_id, kind, connection_id, connection_b_id, type, api_name,
+            content_hash, content_hash_b, summary, model, created_at)
+         VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (kind, connection_id, connection_b_id, type, api_name) DO UPDATE SET
+           content_hash = excluded.content_hash,
+           content_hash_b = excluded.content_hash_b,
+           summary = excluded.summary,
+           model = excluded.model,
+           created_at = excluded.created_at`,
       )
-      .run(cacheKey, summary, new Date().toISOString());
+      .run(
+        randomUUID(),
+        rec.kind,
+        rec.connectionId,
+        rec.connectionBId ?? '',
+        rec.type,
+        rec.apiName,
+        rec.contentHash,
+        rec.contentHashB,
+        rec.summary,
+        rec.model,
+        new Date().toISOString(),
+      );
   }
 
   // ── MCP server toggles & custom servers (S8) ───────────────────────────
