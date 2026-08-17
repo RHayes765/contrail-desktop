@@ -36,5 +36,13 @@ export default defineConfig({
   },
   renderer: {
     plugins: [react()],
+    server: {
+      watch: {
+        // Never watch packaged output: `release/` holds ~700 MB and a couple
+        // thousand files (including a 293 MB claude.exe), which would swamp
+        // the dev-server file watcher for no reason.
+        ignored: ['**/release/**'],
+      },
+    },
   },
 });
