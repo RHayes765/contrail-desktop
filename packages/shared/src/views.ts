@@ -536,6 +536,13 @@ export interface DeployChangeView {
   apiName: string;
   change: 'add' | 'modify' | 'unchanged_content' | 'delete';
   warnings: string[];
+  /**
+   * Where the source came from, when it was read from a file rather than
+   * typed as a tool argument. The approver did not author these bytes, so the
+   * review has to name the file and fingerprint it.
+   */
+  sourcePath?: string;
+  sourceSha256?: string;
 }
 
 /**
@@ -573,8 +580,8 @@ export interface DeployRequestView {
   changes: DeployChangeView[];
   destructive: DeployChangeView[];
   /** Flattened display rows from the approval view (DML previews use these). */
-  changeRows: Array<{ label: string; warnings: string[] }>;
-  destructiveRows: Array<{ label: string; warnings: string[] }>;
+  changeRows: Array<{ label: string; warnings: string[]; detail?: string }>;
+  destructiveRows: Array<{ label: string; warnings: string[]; detail?: string }>;
   /** Validation/test result lines (label/value, bad = red). */
   results: Array<{ label: string; value: string; bad?: boolean }>;
   blast: string[];

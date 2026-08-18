@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { flowDeactivationXml } from '../deploy/package.js';
+import { resolveSourceFile } from '../deploy/sources.js';
+import { stagingDir } from '../core/paths.js';
 import type { TestLevel } from '../salesforce/metadataSoap.js';
 import type { Capability } from './types.js';
 import { ok, fail, guarded } from './result.js';
@@ -47,9 +49,23 @@ export const deployCapabilities: Capability[] = [
             api_name: z.string().describe('Full API name; children dotted (Account.MyField__c).'),
             content: z
               .string()
+              .optional()
               .describe(
                 'Full source for file types; for child types, the XML block exactly as ' +
-                  'retrieve_metadata returns it (e.g. <fields>…</fields>).',
+                  'retrieve_metadata returns it (e.g. <fields>…</fields>). Exactly one of ' +
+                  'content or content_file is required.',
+              ),
+            content_file: z
+              .string()
+              .optional()
+              .describe(
+                'Absolute path to a file holding the source, read byte-exactly instead of ' +
+                  'content. PREFER THIS for large components — retyping tens of KB of XML ' +
+                  'risks a silent one-character corruption. The file must sit under ' +
+                  "Contrail's staging directory (the error message prints the exact path), " +
+                  'under its snapshots directory, or under a directory the human listed in ' +
+                  'deploy.allowedSourceRoots. Read at validation time and frozen into the ' +
+                  'approved package, so editing it afterwards cannot change what deploys.',
               ),
           }),
         )
@@ -75,13 +91,46 @@ export const deployCapabilities: Capability[] = [
       guarded(async () => {
         const args = rawArgs as {
           connection: string;
-          components?: Array<{ type: string; api_name: string; content: string }>;
+          components?: Array<{
+            type: string;
+            api_name: string;
+            content?: string;
+            content_file?: string;
+          }>;
           destructive?: Array<{ type: string; api_name: string }>;
           test_level?: TestLevel;
           run_tests?: string[];
         };
         const conn = requireConnection(deps, args.connection, 'validate_deploy');
-        const components = args.components ?? [];
+        // Resolve file-backed components to bytes BEFORE anything else: the
+        // package is built and frozen from what we read here, so this is the
+        // single point where "what will be deployed" is decided.
+        const components = (args.components ?? []).map((c) => {
+          const hasInline = typeof c.content === 'string';
+          if (hasInline && c.content_file) {
+            throw new Error(
+              `${c.type} ${c.api_name}: pass content OR content_file, not both — ` +
+                'Contrail will not guess which one you meant to deploy.',
+            );
+          }
+          if (!hasInline && !c.content_file) {
+            throw new Error(
+              `${c.type} ${c.api_name}: needs content or content_file. For large ` +
+                `components write the source under ${stagingDir()} and pass content_file.`,
+            );
+          }
+          if (c.content_file) {
+            const src = resolveSourceFile(c.content_file, deps.config.deploy.allowedSourceRoots);
+            return {
+              type: c.type,
+              api_name: c.api_name,
+              content: src.content,
+              source_path: src.sourcePath,
+              source_sha256: src.sourceSha256,
+            };
+          }
+          return { type: c.type, api_name: c.api_name, content: c.content as string };
+        });
         const destructive = args.destructive ?? [];
         if (components.length + destructive.length === 0) {
           return fail('Provide at least one component or destructive entry.');

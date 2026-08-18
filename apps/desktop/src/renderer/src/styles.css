@@ -1192,6 +1192,14 @@ button.danger {
   font-size: 12px;
   padding-left: 14px;
 }
+/* Where a component's bytes came from, when they were read off disk. */
+.deploy-source {
+  color: var(--text-dim);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  padding-left: 14px;
+  word-break: break-all;
+}
 .deploy-result {
   display: flex;
   justify-content: space-between;

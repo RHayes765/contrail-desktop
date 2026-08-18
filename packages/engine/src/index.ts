@@ -110,7 +110,10 @@ export { semanticDiff, type DiffLimits } from './diff/semantic.js';
 export {
   fetchArtifactContent,
   readArtifactFromSnapshot,
-  truncateContent,
+  clampContent,
+  DEFAULT_CONTENT_BYTES,
+  MAX_CONTENT_BYTES,
+  CALL_CONTENT_BUDGET,
   splitNamespace,
   CHILD_SPEC,
   type ArtifactContent,

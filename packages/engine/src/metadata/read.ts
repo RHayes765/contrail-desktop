@@ -12,7 +12,18 @@ import { findChildBlock } from '../snapshot/indexer.js';
  * flows) — treat it as engine knowledge, not surface plumbing.
  */
 
-export const MAX_CONTENT_PER_ARTIFACT = 60_000;
+/**
+ * Read budget. The old 60 KB cap was sized for a comfortable tool result, but
+ * it silently amputated the artifacts that most need reading whole — a real
+ * flow runs several times past it, and analysing a fragment of flow XML
+ * produces confident wrong answers rather than obviously incomplete ones.
+ * Reads are cheap and recoverable; a bad diagnosis is not.
+ */
+export const DEFAULT_CONTENT_BYTES = 250_000;
+/** Even an explicit request stops here — one artifact should not eat a context window. */
+export const MAX_CONTENT_BYTES = 2_000_000;
+/** Ceiling across ALL names in one call (names accepts up to 10). */
+export const CALL_CONTENT_BUDGET = 2_000_000;
 
 /** Container file location + child tag for fragment types. */
 export const CHILD_SPEC: Record<string, { parentType: string; tag: string }> = {
@@ -244,9 +255,13 @@ export function splitChildName(type: string, name: string): [string, string] {
   return [name.slice(0, idx), name.slice(idx + 1)];
 }
 
-export function truncateContent(body: string): string {
-  if (body.length <= MAX_CONTENT_PER_ARTIFACT) return body;
-  return `${body.slice(0, MAX_CONTENT_PER_ARTIFACT)}\n… [truncated ${
-    body.length - MAX_CONTENT_PER_ARTIFACT
-  } of ${body.length} chars]`;
+export function clampContent(body: string, allowed: number): { body: string; truncated: boolean } {
+  if (body.length <= allowed) return { body, truncated: false };
+  // Keep the inline marker as well as the structured fields: a model reading
+  // the content must see the cut at the point it happens, not only in a
+  // sibling key it might skim past.
+  return {
+    body: `${body.slice(0, allowed)}\n… [truncated ${body.length - allowed} more characters]`,
+    truncated: true,
+  };
 }

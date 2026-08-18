@@ -63,6 +63,8 @@ const STYLE = `
   .chg { padding: 0.45rem 0.4rem; border-radius: 6px; }
   .chg-label { font-family: ui-monospace, Consolas, monospace; font-size: 0.88rem; }
   .chg-warn { font-size: 0.82rem; color: light-dark(#a32c2c, #e88c7c); margin-top: 0.15rem; }
+  .chg-detail { font-family: ui-monospace, Consolas, monospace; font-size: 0.74rem;
+    color: light-dark(#5a6570, #8b949e); margin-top: 0.15rem; word-break: break-all; }
   .chg.danger { background: #8a1a1a15; }
   .danger-card { border-color: #8a1a1a88; }
   .danger-card h2 { color: light-dark(#a32c2c, #e88c7c); }
@@ -190,10 +192,14 @@ export interface ApprovalPageOptions {
   code: string;
   expiresAt: string;
   org: { alias: string; orgName: string | null; orgType: string; instanceUrl: string };
-  /** Non-destructive changes, one row each. */
-  changes: Array<{ label: string; warnings: string[] }>;
+  /**
+   * Non-destructive changes, one row each. `detail` names the file a
+   * component was read from (validate_deploy content_file) — the approver did
+   * not author those bytes, so the surface has to say where they came from.
+   */
+  changes: Array<{ label: string; warnings: string[]; detail?: string }>;
   /** Destructive changes — rendered first, in red. */
-  destructive: Array<{ label: string; warnings: string[] }>;
+  destructive: Array<{ label: string; warnings: string[]; detail?: string }>;
   /** Validation/test result lines. */
   results: Array<{ label: string; value: string; bad?: boolean }>;
   /** Blast radius lines. */
@@ -212,9 +218,10 @@ export function renderApprovalPage(opts: ApprovalPageOptions): string {
   const badgeClass = isProd ? 'production' : opts.org.orgType === 'sandbox' ? 'sandbox' : 'other';
   const title = opts.kind === 'deploy' ? 'Approve this deploy' : 'Approve this data change';
 
-  const row = (c: { label: string; warnings: string[] }, danger: boolean) => `
+  const row = (c: { label: string; warnings: string[]; detail?: string }, danger: boolean) => `
     <div class="chg${danger ? ' danger' : ''}">
       <div class="chg-label">${esc(c.label)}</div>
+      ${c.detail ? `<div class="chg-detail">${esc(c.detail)}</div>` : ''}
       ${c.warnings.map((w) => `<div class="chg-warn">⚠ ${esc(w)}</div>`).join('')}
     </div>`;
 

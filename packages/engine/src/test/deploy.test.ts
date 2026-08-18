@@ -930,3 +930,116 @@ describe('dml two-step', () => {
     expect(textOf(result)).toContain('data_write');
   });
 });
+
+/**
+ * Deploy-from-file (ported from the plugin). The motivating failure: a 133 KB
+ * flow cannot be re-emitted as a tool argument byte-exactly, and one transposed
+ * character in flow XML is either a failed deploy or a silently wrong
+ * behaviour. These check the bytes that reach the package, not just that the
+ * call succeeded.
+ */
+describe('validate_deploy from a file on disk', () => {
+  function stagingFile(name: string, content: string): string {
+    const dir = path.join(tmp, 'staging');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, content, 'utf8');
+    return file;
+  }
+
+  /** The exact bytes the built package holds for one member. */
+  function deployedFile(entryName: string): string {
+    const b64 = /<met:ZipFile>([^<]+)<\/met:ZipFile>/.exec(lastDeployBody)?.[1] ?? '';
+    const entries = unzipSync(new Uint8Array(Buffer.from(b64, 'base64')));
+    const key = Object.keys(entries).find((k) => k.endsWith(entryName));
+    return key ? Buffer.from(entries[key]!).toString('utf8') : '';
+  }
+
+  it('deploys the file’s bytes exactly — including what a model would mangle', async () => {
+    const xml =
+      '<?xml version="1.0" encoding="UTF-8"?>\r\n' +
+      '<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">\r\n' +
+      '\t<label>Fáçade — “quoted”   </label>\r\n' +
+      `\t<description>${'long '.repeat(2000)}</description>\r\n` +
+      '</CustomObject>';
+    const file = stagingFile('Test_Widget__c.object', xml);
+
+    const result = await invokeCapability(deps, 'validate_deploy', {
+      connection: 'deploy-org',
+      components: [{ type: 'CustomObject', api_name: 'Test_Widget__c', content_file: file }],
+    });
+    expect(result.isError).not.toBe(true);
+    expect(deployedFile('Test_Widget__c.object')).toBe(xml);
+  });
+
+  it('tells the approver which file and fingerprint they are approving', async () => {
+    const file = stagingFile('Approve_Me__c.object', '<CustomObject><label>A</label></CustomObject>');
+    await invokeCapability(deps, 'validate_deploy', {
+      connection: 'deploy-org',
+      components: [{ type: 'CustomObject', api_name: 'Approve_Me__c', content_file: file }],
+    });
+    const view = presenter.views.at(-1)!;
+    const row = view.changes.find((c) => c.label.includes('Approve_Me__c'))!;
+    expect(row.detail).toContain('Approve_Me__c.object');
+    expect(row.detail).toMatch(/sha256 [0-9a-f]{16}/);
+  });
+
+  it('refuses a path outside the allowed roots rather than deploying it', async () => {
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'contrail-elsewhere-'));
+    const secret = path.join(elsewhere, 'secrets.object');
+    fs.writeFileSync(secret, 'ANTHROPIC_API_KEY=sk-ant-real', 'utf8');
+    try {
+      const result = await invokeCapability(deps, 'validate_deploy', {
+        connection: 'deploy-org',
+        components: [{ type: 'CustomObject', api_name: 'Test_Widget__c', content_file: secret }],
+      });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toMatch(/outside every allowed deploy source root/);
+    } finally {
+      fs.rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses both content and content_file, and refuses neither', async () => {
+    const file = stagingFile('Both__c.object', '<CustomObject/>');
+    const both = await invokeCapability(deps, 'validate_deploy', {
+      connection: 'deploy-org',
+      components: [
+        {
+          type: 'CustomObject',
+          api_name: 'Test_Widget__c',
+          content: '<CustomObject><label>different</label></CustomObject>',
+          content_file: file,
+        },
+      ],
+    });
+    expect(both.isError).toBe(true);
+    expect(textOf(both)).toMatch(/not both/);
+
+    const neither = await invokeCapability(deps, 'validate_deploy', {
+      connection: 'deploy-org',
+      components: [{ type: 'CustomObject', api_name: 'Test_Widget__c' }],
+    });
+    expect(neither.isError).toBe(true);
+    expect(textOf(neither)).toMatch(/content or content_file/);
+  });
+
+  it('freezes the bytes at validation — editing the file afterwards changes nothing', async () => {
+    const file = stagingFile('Frozen__c.object', '<CustomObject><label>APPROVED</label></CustomObject>');
+    await invokeCapability(deps, 'validate_deploy', {
+      connection: 'deploy-org',
+      components: [{ type: 'CustomObject', api_name: 'Frozen__c', content_file: file }],
+    });
+    const code = presenter.views.at(-1)!.code;
+
+    fs.writeFileSync(file, '<CustomObject><label>SWAPPED</label></CustomObject>', 'utf8');
+
+    const executed = await invokeCapability(deps, 'execute_deploy', {
+      connection: 'deploy-org',
+      confirmation_code: code,
+    });
+    expect(executed.isError).not.toBe(true);
+    expect(deployedFile('Frozen__c.object')).toContain('APPROVED');
+    expect(deployedFile('Frozen__c.object')).not.toContain('SWAPPED');
+  });
+});

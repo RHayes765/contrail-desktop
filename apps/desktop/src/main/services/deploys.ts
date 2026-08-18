@@ -83,6 +83,16 @@ export class NativeApprovalPresenter implements ApprovalPresenter {
   }
 }
 
+/** One component row as the stored validation summary writes it. */
+interface DeploySummaryRow {
+  type: string;
+  api_name: string;
+  change: string;
+  warnings: string[];
+  source_path?: string;
+  source_sha256?: string;
+}
+
 export class DeployService {
   /**
    * Which session asked for a presentation, PER CONNECTION. A single global
@@ -488,8 +498,8 @@ export class DeployService {
     const conn = this.deps.db.resolveConnection(rec.connectionId);
     if (!conn) return null;
     const summary = parseJson(rec.summaryJson) as {
-      changes?: Array<{ type: string; api_name: string; change: string; warnings: string[] }>;
-      destructive?: Array<{ type: string; api_name: string; change: string; warnings: string[] }>;
+      changes?: Array<DeploySummaryRow>;
+      destructive?: Array<DeploySummaryRow>;
       blast?: string[];
       // DML summaries are a preview object, not component lists.
       operation?: string;
@@ -498,20 +508,21 @@ export class DeployService {
       rows?: unknown[];
     } | null;
     const review = parseJson(rec.reviewJson ?? '') as {
-      changeRows?: Array<{ label: string; warnings: string[] }>;
-      destructiveRows?: Array<{ label: string; warnings: string[] }>;
+      changeRows?: Array<{ label: string; warnings: string[]; detail?: string }>;
+      destructiveRows?: Array<{ label: string; warnings: string[]; detail?: string }>;
       results?: Array<{ label: string; value: string; bad?: boolean }>;
       blast?: string[];
       warnings?: string[];
     } | null;
-    const structured = (
-      rows?: Array<{ type: string; api_name: string; change: string; warnings: string[] }>,
-    ) =>
+    const structured = (rows?: Array<DeploySummaryRow>) =>
       (rows ?? []).map((c) => ({
         type: c.type,
         apiName: c.api_name,
         change: c.change as DeployRequestView['changes'][number]['change'],
         warnings: c.warnings ?? [],
+        ...(c.source_path
+          ? { sourcePath: c.source_path, sourceSha256: c.source_sha256 }
+          : {}),
       }));
     let resultSummary: string | null = null;
     if (rec.resultJson) {

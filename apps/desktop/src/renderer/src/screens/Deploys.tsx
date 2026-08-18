@@ -49,16 +49,22 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
       request.results.length >
     0;
 
+  // A component read from a file was not authored by the approver, so the row
+  // has to say which file and carry its fingerprint.
+  const provenance = (c: { sourcePath?: string; sourceSha256?: string }): string | undefined =>
+    c.sourcePath ? `from ${c.sourcePath}  ·  sha256 ${(c.sourceSha256 ?? '').slice(0, 16)}…` : undefined;
   const rows = request.changes.length
     ? request.changes.map((c) => ({
         label: `${c.change.toUpperCase()}  ${c.type}:${c.apiName}`,
         warnings: c.warnings,
+        detail: provenance(c),
       }))
     : request.changeRows;
   const destructiveRows = request.destructive.length
     ? request.destructive.map((c) => ({
         label: `DELETE  ${c.type}:${c.apiName}`,
         warnings: c.warnings,
+        detail: provenance(c),
       }))
     : request.destructiveRows;
 
@@ -90,6 +96,7 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
           {destructiveRows.map((row, i) => (
             <div key={i} className="deploy-row">
               <div>{row.label}</div>
+              {row.detail && <div className="deploy-source">{row.detail}</div>}
               {row.warnings.map((w, j) => (
                 <div key={j} className="deploy-warning">
                   ⚠ {w}
@@ -106,6 +113,7 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
           {rows.map((row, i) => (
             <div key={i} className="deploy-row">
               <div>{row.label}</div>
+              {row.detail && <div className="deploy-source">{row.detail}</div>}
               {row.warnings.map((w, j) => (
                 <div key={j} className="deploy-warning">
                   ⚠ {w}

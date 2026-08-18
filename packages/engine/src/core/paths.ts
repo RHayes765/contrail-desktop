@@ -37,6 +37,20 @@ export function configPath(): string {
 }
 
 /** Validated deploy zips awaiting (or past) execution. */
+/** Extracted org snapshots. Also a read-only source root for deploys. */
+export function snapshotsDir(): string {
+  return ensureDir(path.join(dataDir(), 'snapshots'));
+}
+
+/**
+ * Scratch space an agent can write edited metadata into and then name in
+ * validate_deploy's content_file. Contrail owns the directory, so it is an
+ * allowed deploy source with no configuration at all.
+ */
+export function stagingDir(): string {
+  return ensureDir(path.join(dataDir(), 'staging'));
+}
+
 export function deploysDir(): string {
   return ensureDir(path.join(dataDir(), 'deploys'));
 }

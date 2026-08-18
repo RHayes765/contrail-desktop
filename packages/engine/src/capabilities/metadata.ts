@@ -6,7 +6,13 @@ import { assertGrant } from '../core/gate.js';
 import { RestClient } from '../salesforce/rest.js';
 import { MetadataSoapClient } from '../salesforce/metadataSoap.js';
 import { queryDependencies } from '../deps/graph.js';
-import { fetchArtifactContent, truncateContent } from '../metadata/read.js';
+import {
+  CALL_CONTENT_BUDGET,
+  DEFAULT_CONTENT_BYTES,
+  MAX_CONTENT_BYTES,
+  clampContent,
+  fetchArtifactContent,
+} from '../metadata/read.js';
 import type { Capability } from './types.js';
 import { ok, fail, guarded } from './result.js';
 
@@ -176,6 +182,18 @@ export const metadataCapabilities: Capability[] = [
         .boolean()
         .optional()
         .describe('Attach one-hop uses/used_by summaries (default true).'),
+      max_bytes: z
+        .number()
+        .int()
+        .min(1_000)
+        .max(MAX_CONTENT_BYTES)
+        .optional()
+        .describe(
+          `Per-artifact content budget. Default ${DEFAULT_CONTENT_BYTES} bytes, which fits a ` +
+            `large flow whole; raise it up to ${MAX_CONTENT_BYTES} to read something bigger. ` +
+            'Whenever content is cut, the result says so and gives bytes_total plus ' +
+            'snapshot_path, so you can read the file directly instead of guessing.',
+        ),
     },
     handler: (deps, rawArgs) =>
       guarded(async () => {
@@ -184,11 +202,14 @@ export const metadataCapabilities: Capability[] = [
           type: string;
           names: string[];
           include_dependencies?: boolean;
+          max_bytes?: number;
         };
         const { db } = deps;
         const conn = requireConnection(deps, args.connection, 'retrieve_metadata');
         if (!TYPE_RE.test(args.type)) return fail('invalid metadata type');
         const includeDeps = args.include_dependencies !== false;
+        const perArtifact = Math.min(args.max_bytes ?? DEFAULT_CONTENT_BYTES, MAX_CONTENT_BYTES);
+        let budgetLeft = CALL_CONTENT_BUDGET;
         const results: Array<Record<string, unknown>> = [];
         for (const name of args.names) {
           if (!NAME_RE.test(name)) {
@@ -197,12 +218,28 @@ export const metadataCapabilities: Capability[] = [
           }
           try {
             const content = await fetchArtifactContent(deps, conn, args.type, name);
+            const allowed = Math.max(0, Math.min(perArtifact, budgetLeft));
+            const cut = clampContent(content.body, allowed);
+            budgetLeft -= cut.body.length;
             const entry: Record<string, unknown> = {
               api_name: name,
               type: args.type,
-              content: truncateContent(content.body),
+              content: cut.body,
               source: content.source,
+              bytes_total: content.body.length,
+              bytes_returned: cut.body.length,
+              truncated: cut.truncated,
             };
+            if (cut.truncated) {
+              entry.truncated_reason = allowed < perArtifact ? 'call_budget' : 'max_bytes';
+              // Point at the file so the caller can finish the job itself
+              // rather than re-reading in blind slices.
+              const rec = db.getArtifact(conn.id, args.type, name);
+              const onDisk = rec?.filePath
+                ? deps.store.currentFilePath(conn.id, rec.filePath)
+                : null;
+              if (onDisk) entry.snapshot_path = onDisk;
+            }
             if (content.note) entry.note = content.note;
             if (includeDeps) {
               entry.uses = db
