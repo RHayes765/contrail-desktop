@@ -40,7 +40,9 @@ let deps: EngineDeps;
 let connId: string;
 let presenter: RecordingPresenter;
 let openedUrls: string[];
-let deployCounter: { validations: number; realDeploys: number };
+let deployCounter: { validations: number; realDeploys: number; quickDeploys: number };
+let lastQuickValidationId = '';
+let failNextQuickDeploy = false;
 let lastDeployBody = '';
 let failNextValidation = false;
 
@@ -103,6 +105,31 @@ function stubSalesforce(): void {
             `<deployResponse xmlns="http://soap.sforce.com/2006/04/metadata">
                <result><id>0Af-${checkOnly ? 'check' : 'real'}-${deployCounter.validations}-${deployCounter.realDeploys}</id></result>
              </deployResponse>`,
+          ),
+        );
+      }
+      if (body.includes('<met:deployRecentValidation>')) {
+        if (failNextQuickDeploy) {
+          failNextQuickDeploy = false;
+          // The org's real refusal shape: a SOAP fault, e.g. validation
+          // expired or coverage insufficient.
+          return new Response(
+            soapEnvelope(
+              `<soapenv:Fault><faultcode>INVALID_ID_FIELD</faultcode>
+               <faultstring>The validation is no longer available for quick deployment</faultstring>
+               </soapenv:Fault>`,
+            ),
+            { status: 500 },
+          );
+        }
+        deployCounter.quickDeploys += 1;
+        lastQuickValidationId =
+          /<met:validationId>([^<]+)<\/met:validationId>/.exec(body)?.[1] ?? '';
+        return new Response(
+          soapEnvelope(
+            `<deployRecentValidationResponse xmlns="http://soap.sforce.com/2006/04/metadata">
+               <result>0Af-quick-${deployCounter.quickDeploys}</result>
+             </deployRecentValidationResponse>`,
           ),
         );
       }
@@ -208,7 +235,9 @@ beforeEach(async () => {
   db = new ContrailDb(path.join(tmp, 'test.db'));
   store = new SnapshotStore(path.join(tmp, 'snapshots'));
   openedUrls = [];
-  deployCounter = { validations: 0, realDeploys: 0 };
+  deployCounter = { validations: 0, realDeploys: 0, quickDeploys: 0 };
+  lastQuickValidationId = '';
+  failNextQuickDeploy = false;
   const tokens = new MemoryTokenStore();
   const grants = emptyGrantSet();
   grants.metadata_read = true;
@@ -1041,5 +1070,66 @@ describe('validate_deploy from a file on disk', () => {
     expect(executed.isError).not.toBe(true);
     expect(deployedFile('Frozen__c.object')).toContain('APPROVED');
     expect(deployedFile('Frozen__c.object')).not.toContain('SWAPPED');
+  });
+});
+
+/**
+ * Quick deploy (S10). When the validation ran tests, execution asks the org to
+ * deploy the package it ALREADY validated (deployRecentValidation) — tests are
+ * not re-run and, by the org's own guarantee, the deployed bytes are exactly
+ * the validated ones. The approval ritual is untouched: same code, same page,
+ * same claim machinery. Only the dispatch differs.
+ */
+describe('quick deploy of a validated package', () => {
+  async function validateAndApproveCode(extra: Record<string, unknown> = {}) {
+    const result = await validate(extra);
+    expect(result.isError).not.toBe(true);
+    return presenter.views.at(-1)!.code;
+  }
+
+  it('a tests-ran validation executes via deployRecentValidation — the zip is not re-sent', async () => {
+    const code = await validateAndApproveCode({
+      test_level: 'RunSpecifiedTests',
+      run_tests: ['InvoiceServiceTest'],
+    });
+    const before = deployCounter.realDeploys;
+    const result = await invokeCapability(deps, 'execute_deploy', {
+      connection: 'deploy-org',
+      confirmation_code: code,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(deployCounter.quickDeploys).toBe(1);
+    expect(deployCounter.realDeploys).toBe(before); // no second full deploy
+    // The org was pointed at the validation the human approved, not a fresh package.
+    expect(lastQuickValidationId).toMatch(/^0Af-check/);
+    const text = textOf(result);
+    expect(text).toContain('"quick_deploy": true');
+  });
+
+  it('a NoTestRun validation is not eligible — the stored zip deploys classically', async () => {
+    const code = await validateAndApproveCode(); // default NoTestRun
+    await invokeCapability(deps, 'execute_deploy', {
+      connection: 'deploy-org',
+      confirmation_code: code,
+    });
+    expect(deployCounter.quickDeploys).toBe(0);
+    expect(deployCounter.realDeploys).toBe(1);
+  });
+
+  it('an org-side refusal falls back to the zip and says so — never a dead end', async () => {
+    const code = await validateAndApproveCode({
+      test_level: 'RunSpecifiedTests',
+      run_tests: ['InvoiceServiceTest'],
+    });
+    failNextQuickDeploy = true; // validation "expired" on the org side
+    const result = await invokeCapability(deps, 'execute_deploy', {
+      connection: 'deploy-org',
+      confirmation_code: code,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(deployCounter.realDeploys).toBe(1); // the fallback ran
+    const text = textOf(result);
+    expect(text).toContain('"quick_deploy": false');
+    expect(text).toContain('quick_deploy_fallback');
   });
 });
