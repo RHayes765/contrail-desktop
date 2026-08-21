@@ -7,6 +7,7 @@ import type {
   ConnectionView,
   ConnectOutcomeView,
   ApiKeyStatusView,
+  ApiKeyValidationView,
   BudgetStatusView,
   CustomMcpServerView,
   DeployRequestView,
@@ -179,6 +180,7 @@ export const REQUEST_SCHEMAS = {
   'settings:keyStatus': z.object({}),
   // The key travels renderer→main ONLY. Nothing ever returns it.
   'settings:setKey': z.object({ key: z.string().min(10).max(500) }),
+  'settings:validateKey': z.object({}),
   'settings:clearKey': z.object({}),
   'settings:budget': z.object({}),
   'settings:setBudgetCap': z.object({ capUsd: z.number().min(0).max(1000) }),
@@ -328,6 +330,7 @@ export interface Contracts {
 
   'settings:keyStatus': { req: Record<string, never>; res: ApiKeyStatusView };
   'settings:setKey': { req: { key: string }; res: ApiKeyStatusView };
+  'settings:validateKey': { req: Record<string, never>; res: ApiKeyValidationView };
   'settings:clearKey': { req: Record<string, never>; res: ApiKeyStatusView };
   'settings:budget': { req: Record<string, never>; res: BudgetStatusView };
   'settings:setBudgetCap': { req: { capUsd: number }; res: BudgetStatusView };

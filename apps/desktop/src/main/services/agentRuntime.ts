@@ -164,6 +164,20 @@ export function scrubCodes(text: string): string {
   return text.replace(CONFIRMATION_CODE, '[code]');
 }
 
+/**
+ * API-key / token shapes a user might paste into chat. "sk-ant-…" is the BYO
+ * key itself; the broader "sk-…" catches other provider keys. Scrubbed from
+ * BOTH the transcript and the text forwarded to the model — an assistant that
+ * never sees a key cannot echo it into a reply, a log, or the SDK's persisted
+ * history. Requires ≥16 trailing chars so a bare "sk-" in prose is left alone.
+ */
+const API_KEY_SHAPE = /\bsk-(?:ant-)?[A-Za-z0-9_-]{16,}/g;
+
+/** Scrub every secret shape from free text: confirmation codes AND keys/tokens. */
+export function scrubSecrets(text: string): string {
+  return scrubCodes(text).replace(API_KEY_SHAPE, '[redacted-key]');
+}
+
 /** The LAST code in the message wins (a correction supersedes a typo). */
 export function extractConfirmationCode(text: string): string | null {
   const matches = text.match(CONFIRMATION_CODE);
@@ -981,7 +995,10 @@ export class AgentSessionManager {
     // receive the scrubbed text. executeCapability substitutes at call time.
     const code = extractConfirmationCode(text);
     if (code) entry.run.provideCode(code);
-    const scrubbed = scrubCodes(text);
+    // Scrub codes AND any pasted API key/token before it touches disk or the
+    // model — the code is extracted above; keys have no legitimate reason to
+    // reach either.
+    const scrubbed = scrubSecrets(text);
     this.writeTranscript(entry, { kind: 'user', text: scrubbed });
     if (!entry.ready) {
       // The child hasn't confirmed init yet — a send posted now would arrive

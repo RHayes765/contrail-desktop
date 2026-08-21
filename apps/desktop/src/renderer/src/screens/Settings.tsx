@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { ApiKeyStatusView, BudgetStatusView } from '@contrail/shared';
+import type { ApiKeyStatusView, ApiKeyValidationView, BudgetStatusView } from '@contrail/shared';
 import { ipc } from '../lib/ipc.js';
 
 /**
@@ -107,6 +107,7 @@ export function SettingsScreen() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [validation, setValidation] = useState<ApiKeyValidationView | null>(null);
 
   const load = async (): Promise<void> => {
     try {
@@ -120,15 +121,30 @@ export function SettingsScreen() {
     void load();
   }, []);
 
+  const validate = async (): Promise<void> => {
+    setBusy(true);
+    setValidation(null);
+    try {
+      setValidation(await ipc.invoke('settings:validateKey', {}));
+    } catch (err) {
+      setError(String(err).replace(/^Error:\s*/, ''));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const save = async (): Promise<void> => {
     setBusy(true);
     setError(null);
     setMessage(null);
+    setValidation(null);
     try {
       const next = await ipc.invoke('settings:setKey', { key: draft });
       setStatus(next);
       setDraft(''); // never keep the key in renderer memory longer than needed
-      setMessage('Key saved to your OS keychain. New sessions will use it.');
+      setMessage('Key saved to your OS keychain.');
+      // Immediately prove it works — the whole point of onboarding.
+      await validate();
     } catch (err) {
       setError(String(err).replace(/^Error:\s*/, ''));
     } finally {
@@ -142,6 +158,7 @@ export function SettingsScreen() {
     setMessage(null);
     try {
       setStatus(await ipc.invoke('settings:clearKey', {}));
+      setValidation(null);
       setMessage('Key removed.');
     } catch (err) {
       setError(String(err));
@@ -196,11 +213,22 @@ export function SettingsScreen() {
 
         {error && <div className="notice">{error}</div>}
         {message && <p className="hint">{message}</p>}
+        {validation && (
+          <p className={`key-check ${validation.ok ? 'ok' : validation.reachable ? 'bad' : 'unknown'}`}>
+            {validation.ok ? '✓ ' : validation.reachable ? '✗ ' : '… '}
+            {validation.message}
+          </p>
+        )}
 
         <div className="form-actions">
           <button className="primary" disabled={busy || !draft.trim()} onClick={() => void save()}>
-            {busy ? 'Saving…' : 'Save key'}
+            {busy ? 'Working…' : 'Save key'}
           </button>
+          {status?.present && (
+            <button disabled={busy} onClick={() => void validate()}>
+              {busy ? 'Checking…' : 'Test stored key'}
+            </button>
+          )}
           {status?.present && (
             <button className="ghost-danger" disabled={busy} onClick={() => void clear()}>
               Remove stored key

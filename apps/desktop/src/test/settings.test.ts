@@ -117,3 +117,67 @@ describe('a broken credential store is distinguishable from an empty one', () =>
     expect(status.storeError).toMatch(/locked by policy/);
   });
 });
+
+describe('live key validation (M6 onboarding safety net)', () => {
+  const KEY_TO_CHECK = 'sk-ant-api03-VALID-LOOKING-KEY-abcd1234';
+
+  it('accepts a key Anthropic returns 200 for — and never sends the key into the view or audit', async () => {
+    const svc = makeService();
+    svc.setKey(KEY_TO_CHECK);
+    let sentKey: string | null = null;
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      expect(String(url)).toContain('/v1/models');
+      sentKey = (init.headers as Record<string, string>)['x-api-key'] ?? null;
+      return { status: 200 } as Response;
+    });
+    const result = await svc.validateKey();
+    expect(result.ok).toBe(true);
+    expect(result.reachable).toBe(true);
+    expect(result.status).toBe(200);
+    // The key WAS used to authenticate...
+    expect(sentKey).toBe(KEY_TO_CHECK);
+    // ...but never leaks into what the renderer or the audit trail sees.
+    expect(JSON.stringify(result)).not.toContain('VALID-LOOKING-KEY');
+    const validationAudit = audits.find((a) => a.event === 'settings.api_key_validated');
+    expect(JSON.stringify(validationAudit)).not.toContain('VALID-LOOKING-KEY');
+    vi.unstubAllGlobals();
+  });
+
+  it('calls a rejected key rejected, distinctly from unreachable', async () => {
+    const svc = makeService();
+    svc.setKey(KEY_TO_CHECK);
+    vi.stubGlobal('fetch', async () => ({ status: 401 }) as Response);
+    const rejected = await svc.validateKey();
+    expect(rejected.ok).toBe(false);
+    expect(rejected.reachable).toBe(true);
+    expect(rejected.message).toMatch(/rejected/i);
+    vi.unstubAllGlobals();
+  });
+
+  it('a network failure is reported as unreachable, NOT as a bad key', async () => {
+    const svc = makeService();
+    svc.setKey(KEY_TO_CHECK);
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('getaddrinfo ENOTFOUND api.anthropic.com');
+    });
+    const offline = await svc.validateKey();
+    expect(offline.ok).toBe(false);
+    expect(offline.reachable).toBe(false);
+    expect(offline.message).toMatch(/reach|offline|blocked/i);
+    vi.unstubAllGlobals();
+  });
+
+  it('refuses to validate when nothing is stored — no network call at all', async () => {
+    const svc = makeService();
+    let called = false;
+    vi.stubGlobal('fetch', async () => {
+      called = true;
+      return { status: 200 } as Response;
+    });
+    const result = await svc.validateKey();
+    expect(result.ok).toBe(false);
+    expect(result.message).toMatch(/no key/i);
+    expect(called).toBe(false);
+    vi.unstubAllGlobals();
+  });
+});

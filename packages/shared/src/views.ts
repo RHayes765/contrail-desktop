@@ -602,6 +602,21 @@ export interface ApiKeyStatusView {
   hint: string | null;
 }
 
+/**
+ * The result of a LIVE check against Anthropic — the onboarding safety net so
+ * a teammate learns a bad key immediately, not at their first session.
+ * `ok` = Anthropic accepted the key. `reachable` distinguishes "rejected" from
+ * "couldn't even ask" (offline/blocked), which are very different fixes.
+ */
+export interface ApiKeyValidationView {
+  ok: boolean;
+  reachable: boolean;
+  /** HTTP status Anthropic returned, when we got that far. */
+  status: number | null;
+  /** Human-readable outcome — never contains the key. */
+  message: string;
+}
+
 /** Rolling-window AI spend against the user's daily cap. */
 export interface BudgetStatusView {
   capUsd: number;

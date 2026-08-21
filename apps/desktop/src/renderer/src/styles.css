@@ -1257,3 +1257,9 @@ button.danger {
   transition: width 200ms ease;
 }
 .budget-fill.hot { background: var(--env-production); }
+
+/* Live API-key validation result on the Settings screen. */
+.key-check { font-size: 13px; margin: 8px 0 0; }
+.key-check.ok { color: var(--env-sandbox); }
+.key-check.bad { color: var(--env-production); }
+.key-check.unknown { color: var(--env-scratch); }

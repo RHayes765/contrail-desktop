@@ -5,6 +5,7 @@ import {
   isSafeAuthUrl,
   redactSensitive,
   scrubCodes,
+  scrubSecrets,
   type SessionSpec,
 } from '../main/services/agentRuntime.js';
 import type { ProjectService } from '../main/services/projects.js';
@@ -238,6 +239,21 @@ describe('redaction (invariant 2)', () => {
     expect(scrubCodes('the code is WXYZ-2345, run it')).toBe('the code is [code], run it');
     // Codes alphabet excludes I, L, O, 0, 1 — lookalike text survives.
     expect(scrubCodes('FILE-NAME stays')).toBe('FILE-NAME stays');
+  });
+
+  it('scrubSecrets strips a pasted API key from user text before it reaches disk or the model', () => {
+    const pasted = 'here is my key sk-ant-api03-abcdEFGH1234ijklMNOP5678 use it';
+    const clean = scrubSecrets(pasted);
+    expect(clean).not.toContain('sk-ant-api03-abcdEFGH1234ijklMNOP5678');
+    expect(clean).toContain('[redacted-key]');
+    // A bare "sk-" in prose is not a key and must survive untouched.
+    expect(scrubSecrets('the sk- prefix denotes a secret key')).toBe(
+      'the sk- prefix denotes a secret key',
+    );
+    // Codes AND keys in the same message are both caught.
+    const both = scrubSecrets('code WXYZ-2345 and key sk-ant-abcdefghijklmnop1234');
+    expect(both).toContain('[code]');
+    expect(both).toContain('[redacted-key]');
   });
 });
 

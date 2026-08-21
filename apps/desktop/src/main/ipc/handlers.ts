@@ -210,6 +210,7 @@ export function makeHandlers(health: HealthView, services: MainServices) {
 
     'settings:keyStatus': () => settings.keyStatus(),
     'settings:setKey': (_deps: EngineDeps, req: { key: string }) => settings.setKey(req.key),
+    'settings:validateKey': () => settings.validateKey(),
     'settings:clearKey': () => settings.clearKey(),
     'settings:budget': () => budget.status(),
     'settings:setBudgetCap': (_deps: EngineDeps, req: { capUsd: number }) =>
