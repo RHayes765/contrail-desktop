@@ -577,6 +577,16 @@ export class AgentSessionManager {
     if (orphaned > 0) {
       log('warn', 'closed orphaned agent sessions from a previous run', { count: orphaned });
     }
+    // A crash cannot be told from a walk-away, so the same rule applies here:
+    // rows where nothing was ever said are residue, not history. This also
+    // sweeps empties left by builds that predate the discard-on-teardown rule.
+    const empties = this.deps.db.listEmptyAgentSessions();
+    for (const rec of empties) {
+      this.discardSessionFiles(this.deps.db.deleteAgentSession(rec.id));
+    }
+    if (empties.length > 0) {
+      log('info', 'discarded sessions with no conversation', { count: empties.length });
+    }
 
     /**
      * The SDK's history store. KNOW WHAT LIVES HERE: full conversation
@@ -1108,13 +1118,88 @@ export class AgentSessionManager {
     // A tool call held for approval must never outlive its session unsettled.
     this.deployService?.releaseHeldForSession(entry.sessionId);
     this.live.delete(entry.sessionId);
-    this.deps.db.finishAgentSession(entry.sessionId, entry.usage, status);
     entry.child.kill();
     entry.transcript?.end();
     entry.transcript = null;
-    // The cwd deliberately survives: it lives under dataDir/sessions/{id} and
-    // the SDK keys resumable history by it. Session deletion (future) cleans it.
+
+    // Nothing was ever said: opening a chat and walking away must not leave a
+    // row behind. sentFirstMessage is authoritative here (a resumed session
+    // sets it true at spawn, so real history is never mistaken for empty);
+    // the usage check is belt-and-braces against a turn that somehow billed.
+    const spentNothing =
+      entry.usage.inputTokens === 0 &&
+      entry.usage.outputTokens === 0 &&
+      entry.usage.costUsd === 0;
+    if (!entry.sentFirstMessage && spentNothing) {
+      this.discardSessionFiles(this.deps.db.deleteAgentSession(entry.sessionId));
+      this.push('sessions:changed', { projectId: entry.projectId });
+      return;
+    }
+
+    this.deps.db.finishAgentSession(entry.sessionId, entry.usage, status);
+    // The cwd deliberately survives a normal end: it lives under
+    // dataDir/sessions/{id} and the SDK keys resumable history by it.
     this.push('sessions:changed', { projectId: entry.projectId });
+  }
+
+  /**
+   * Remove everything a session owned on disk. Best-effort by design: a
+   * locked or already-gone file must never turn "delete this session" into an
+   * error the user cannot clear.
+   */
+  private discardSessionFiles(rec: AgentSessionRecord | null): void {
+    if (!rec) return;
+    const targets = [
+      rec.transcriptPath,
+      path.join(dataDir(), 'sessions', rec.id), // cwd + anything keyed by id
+    ].filter((p): p is string => typeof p === 'string' && p.length > 0);
+    for (const target of targets) {
+      try {
+        fs.rmSync(target, { recursive: true, force: true });
+      } catch (err) {
+        log('warn', 'could not remove session file', { sessionId: rec.id, target, err: String(err) });
+      }
+    }
+  }
+
+  /**
+   * Delete a session outright — the human's cleanup control. A live session is
+   * ended first (its child, held approvals, and transcript stream all wind
+   * down through the normal path) so nothing keeps running against a row that
+   * no longer exists.
+   */
+  async deleteSession(sessionId: string): Promise<void> {
+    const rec = this.deps.db.getAgentSession(sessionId);
+    if (!rec) return; // already gone — deleting twice is fine
+    if (this.live.has(sessionId)) {
+      this.push('session:event', {
+        sessionId,
+        event: { type: 'session_ended', reason: 'This session was deleted.' },
+      });
+      await this.end(sessionId);
+    }
+    // end() may already have discarded it (empty session) — re-read.
+    const remaining = this.deps.db.deleteAgentSession(sessionId);
+    this.discardSessionFiles(remaining ?? rec);
+    this.deps.audit.record('session.deleted', {
+      tool: 'desktop_project_screen',
+      outcome: 'success',
+      detail: { sessionId, projectId: rec.projectId },
+    });
+    this.push('sessions:changed', { projectId: rec.projectId });
+  }
+
+  /** Rename a session. A named session is one the human wants kept. */
+  rename(sessionId: string, title: string): SessionView {
+    const trimmed = title.trim();
+    if (!trimmed) throw new Error('Give the session a name.');
+    const rec = this.deps.db.getAgentSession(sessionId);
+    if (!rec) throw new Error(`Session ${sessionId} not found.`);
+    this.deps.db.setAgentSessionTitle(sessionId, trimmed.slice(0, 120));
+    this.push('sessions:changed', { projectId: rec.projectId });
+    const updated = this.deps.db.getAgentSession(sessionId);
+    if (!updated) throw new Error('Session vanished during rename.');
+    return sessionView(updated);
   }
 
   private async onChildMessage(entry: LiveSession, raw: ToMain): Promise<void> {

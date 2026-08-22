@@ -144,6 +144,8 @@ export const REQUEST_SCHEMAS = {
   'sessions:end': z.object({ sessionId: ID }),
   'sessions:transcript': z.object({ sessionId: ID }),
   'sessions:resume': z.object({ sessionId: ID }),
+  'sessions:delete': z.object({ sessionId: ID }),
+  'sessions:rename': z.object({ sessionId: ID, title: z.string().min(1).max(120) }),
 
   'mcp:project': z.object({ projectId: ID }),
   'mcp:setToggle': z.object({
@@ -293,6 +295,8 @@ export interface Contracts {
   'sessions:end': { req: { sessionId: string }; res: { ok: boolean } };
   'sessions:transcript': { req: { sessionId: string }; res: TranscriptView };
   'sessions:resume': { req: { sessionId: string }; res: SessionView };
+  'sessions:delete': { req: { sessionId: string }; res: { ok: boolean } };
+  'sessions:rename': { req: { sessionId: string; title: string }; res: SessionView };
 
   'mcp:project': { req: { projectId: string }; res: ProjectMcpView };
   'mcp:setToggle': {

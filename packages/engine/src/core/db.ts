@@ -1038,6 +1038,38 @@ export class ContrailDb {
     this.db.prepare(`UPDATE sessions SET transcript_path = ? WHERE id = ?`).run(transcriptPath, id);
   }
 
+  /**
+   * Remove a session row, returning what it was so the caller can delete the
+   * files it owned (transcript, cwd). Returns null when the row is already
+   * gone — deleting twice is not an error.
+   */
+  deleteAgentSession(id: string): AgentSessionRecord | null {
+    const rec = this.getAgentSession(id);
+    if (!rec) return null;
+    this.db.prepare(`DELETE FROM sessions WHERE id = ?`).run(id);
+    return rec;
+  }
+
+  /**
+   * Sessions where nothing was ever said: no title (set from the first user
+   * message), no tokens, no cost. These are the residue of opening a chat and
+   * walking away — they carry no history worth resuming and only clutter the
+   * list, so the app discards rather than keeps them.
+   *
+   * A RENAMED session has a title and therefore survives, which is the right
+   * call: naming something is a statement that you want it.
+   */
+  listEmptyAgentSessions(): AgentSessionRecord[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT ${ContrailDb.SESSION_COLS} FROM sessions
+           WHERE title IS NULL AND input_tokens = 0 AND output_tokens = 0 AND cost_usd = 0`,
+        )
+        .all() as Parameters<ContrailDb['sessionFromRow']>[0][]
+    ).map((r) => this.sessionFromRow(r));
+  }
+
   // ── app locks & snapshot runs (v6, desktop-owned) ──────────────────────
 
   /**

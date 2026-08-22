@@ -163,6 +163,12 @@ export function makeHandlers(health: HealthView, services: MainServices) {
       sessions.readTranscript(req.sessionId),
     'sessions:resume': (_deps: EngineDeps, req: { sessionId: string }) =>
       sessions.resume(req.sessionId),
+    'sessions:delete': async (_deps: EngineDeps, req: { sessionId: string }) => {
+      await sessions.deleteSession(req.sessionId);
+      return { ok: true };
+    },
+    'sessions:rename': (_deps: EngineDeps, req: { sessionId: string; title: string }) =>
+      sessions.rename(req.sessionId, req.title),
 
     'mcp:project': (_deps: EngineDeps, req: { projectId: string }) =>
       mcp.projectView(req.projectId),

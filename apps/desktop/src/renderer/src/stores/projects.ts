@@ -34,6 +34,8 @@ interface ProjectsState {
   /** Returns true on success — callers must NOT discard drafts on false. */
   addNote: (projectId: string, body: string) => Promise<boolean>;
   refreshSessions: (projectId: string) => Promise<void>;
+  deleteSession: (projectId: string, sessionId: string) => Promise<boolean>;
+  renameSession: (projectId: string, sessionId: string, title: string) => Promise<boolean>;
   clearError: () => void;
 }
 
@@ -141,6 +143,30 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   refreshSessions: async (projectId) => {
     if (get().selectedId !== projectId) return;
     set({ sessions: await ipc.invoke('sessions:list', { projectId }) });
+  },
+
+  deleteSession: async (projectId, sessionId) => {
+    try {
+      await ipc.invoke('sessions:delete', { sessionId });
+      // main pushes sessions:changed, but refresh directly so the row leaves
+      // the list even if this project is no longer the pushed one.
+      await get().refreshSessions(projectId);
+      return true;
+    } catch (err) {
+      set({ error: String(err) });
+      return false;
+    }
+  },
+
+  renameSession: async (projectId, sessionId, title) => {
+    try {
+      await ipc.invoke('sessions:rename', { sessionId, title });
+      await get().refreshSessions(projectId);
+      return true;
+    } catch (err) {
+      set({ error: String(err).replace(/^Error:\s*/, '') });
+      return false;
+    }
   },
 
   clearError: () => set({ error: null }),

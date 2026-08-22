@@ -303,6 +303,8 @@ describe('transcript replay (readTranscript)', () => {
     const deps = {
       db: {
         reconcileOrphanedAgentSessions: () => 0,
+        // The constructor also sweeps sessions nobody spoke in (S13).
+        listEmptyAgentSessions: () => [],
         getAgentSession: (id: string) => (id === 's1' ? row : null),
       },
     } as never;

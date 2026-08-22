@@ -4,6 +4,7 @@ import { useProjects } from '../stores/projects.js';
 import { useConnections } from '../stores/connections.js';
 import { useMcp } from '../stores/mcp.js';
 import { useNav } from '../stores/nav.js';
+import { useChat } from '../stores/chat.js';
 
 const ENV_ROLES: EnvRole[] = ['dev', 'qa', 'uat', 'prod', 'other'];
 
@@ -110,6 +111,8 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
     addDocs,
     removeDoc,
     addNote,
+    deleteSession,
+    renameSession,
     error,
     clearError,
   } = useProjects();
@@ -122,6 +125,41 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
   );
 
   const [tab, setTab] = useState<Tab>('sessions');
+  const [confirmDeleteSession, setConfirmDeleteSession] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [continuing, setContinuing] = useState(false);
+
+  /**
+   * Clicking a session CONTINUES it — the live one returns to its chat, an
+   * ended one is resumed onto the same row and opens in chat. The read-only
+   * transcript is still one click away, but "click the thing I was working on
+   * and keep working" is what the list is for.
+   */
+  const continueSession = async (sessionId: string, status: string): Promise<void> => {
+    if (continuing) return;
+    if (status === 'active') {
+      openChat(projectId);
+      return;
+    }
+    setContinuing(true);
+    try {
+      await useChat.getState().resume(projectId, sessionId);
+      const chat = useChat.getState();
+      if (chat.sessionId === sessionId) openChat(projectId);
+      // resume() surfaced its own error into the chat store; fall back to the
+      // read-only transcript so the click is never a dead end.
+      else openSession(projectId, sessionId);
+    } finally {
+      setContinuing(false);
+    }
+  };
+
+  const commitRename = async (sessionId: string): Promise<void> => {
+    const name = renameDraft.trim();
+    if (!name) return;
+    if (await renameSession(projectId, sessionId, name)) setRenamingId(null);
+  };
   const [instructionsDraft, setInstructionsDraft] = useState<string | null>(null);
   const [noteDraft, setNoteDraft] = useState('');
   const [bindConnectionId, setBindConnectionId] = useState('');
@@ -190,20 +228,72 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
               <div
                 className="row-card clickable"
                 key={s.id}
-                onClick={() =>
-                  // The live session goes back to its chat; everything else
-                  // opens the read-only transcript.
-                  s.status === 'active' ? openChat(project.id) : openSession(project.id, s.id)
-                }
+                onClick={() => void continueSession(s.id, s.status)}
               >
                 <div className="conn-main">
-                  <div className="conn-alias">{s.title ?? 'untitled session'}</div>
+                  {renamingId === s.id ? (
+                    // Click-through would open the chat mid-edit.
+                    <div onClick={(e) => e.stopPropagation()}>
+                      <input
+                        autoFocus
+                        value={renameDraft}
+                        onChange={(e) => setRenameDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') void commitRename(s.id);
+                          if (e.key === 'Escape') setRenamingId(null);
+                        }}
+                      />
+                    </div>
+                  ) : (
+                    <div className="conn-alias">{s.title ?? 'untitled session'}</div>
+                  )}
                   <div className="conn-detail">
                     {s.status} · {s.model ?? '?'} · ${s.costUsd.toFixed(4)} ·{' '}
                     {new Date(s.createdAt).toLocaleString()}
                   </div>
                 </div>
-                <span className="row-open">{s.status === 'active' ? 'resume →' : 'view →'}</span>
+                <div className="row-actions" onClick={(e) => e.stopPropagation()}>
+                  {renamingId === s.id ? (
+                    <>
+                      <button onClick={() => void commitRename(s.id)}>Save</button>
+                      <button onClick={() => setRenamingId(null)}>Cancel</button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => {
+                          setRenamingId(s.id);
+                          setRenameDraft(s.title ?? '');
+                        }}
+                      >
+                        Rename
+                      </button>
+                      <button onClick={() => openSession(project.id, s.id)}>Transcript</button>
+                      {confirmDeleteSession === s.id ? (
+                        <>
+                          <button
+                            className="danger"
+                            onClick={() => {
+                              setConfirmDeleteSession(null);
+                              void deleteSession(project.id, s.id);
+                            }}
+                          >
+                            Really delete
+                          </button>
+                          <button onClick={() => setConfirmDeleteSession(null)}>Keep</button>
+                        </>
+                      ) : (
+                        <button
+                          className="ghost-danger"
+                          onClick={() => setConfirmDeleteSession(s.id)}
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+                <span className="row-open">continue →</span>
               </div>
             ))
           )}
