@@ -1,6 +1,70 @@
 import { useEffect, useState } from 'react';
-import type { ConnectionView, GrantSetView } from '@contrail/shared';
+import type { ConnectionView, GrantSetView, OrgLimitsView } from '@contrail/shared';
+import { ipc } from '../lib/ipc.js';
 import { useConnections } from '../stores/connections.js';
+
+/**
+ * On-demand org limits. Fetching costs ONE Salesforce API call, so it runs
+ * only when the human asks — this is the "how much headroom does this org
+ * have before I point an agent at it" screen.
+ */
+function LimitsPanel({ connectionId }: { connectionId: string }) {
+  const [limits, setLimits] = useState<OrgLimitsView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = async (): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    try {
+      setLimits(await ipc.invoke('connections:limits', { id: connectionId }));
+    } catch (err) {
+      setError(String(err).replace(/^Error:\s*/, ''));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectionId]);
+
+  if (busy && !limits && !error) return <div className="empty">Fetching org limits…</div>;
+  return (
+    <div className="panel limits-panel">
+      <div className="limits-head">
+        <h3>Org limits</h3>
+        {limits && (
+          <span className="meter-dim">
+            fetched {new Date(limits.fetchedAt).toLocaleTimeString()} · one API call per refresh
+          </span>
+        )}
+        <button disabled={busy} onClick={() => void load()}>
+          {busy ? 'Refreshing…' : error ? 'Retry' : 'Refresh'}
+        </button>
+      </div>
+      {error && <div className="notice">{error}</div>}
+      {(limits?.limits ?? []).map((l) => {
+        const pct = l.max > 0 ? Math.min(100, (l.used / l.max) * 100) : 0;
+        return (
+          <div key={l.key} className="limit-row">
+            <div className="limit-label">
+              <span>{l.label}</span>
+              <span className="meter-dim">
+                {l.used.toLocaleString()} of {l.max.toLocaleString()} used ·{' '}
+                {l.remaining.toLocaleString()} left
+              </span>
+            </div>
+            <div className="budget-bar">
+              <div className={`budget-fill${pct > 85 ? ' hot' : ''}`} style={{ width: `${pct}%` }} />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 const ENV_COLORS: Record<string, string> = {
   production: 'var(--env-production)',
@@ -192,6 +256,7 @@ export function ConnectionsScreen() {
   const [showConnect, setShowConnect] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [editingGrants, setEditingGrants] = useState<string | null>(null);
+  const [showingLimits, setShowingLimits] = useState<string | null>(null);
 
   useEffect(() => {
     void refresh();
@@ -314,6 +379,9 @@ export function ConnectionsScreen() {
                       {editingGrants === c.id ? 'Close' : 'Grants'}
                     </button>
                     <button onClick={() => void ping(c.id)}>Check</button>
+                    <button onClick={() => setShowingLimits(showingLimits === c.id ? null : c.id)}>
+                      {showingLimits === c.id ? 'Hide limits' : 'API limits'}
+                    </button>
                     {confirmRemove === c.id ? (
                       <>
                         <button
@@ -335,6 +403,7 @@ export function ConnectionsScreen() {
                 {editingGrants === c.id && (
                   <GrantsEditor connection={c} onDone={() => setEditingGrants(null)} />
                 )}
+                {showingLimits === c.id && <LimitsPanel connectionId={c.id} />}
               </div>
             );
           })}

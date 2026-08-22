@@ -17,6 +17,7 @@ import type {
   GrantSetView,
   HealthView,
   MetadataTypeCountView,
+  OrgLimitsView,
   PingResultView,
   ProjectDocView,
   ProjectMcpView,
@@ -54,6 +55,7 @@ export const REQUEST_SCHEMAS = {
   }),
   'connections:remove': z.object({ id: ID }),
   'connections:ping': z.object({ id: ID }),
+  'connections:limits': z.object({ id: ID }),
   'connections:setGrants': z.object({
     id: ID,
     grants: z.object({
@@ -124,6 +126,9 @@ export const REQUEST_SCHEMAS = {
   'projects:docs:list': z.object({ projectId: ID }),
   'projects:docs:add': z.object({ projectId: ID }),
   'projects:docs:remove': z.object({ projectId: ID, docId: ID }),
+  // Drag-and-drop into chat: the renderer names a real path (via the preload's
+  // webUtils bridge); main validates and copies it into the project's silo.
+  'projects:docs:addFromPath': z.object({ projectId: ID, path: z.string().min(1).max(2000) }),
 
   'projects:notes:list': z.object({ projectId: ID }),
   'projects:notes:add': z.object({ projectId: ID, body: z.string().min(1).max(10_000) }),
@@ -168,6 +173,7 @@ export const REQUEST_SCHEMAS = {
     oauthClientId: z.string().max(300).optional(),
     oauthClientSecret: z.string().max(300).optional(),
   }),
+  'mcp:servers:setDefaultOn': z.object({ id: ID, defaultOn: z.boolean() }),
   'mcp:servers:remove': z.object({ id: ID }),
   'mcp:servers:test': z.object({ id: ID }),
   'mcp:servers:authorize': z.object({ id: ID }),
@@ -198,6 +204,7 @@ export interface Contracts {
   };
   'connections:remove': { req: { id: string }; res: { ok: boolean; detail: string | null } };
   'connections:ping': { req: { id: string }; res: PingResultView };
+  'connections:limits': { req: { id: string }; res: OrgLimitsView };
   'connections:setGrants': {
     req: { id: string; grants: GrantSetView };
     res: ConnectionView;
@@ -268,6 +275,10 @@ export interface Contracts {
   'projects:docs:list': { req: { projectId: string }; res: ProjectDocView[] };
   'projects:docs:add': { req: { projectId: string }; res: { added: ProjectDocView[] } };
   'projects:docs:remove': { req: { projectId: string; docId: string }; res: { ok: boolean } };
+  'projects:docs:addFromPath': {
+    req: { projectId: string; path: string };
+    res: { added: ProjectDocView };
+  };
 
   'projects:notes:list': { req: { projectId: string }; res: ProjectNoteView[] };
   'projects:notes:add': { req: { projectId: string; body: string }; res: ProjectNoteView };
@@ -316,6 +327,7 @@ export interface Contracts {
     };
     res: CustomMcpServerView;
   };
+  'mcp:servers:setDefaultOn': { req: { id: string; defaultOn: boolean }; res: CustomMcpServerView };
   'mcp:servers:remove': { req: { id: string }; res: { ok: boolean } };
   'mcp:servers:test': { req: { id: string }; res: McpServerTestView };
   'mcp:servers:authorize': {
@@ -374,4 +386,10 @@ export interface ContrailBridge {
     channel: C,
     listener: (payload: PushEvents[C]) => void,
   ): () => void;
+  /**
+   * Absolute path of a dropped File (Electron webUtils) — for drag-and-drop
+   * attach. Typed as unknown because this package builds without DOM libs;
+   * the renderer passes a real File and preload hands it to webUtils.
+   */
+  pathForFile(file: unknown): string;
 }

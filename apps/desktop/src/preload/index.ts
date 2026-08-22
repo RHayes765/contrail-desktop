@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 /**
  * The entire bridge surface: typed invoke + push subscription. Nothing else
@@ -8,6 +8,12 @@ import { contextBridge, ipcRenderer } from 'electron';
  */
 contextBridge.exposeInMainWorld('contrail', {
   invoke: (channel: string, req: unknown) => ipcRenderer.invoke(channel, req),
+  /**
+   * Absolute path of a dropped File. Electron removed File.path from the
+   * renderer; webUtils is the sanctioned bridge. Path-only — no fs access is
+   * exposed, and main still validates/copies the file itself.
+   */
+  pathForFile: (file: File) => webUtils.getPathForFile(file),
   subscribe: (channel: string, listener: (payload: unknown) => void) => {
     const wrapped = (_event: unknown, payload: unknown) => listener(payload);
     ipcRenderer.on(channel, wrapped);

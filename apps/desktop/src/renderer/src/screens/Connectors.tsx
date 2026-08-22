@@ -232,6 +232,7 @@ export function ConnectorsScreen() {
     error,
     refreshServers,
     setServerEnabled,
+    setServerDefaultOn,
     removeServer,
     clearError,
     testServer,
@@ -289,7 +290,11 @@ export function ConnectorsScreen() {
                   {s.headerNames.length > 0 && `headers: ${s.headerNames.join(', ')} · `}
                   {s.envNames.length > 0 && `env: ${s.envNames.join(', ')} · `}
                   {s.hasOauthClient && 'own OAuth client · '}
-                  {s.enabled ? 'available to projects that opt in' : 'off everywhere'}
+                  {s.enabled
+                    ? s.defaultOn
+                      ? 'on for every project unless it opts out'
+                      : 'available to projects that opt in'
+                    : 'off everywhere'}
                 </div>
                 {s.authorizedScopes && (
                   <div className="conn-detail meter-dim" title={s.authorizedScopes.join('\n')}>
@@ -332,6 +337,17 @@ export function ConnectorsScreen() {
                 >
                   Test
                 </button>
+                <label
+                  className="grant-toggle"
+                  title="Projects without an explicit choice for this connector inherit this. Turn on for connectors that are always yours (Slack, Gmail); leave off when it varies by engagement (a Jira that might be the client's). Per-project toggles always win."
+                >
+                  <input
+                    type="checkbox"
+                    checked={s.defaultOn}
+                    onChange={(e) => void setServerDefaultOn(s.id, e.target.checked)}
+                  />
+                  Default on for projects
+                </label>
                 <label className="grant-toggle">
                   <input
                     type="checkbox"

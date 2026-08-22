@@ -19,7 +19,7 @@ import type {
   ServerToggleRecord,
 } from './types.js';
 
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 
 /**
  * Local SQLite store: connection metadata and the audit log (P0.1); the
@@ -376,6 +376,18 @@ export class ContrailDb {
           );
         `);
       }
+      if (current < 12) {
+        // v12 (desktop-owned): per-connector project default. Whether a
+        // connector joins a NEW project is a property of the connector, not
+        // something re-decided per project: Slack/Gmail are "always mine" and
+        // belong everywhere, a Jira connector may be the client's and does
+        // not. Absent toggle rows fall back to this flag (see catalog.ts
+        // serverEnabled); explicit per-project toggles still win.
+        // 0 preserves the pre-v12 behaviour (external = opt-in per project).
+        this.db.exec(
+          `ALTER TABLE custom_mcp_servers ADD COLUMN default_on INTEGER NOT NULL DEFAULT 0;`,
+        );
+      }
       this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     });
     tx();
@@ -664,7 +676,8 @@ export class ContrailDb {
     return (
       this.db
         .prepare(
-          `SELECT id, name, transport, url_or_command, auth_mode, config_json, enabled, created_at
+          `SELECT id, name, transport, url_or_command, auth_mode, config_json, enabled,
+                  default_on, created_at
            FROM custom_mcp_servers ORDER BY created_at`,
         )
         .all() as Array<Record<string, unknown>>
@@ -674,7 +687,8 @@ export class ContrailDb {
   getCustomMcpServer(id: string): CustomMcpServerRecord | null {
     const row = this.db
       .prepare(
-        `SELECT id, name, transport, url_or_command, auth_mode, config_json, enabled, created_at
+        `SELECT id, name, transport, url_or_command, auth_mode, config_json, enabled,
+                default_on, created_at
          FROM custom_mcp_servers WHERE id = ?`,
       )
       .get(id) as Record<string, unknown> | undefined;
@@ -702,7 +716,7 @@ export class ContrailDb {
       .prepare(
         `INSERT INTO custom_mcp_servers
            (id, workspace_id, name, transport, url_or_command, auth_mode, config_json, enabled, created_at)
-         VALUES (?, 'default', ?, ?, ?, 'independent', ?, 0, ?)`,
+         VALUES (?, 'default', ?, ?, ?, 'independent', ?, 1, ?)`,
       )
       .run(
         id,
@@ -723,6 +737,7 @@ export class ContrailDb {
       name?: string;
       urlOrCommand?: string;
       enabled?: boolean;
+      defaultOn?: boolean;
       config?: CustomMcpServerExtras;
     },
   ): CustomMcpServerRecord | null {
@@ -730,12 +745,13 @@ export class ContrailDb {
     if (!current) return null;
     this.db
       .prepare(
-        `UPDATE custom_mcp_servers SET name = ?, url_or_command = ?, enabled = ?, config_json = ? WHERE id = ?`,
+        `UPDATE custom_mcp_servers SET name = ?, url_or_command = ?, enabled = ?, default_on = ?, config_json = ? WHERE id = ?`,
       )
       .run(
         patch.name?.trim() || current.name,
         patch.urlOrCommand?.trim() || current.urlOrCommand,
         (patch.enabled ?? current.enabled) ? 1 : 0,
+        (patch.defaultOn ?? current.defaultOn) ? 1 : 0,
         JSON.stringify(patch.config ?? current.config),
         id,
       );
@@ -769,6 +785,7 @@ export class ContrailDb {
       authMode: r.auth_mode as CustomMcpServerRecord['authMode'],
       config,
       enabled: (r.enabled as number) === 1,
+      defaultOn: (r.default_on as number) === 1,
       createdAt: r.created_at as string,
     };
   }

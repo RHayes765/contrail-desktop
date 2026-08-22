@@ -48,6 +48,7 @@ export function makeHandlers(health: HealthView, services: MainServices) {
       connections.connect(req),
     'connections:remove': (_deps: EngineDeps, req: { id: string }) => connections.remove(req.id),
     'connections:ping': (_deps: EngineDeps, req: { id: string }) => connections.ping(req.id),
+    'connections:limits': (_deps: EngineDeps, req: { id: string }) => connections.limits(req.id),
     'connections:setGrants': (
       _deps: EngineDeps,
       req: { id: string; grants: GrantSetView },
@@ -132,6 +133,9 @@ export function makeHandlers(health: HealthView, services: MainServices) {
       projects.removeDoc(req.projectId, req.docId);
       return { ok: true };
     },
+    'projects:docs:addFromPath': (_deps: EngineDeps, req: { projectId: string; path: string }) => ({
+      added: docView(projects.addDocFromPath(req.projectId, req.path)),
+    }),
 
     'projects:notes:list': (_deps: EngineDeps, req: { projectId: string }) =>
       projects.listNotes(req.projectId).map(noteView),
@@ -190,6 +194,8 @@ export function makeHandlers(health: HealthView, services: MainServices) {
         headers?: Record<string, string>;
       },
     ) => mcp.updateServer(req),
+    'mcp:servers:setDefaultOn': (_deps: EngineDeps, req: { id: string; defaultOn: boolean }) =>
+      mcp.setDefaultOn(req.id, req.defaultOn),
     'mcp:servers:remove': async (_deps: EngineDeps, req: { id: string }) => {
       await mcp.removeServer(req.id);
       return { ok: true };

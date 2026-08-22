@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { CHAT_MODELS, type ChatModelId, type EffortLevel } from '@contrail/shared';
+import { ipc } from '../lib/ipc.js';
 import { useChat } from '../stores/chat.js';
 import { useProjects } from '../stores/projects.js';
 import { useNav } from '../stores/nav.js';
@@ -43,6 +44,14 @@ export function ChatScreen({ projectId }: { projectId: string }) {
   const { projects } = useProjects();
   const { openProject } = useNav();
   const [draft, setDraft] = useState('');
+  // Files dropped onto the chat: already copied into the project's docs by
+  // main; listed here until the next send tells the agent they exist.
+  const [attached, setAttached] = useState<string[]>([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  // dragenter/dragleave fire for every CHILD the pointer crosses; a bare
+  // boolean flickers. Count depth, and only react to drags that carry files.
+  const dragDepth = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const project = (projects ?? []).find((p) => p.id === projectId) ?? null;
@@ -60,9 +69,38 @@ export function ChatScreen({ projectId }: { projectId: string }) {
 
   const submit = () => {
     const text = draft.trim();
-    if (!text || busy || !sessionId) return;
+    if ((!text && attached.length === 0) || busy || !sessionId) return;
+    // Attachments ride as a plain preamble the agent can act on — the files
+    // are ALREADY in the project docs, so read_project_doc just works.
+    const preamble =
+      attached.length > 0
+        ? `[Attached to project docs: ${attached.join(', ')} — read with read_project_doc]\n\n`
+        : '';
     setDraft('');
-    void send(text);
+    setAttached([]);
+    void send(preamble + (text || 'Please look at the attached file(s).'));
+  };
+
+  const onDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    dragDepth.current = 0;
+    setDragOver(false);
+    setAttachError(null);
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    const failures: string[] = [];
+    for (const file of files) {
+      try {
+        const path = ipc.pathForFile(file);
+        if (!path) throw new Error(`No path for ${file.name}`);
+        const { added } = await ipc.invoke('projects:docs:addFromPath', { projectId, path });
+        setAttached((prev) => (prev.includes(added.filename) ? prev : [...prev, added.filename]));
+      } catch (err) {
+        failures.push(`${file.name}: ${String(err).replace(/^Error:\s*/, '')}`);
+      }
+    }
+    // Every failure, not just the last — dropping three files and seeing one
+    // error line for one of them reads as "the other two worked".
+    if (failures.length) setAttachError(failures.join(' · '));
   };
 
   const leave = () => {
@@ -71,7 +109,24 @@ export function ChatScreen({ projectId }: { projectId: string }) {
   };
 
   return (
-    <div className="chat-shell">
+    <div
+      className={`chat-shell${dragOver ? ' drag-over' : ''}`}
+      onDragEnter={(e) => {
+        if (!e.dataTransfer?.types.includes('Files')) return;
+        e.preventDefault();
+        dragDepth.current += 1;
+        setDragOver(true);
+      }}
+      onDragOver={(e) => {
+        if (!e.dataTransfer?.types.includes('Files')) return;
+        e.preventDefault();
+      }}
+      onDragLeave={() => {
+        dragDepth.current = Math.max(0, dragDepth.current - 1);
+        if (dragDepth.current === 0) setDragOver(false);
+      }}
+      onDrop={(e) => void onDrop(e)}
+    >
       <div className="chat-head">
         <button className="crumb" onClick={leave}>
           ← {project?.name ?? 'Project'}
@@ -193,6 +248,27 @@ export function ChatScreen({ projectId }: { projectId: string }) {
         </div>
       )}
 
+      {attachError && (
+        <div className="notice" onClick={() => setAttachError(null)}>
+          {attachError}
+        </div>
+      )}
+      {attached.length > 0 && (
+        <div className="attach-row">
+          {attached.map((name) => (
+            <span key={name} className="attach-chip">
+              📎 {name}
+              <button
+                aria-label={`Remove ${name} from this message`}
+                onClick={() => setAttached((prev) => prev.filter((n) => n !== name))}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+          <span className="meter-dim">saved to project docs · sent with your next message</span>
+        </div>
+      )}
       <div className="composer">
         <textarea
           rows={2}
@@ -207,7 +283,11 @@ export function ChatScreen({ projectId }: { projectId: string }) {
             }
           }}
         />
-        <button className="primary" disabled={busy || !draft.trim() || !sessionId} onClick={submit}>
+        <button
+          className="primary"
+          disabled={busy || (!draft.trim() && attached.length === 0) || !sessionId}
+          onClick={submit}
+        >
           Send
         </button>
       </div>

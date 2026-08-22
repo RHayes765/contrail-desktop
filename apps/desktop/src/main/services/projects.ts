@@ -189,7 +189,20 @@ export class ProjectService {
   /** Copy one file into the silo. Same filename replaces the previous upload. */
   addDocFromPath(projectId: string, sourcePath: string): ProjectDocRecord {
     this.mustGet(projectId);
-    const stat = fs.statSync(sourcePath);
+    // Containment (review finding, S12): this is the one path where the
+    // RENDERER names a filesystem path, so the source is a claim. Anything
+    // under Contrail's own data dir is off limits — otherwise a compromised
+    // renderer copies another project's docs (silo leak) or contrail.db
+    // itself into a silo the agent reads. realpath first, so a symlink
+    // planted elsewhere cannot smuggle a data-dir file past the check.
+    const real = fs.realpathSync(sourcePath);
+    const dataRoot = fs.realpathSync(dataDir());
+    if (real === dataRoot || real.startsWith(dataRoot + path.sep)) {
+      throw new Error(
+        'Files inside the Contrail data directory cannot be attached — copy the file somewhere else first.',
+      );
+    }
+    const stat = fs.statSync(real);
     if (!stat.isFile()) throw new Error(`Not a file: ${sourcePath}`);
     if (stat.size > DOC_MAX_BYTES) {
       throw new Error(

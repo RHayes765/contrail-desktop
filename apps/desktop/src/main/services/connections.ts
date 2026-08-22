@@ -1,11 +1,29 @@
 import { shell } from 'electron';
 import {
   grantDependencyViolations,
+  RestClient,
   type ConnectionRecord,
   type EngineDeps,
   type GrantSet,
 } from '@contrail/engine';
-import type { ConnectionView, ConnectOutcomeView, PingResultView } from '@contrail/shared';
+import type {
+  ConnectionView,
+  ConnectOutcomeView,
+  OrgLimitsView,
+  PingResultView,
+} from '@contrail/shared';
+
+/**
+ * The limits a Salesforce consultant actually watches, in display order.
+ * Everything else /limits returns is noise for this screen.
+ */
+const WATCHED_LIMITS: Array<{ key: string; label: string }> = [
+  { key: 'DailyApiRequests', label: 'API requests (24h)' },
+  { key: 'DailyBulkV2QueryJobs', label: 'Bulk API v2 query jobs (24h)' },
+  { key: 'DailyAsyncApexExecutions', label: 'Async Apex executions (24h)' },
+  { key: 'DataStorageMB', label: 'Data storage (MB)' },
+  { key: 'FileStorageMB', label: 'File storage (MB)' },
+];
 
 /**
  * Connection lifecycle, rehosted from the plugin's connect_org/disconnect_org
@@ -150,6 +168,25 @@ export class ConnectionService {
    * to re-auth (Connect again with the same label); 'unreachable' means the
    * org may be fine but we could not talk to it.
    */
+  /**
+   * On-demand org limits (one API call — only when the human asks). The point
+   * is budgeting shared client orgs: an agent session burns real API requests,
+   * and this is where you see how much headroom the org has before you point
+   * one at it.
+   */
+  async limits(id: string): Promise<OrgLimitsView> {
+    const rec = this.deps.db.resolveConnection(id);
+    if (!rec) throw new Error(`Connection ${id} not found.`);
+    const rest = new RestClient(this.deps.tokenMgr, rec, this.deps.config.salesforce.apiVersion);
+    const raw = await rest.limits();
+    const limits = WATCHED_LIMITS.flatMap(({ key, label }) => {
+      const entry = raw[key];
+      if (!entry || typeof entry.Max !== 'number' || typeof entry.Remaining !== 'number') return [];
+      return [{ key, label, max: entry.Max, remaining: entry.Remaining, used: entry.Max - entry.Remaining }];
+    });
+    return { connectionId: rec.id, alias: rec.alias, fetchedAt: new Date().toISOString(), limits };
+  }
+
   async ping(id: string): Promise<PingResultView> {
     const rec = this.deps.db.resolveConnection(id);
     if (!rec) throw new Error(`Connection ${id} not found.`);

@@ -76,7 +76,7 @@ export function resolveSessionMcp(
   for (const server of deps.db.listCustomMcpServers()) {
     if (!server.enabled) continue;
     if (server.authMode !== 'independent') continue; // org_bound is design-doc scope
-    if (!serverEnabled(toggles, externalServerKey(server.id))) continue;
+    if (!serverEnabled(toggles, externalServerKey(server.id), server.defaultOn)) continue;
     let key = slugifyServerName(server.name);
     let n = 2;
     while (takenKeys.has(key)) key = `${slugifyServerName(server.name)}_${n++}`;
@@ -107,6 +107,7 @@ function serverView(record: CustomMcpServerRecord): CustomMcpServerView {
     hasOauthClient: Boolean(record.config.oauthClientId),
     authorizedScopes: record.transport === 'stdio' ? null : mcpGrantedScopes(record.id),
     enabled: record.enabled,
+    defaultOn: record.defaultOn,
     createdAt: record.createdAt,
   };
 }
@@ -148,7 +149,7 @@ export class McpConfigService {
         name: s.name,
         transport: s.transport,
         globallyEnabled: s.enabled,
-        enabledForProject: serverEnabled(toggles, externalServerKey(s.id)),
+        enabledForProject: serverEnabled(toggles, externalServerKey(s.id), s.defaultOn),
       })),
     };
   }
@@ -268,6 +269,33 @@ export class McpConfigService {
       });
       if (!req.enabled) await this.onExternalRevoked?.(req.id);
     }
+    return serverView(updated);
+  }
+
+  /**
+   * Flip the per-connector project default. Changes what projects WITHOUT an
+   * explicit toggle row hand to their next session, so it is audited like the
+   * global switch. Explicit per-project toggles are untouched and still win.
+   */
+  async setDefaultOn(id: string, defaultOn: boolean): Promise<CustomMcpServerView> {
+    const current = this.deps.db.getCustomMcpServer(id);
+    if (!current) throw new Error('Server not found.');
+    const updated = this.deps.db.updateCustomMcpServer(id, { defaultOn });
+    if (!updated) throw new Error('Server not found.');
+    this.deps.audit.record('mcp.server_default_changed', {
+      tool: 'desktop_mcp_panel',
+      outcome: 'success',
+      detail: { id: updated.id, name: updated.name, defaultOn },
+    });
+    // Turning the default OFF is a revocation like any other OFF switch:
+    // sessions in default-inheriting projects are running this server's tools
+    // RIGHT NOW, and external tools never cross the per-call gate — ending the
+    // session is the only enforcement (review finding, S12).
+    // endForExternalServer only ends sessions actually using the server, so
+    // the fleet-wide call is already precisely scoped; sessions in projects
+    // with an explicit ON toggle are ended too, which errs on the safe side
+    // and matches the global-disable precedent.
+    if (current.defaultOn && !defaultOn) await this.onExternalRevoked?.(id);
     return serverView(updated);
   }
 

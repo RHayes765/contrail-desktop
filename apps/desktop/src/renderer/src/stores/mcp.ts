@@ -35,6 +35,7 @@ interface McpState {
     headers?: Record<string, string>;
   }) => Promise<CustomMcpServerView | null>;
   setServerEnabled: (id: string, enabled: boolean) => Promise<boolean>;
+  setServerDefaultOn: (id: string, defaultOn: boolean) => Promise<boolean>;
   removeServer: (id: string) => Promise<boolean>;
 }
 
@@ -139,6 +140,18 @@ export const useMcp = create<McpState>((set, get) => ({
   setServerEnabled: async (id, enabled) => {
     try {
       await ipc.invoke('mcp:servers:update', { id, enabled });
+      await get().refreshServers();
+      await refreshProjectPanel(set, get);
+      return true;
+    } catch (err) {
+      set({ error: String(err) });
+      return false;
+    }
+  },
+
+  setServerDefaultOn: async (id, defaultOn) => {
+    try {
+      await ipc.invoke('mcp:servers:setDefaultOn', { id, defaultOn });
       await get().refreshServers();
       await refreshProjectPanel(set, get);
       return true;

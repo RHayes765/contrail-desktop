@@ -91,7 +91,7 @@ describe('toggle + custom server storage', () => {
     expect(() => db.setServerToggle('p1', '', true)).toThrow(/server key/);
   });
 
-  it('custom servers register as independent-auth only, disabled by default', () => {
+  it('custom servers register independent-auth, ENABLED, and not project-default', () => {
     const s = db.addCustomMcpServer({
       name: 'Echo',
       transport: 'stdio',
@@ -99,7 +99,11 @@ describe('toggle + custom server storage', () => {
       config: { args: ['echo.mjs'] },
     });
     expect(s.authMode).toBe('independent');
-    expect(s.enabled).toBe(false);
+    // Registering a connector means you want it available — a dead switch
+    // right after "save" read as a bug (S12 feedback). Availability is the
+    // global gate; which PROJECTS see it stays opt-in via defaultOn/toggles.
+    expect(s.enabled).toBe(true);
+    expect(s.defaultOn).toBe(false);
     expect(db.listCustomMcpServers()).toHaveLength(1);
 
     const updated = db.updateCustomMcpServer(s.id, { enabled: true, name: 'Echo 2' });
@@ -124,5 +128,28 @@ describe('toggle + custom server storage', () => {
       .prepare(`UPDATE custom_mcp_servers SET config_json = 'not json' WHERE id = ?`)
       .run(s.id);
     expect(db.getCustomMcpServer(s.id)?.config).toEqual({});
+  });
+});
+
+describe('per-connector project defaults (v12)', () => {
+  const key = externalServerKey('srv-1');
+
+  it('an external server with defaultOn joins projects that never chose', () => {
+    expect(serverEnabled([], key, true)).toBe(true);
+    expect(serverEnabled([], key, false)).toBe(false);
+  });
+
+  it('an explicit per-project toggle ALWAYS beats the connector default', () => {
+    // Project said no — a Slack-style always-on connector stays out.
+    expect(serverEnabled([{ serverKey: key, enabled: false }], key, true)).toBe(false);
+    // Project said yes — a Jira-style opt-in connector comes in.
+    expect(serverEnabled([{ serverKey: key, enabled: true }], key, false)).toBe(true);
+  });
+
+  it('standard families ignore the external default entirely', () => {
+    // Passing true must not "default on" a standard family that was never
+    // standard, and passing false must not disable one that is.
+    expect(serverEnabled([], 'metadata', false)).toBe(true);
+    expect(serverEnabled([], 'not-a-family', true)).toBe(true); // external-ish key honors it
   });
 });

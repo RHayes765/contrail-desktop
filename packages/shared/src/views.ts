@@ -457,7 +457,29 @@ export interface CustomMcpServerView {
   /** Scopes the provider GRANTED at the last consent — null when no token/unknown. */
   authorizedScopes: string[] | null;
   enabled: boolean;
+  /** Joins projects with no explicit toggle row (per-connector project default). */
+  defaultOn: boolean;
   createdAt: string;
+}
+
+/**
+ * One org limit as Salesforce reports it. `used` is derived (max - remaining)
+ * because that is the number a human thinks in.
+ */
+export interface OrgLimitView {
+  key: string;
+  label: string;
+  max: number;
+  remaining: number;
+  used: number;
+}
+
+/** On-demand org limits snapshot for one connection (costs one API call). */
+export interface OrgLimitsView {
+  connectionId: string;
+  alias: string;
+  fetchedAt: string;
+  limits: OrgLimitView[];
 }
 
 /**

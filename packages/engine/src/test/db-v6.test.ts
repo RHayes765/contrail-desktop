@@ -26,8 +26,8 @@ afterEach(() => {
 });
 
 describe('schema v6', () => {
-  it('fresh databases land on user_version 11', () => {
-    expect(db.schemaVersion()).toBe(11);
+  it('fresh databases land on user_version 12', () => {
+    expect(db.schemaVersion()).toBe(12);
   });
 
   it('creates every desktop table', () => {
@@ -109,7 +109,7 @@ describe('schema v6', () => {
   it('reopening an already-v6 database is a no-op migration', () => {
     db.close();
     const again = new ContrailDb(dbPath);
-    expect(again.schemaVersion()).toBe(11);
+    expect(again.schemaVersion()).toBe(12);
     again.close();
     db = new ContrailDb(dbPath); // for afterEach
   });
@@ -143,9 +143,11 @@ describe('v10 → v11 upgrade on an existing database', () => {
     });
     db.close();
 
-    // Rewind: put the v10 table back, take v11's away, drop the version.
+    // Rewind: put the v10 table back, take v11's AND v12's away, drop the
+    // version — a real v10 file has neither artifact_summaries nor default_on.
     const raw = new Database(dbPath);
     raw.exec(`
+      ALTER TABLE custom_mcp_servers DROP COLUMN default_on;
       DROP TABLE IF EXISTS artifact_summaries;
       CREATE TABLE summary_cache (
         cache_key  TEXT PRIMARY KEY,
@@ -158,7 +160,7 @@ describe('v10 → v11 upgrade on an existing database', () => {
     raw.close();
 
     db = new ContrailDb(dbPath);
-    expect(db.schemaVersion()).toBe(11);
+    expect(db.schemaVersion()).toBe(12);
 
     const check = new Database(dbPath, { readonly: true });
     const tables = (
@@ -189,5 +191,37 @@ describe('v10 → v11 upgrade on an existing database', () => {
       model: 'claude-haiku-4-5',
     });
     expect(db.getSavedSummary(key)?.summary).toBe('new text');
+  });
+});
+
+/** The v11 → v12 step: connectors gain a per-project default flag. */
+describe('v11 -> v12 upgrade on an existing database', () => {
+  it('adds default_on (off, preserving old semantics) without touching stored servers', () => {
+    // A server registered BEFORE v12 existed…
+    const server = db.addCustomMcpServer({
+      name: 'Legacy Slack',
+      transport: 'http',
+      urlOrCommand: 'https://slack.example/mcp',
+    });
+    db.close();
+
+    // …rewind the version and strip the column, as a real v11 file has it.
+    const raw = new Database(dbPath);
+    // SQLite can DROP COLUMN (3.35+); recreate semantics via table rebuild is
+    // overkill here — better-sqlite3 bundles a modern SQLite.
+    raw.exec(`ALTER TABLE custom_mcp_servers DROP COLUMN default_on;`);
+    raw.pragma('user_version = 11');
+    raw.close();
+
+    db = new ContrailDb(dbPath);
+    expect(db.schemaVersion()).toBe(12);
+    const upgraded = db.getCustomMcpServer(server.id);
+    expect(upgraded?.name).toBe('Legacy Slack');
+    // Old servers stay opt-in per project — the upgrade changes nothing about
+    // which sessions see them until the human flips the new toggle.
+    expect(upgraded?.defaultOn).toBe(false);
+
+    db.updateCustomMcpServer(server.id, { defaultOn: true });
+    expect(db.getCustomMcpServer(server.id)?.defaultOn).toBe(true);
   });
 });

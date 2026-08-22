@@ -324,3 +324,27 @@ describe('cross-project isolation under concurrent sessions (real silo)', () => 
     expect(listA.content[0]!.text).toContain(SECRET);
   });
 });
+
+describe('default-off is a revocation (review finding, S12)', () => {
+  it('flipping defaultOn true->false ends sessions using the server; other flips do not', async () => {
+    const { McpConfigService } = await import('../main/services/mcpConfig.js');
+    const revoked: string[] = [];
+    const svc = new McpConfigService(deps, async (serverId) => {
+      revoked.push(serverId);
+    });
+    const server = db.addCustomMcpServer({
+      name: 'Team Jira',
+      transport: 'http',
+      urlOrCommand: 'https://jira.example/mcp',
+    });
+
+    await svc.setDefaultOn(server.id, true); // off -> on: nothing to revoke
+    expect(revoked).toEqual([]);
+    await svc.setDefaultOn(server.id, true); // on -> on: no-op
+    expect(revoked).toEqual([]);
+    await svc.setDefaultOn(server.id, false); // on -> off: THE revocation
+    expect(revoked).toEqual([server.id]);
+    await svc.setDefaultOn(server.id, false); // off -> off: no double-kill
+    expect(revoked).toEqual([server.id]);
+  });
+});

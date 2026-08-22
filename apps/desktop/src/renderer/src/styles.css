@@ -1263,3 +1263,25 @@ button.danger {
 .key-check.ok { color: var(--env-sandbox); }
 .key-check.bad { color: var(--env-production); }
 .key-check.unknown { color: var(--env-scratch); }
+
+/* Org limits panel (Connections screen). */
+.limits-panel { margin: 6px 0 10px; }
+.limits-head { display: flex; align-items: baseline; gap: 10px; }
+.limits-head h3 { margin: 0 auto 8px 0; }
+.limits-head button {
+  all: unset; cursor: pointer; padding: 3px 9px; border-radius: 6px;
+  border: 1px solid var(--border); color: var(--text-dim); font-size: 12px;
+}
+.limit-row { margin-bottom: 10px; }
+.limit-label { display: flex; justify-content: space-between; font-size: 12.5px; margin-bottom: 3px; }
+
+/* Chat attachments (drag-and-drop). */
+.chat-shell.drag-over { outline: 2px dashed var(--accent); outline-offset: -8px; }
+.attach-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 4px 0 8px; font-size: 12px; }
+.attach-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--border); border-radius: 12px;
+  padding: 3px 10px; background: var(--bg-raised); font-size: 12.5px;
+}
+.attach-chip button { all: unset; cursor: pointer; color: var(--text-dim); padding: 0 2px; }
+.attach-chip button:hover { color: var(--env-production); }

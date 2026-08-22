@@ -184,6 +184,13 @@ export interface CustomMcpServerRecord {
   authMode: 'independent' | 'org_bound';
   config: CustomMcpServerExtras;
   enabled: boolean;
+  /**
+   * Whether this connector joins projects that have no explicit toggle row
+   * for it. A property of the connector, not the project: "always mine"
+   * connectors (Slack, Gmail) default on everywhere; ambiguous ones (a Jira
+   * that may be the client's) stay opt-in per project.
+   */
+  defaultOn: boolean;
   createdAt: string;
 }
 

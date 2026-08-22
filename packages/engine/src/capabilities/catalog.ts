@@ -87,10 +87,16 @@ export function externalServerKey(serverId: string): string {
 export function serverEnabled(
   toggles: ReadonlyArray<{ serverKey: string; enabled: boolean }>,
   serverKey: string,
+  /**
+   * Fallback for EXTERNAL servers with no toggle row: the connector's own
+   * default_on flag (v12). Standard families ignore this — they default on
+   * by being standard. Explicit per-project toggles always win over both.
+   */
+  externalDefault = false,
 ): boolean {
   const row = toggles.find((t) => t.serverKey === serverKey);
   if (row) return row.enabled;
-  return isStandardCatalogKey(serverKey);
+  return isStandardCatalogKey(serverKey) || externalDefault;
 }
 
 /** Every grant-bearing capability must appear in exactly one catalog entry. */

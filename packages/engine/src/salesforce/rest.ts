@@ -33,6 +33,16 @@ export class RestClient {
     ).records;
   }
 
+  /**
+   * Org limits (GET /limits) — the numbers a consultant actually watches
+   * before pointing an agent at an org: daily API requests above all, plus
+   * storage. The endpoint costs one API call and needs no special perms.
+   */
+  async limits(): Promise<Record<string, { Max: number; Remaining: number }>> {
+    const res = await this.request(`/services/data/${this.apiVersion}/limits`);
+    return (await res.json()) as Record<string, { Max: number; Remaining: number }>;
+  }
+
   async describeSObject(name: string): Promise<Record<string, unknown>> {
     const res = await this.request(
       `/services/data/${this.apiVersion}/sobjects/${encodeURIComponent(name)}/describe`,

@@ -6,7 +6,7 @@ import Database from 'better-sqlite3';
 import { ContrailDb } from '../core/db.js';
 
 /**
- * The v5 → v11 upgrade — the ONE path every teammate's existing install takes,
+ * The v5 → v12 upgrade — the ONE path every teammate's existing install takes,
  * and the one no other test exercised (they all start fresh, which runs every
  * migration at once rather than the real step-by-step upgrade).
  *
@@ -122,8 +122,8 @@ afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-describe('a real v5 database upgrades to v11', () => {
-  it('lands on v11 and every v5 row survives', () => {
+describe('a real v5 database upgrades to v12', () => {
+  it('lands on v12 and every v5 row survives', () => {
     writeV5Fixture(dbPath);
     const raw = new Database(dbPath, { readonly: true });
     expect(raw.pragma('user_version', { simple: true })).toBe(5);
@@ -131,7 +131,7 @@ describe('a real v5 database upgrades to v11', () => {
 
     const db = new ContrailDb(dbPath);
     try {
-      expect(db.schemaVersion()).toBe(11);
+      expect(db.schemaVersion()).toBe(12);
 
       // The connection is readable by alias (COLLATE NOCASE survives).
       const conn = db.resolveConnection('LEGACY-DEV');
@@ -235,7 +235,7 @@ describe('a real v5 database upgrades to v11', () => {
     writeV5Fixture(dbPath);
     new ContrailDb(dbPath).close();
     const again = new ContrailDb(dbPath);
-    expect(again.schemaVersion()).toBe(11);
+    expect(again.schemaVersion()).toBe(12);
     // Data still there after a second open.
     expect(again.resolveConnection('legacy-dev')?.id).toBe('conn-v5');
     again.close();
