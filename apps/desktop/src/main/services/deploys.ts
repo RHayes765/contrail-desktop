@@ -537,7 +537,20 @@ export class DeployService {
     let changeRows = review?.changeRows ?? [];
     let destructiveRows = review?.destructiveRows ?? [];
     if (changeRows.length === 0 && destructiveRows.length === 0) {
-      if (rec.kind === 'dml' && summary?.operation) {
+      // A multi-step DML plan (S14) proposed OUTSIDE this app (plugin path)
+      // has no review_json, but its summary carries per-step preview rows —
+      // use them rather than the raw-JSON fallback below.
+      const planRows = summary?.rows as
+        | Array<{ label?: string; warnings?: string[]; destructive?: boolean }>
+        | undefined;
+      if (rec.kind === 'dml' && Array.isArray(planRows) && planRows.some((r) => r?.label)) {
+        for (const r of planRows.slice(0, 50)) {
+          if (!r?.label) continue;
+          const row = { label: r.label, warnings: r.warnings ?? [] };
+          if (r.destructive) destructiveRows = [...destructiveRows, row];
+          else changeRows = [...changeRows, row];
+        }
+      } else if (rec.kind === 'dml' && summary?.operation) {
         const label =
           `${String(summary.operation).toUpperCase()} ${summary.row_count ?? summary.rows?.length ?? '?'}` +
           ` row(s) on ${summary.object ?? 'unknown object'}`;

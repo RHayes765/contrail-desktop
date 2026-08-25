@@ -348,3 +348,43 @@ describe('default-off is a revocation (review finding, S12)', () => {
     expect(revoked).toEqual([server.id]);
   });
 });
+
+describe('multi-step DML plans at the native seam (S14)', () => {
+  it('a plan row renders its per-step rows even without review_json, and the hold stays kind-agnostic', async () => {
+    const connId = seedConnection('developer', 'dev');
+    // A plan proposed via the PLUGIN: kind 'dml', plan-shaped summary, no
+    // desktop review_json. The screen must show the steps, not a blank.
+    const rec = db.insertDeployRequest({
+      connectionId: connId,
+      kind: 'dml',
+      confirmationCode: 'PLAN-CODE',
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      summaryJson: JSON.stringify({
+        plan: true,
+        all_or_none: true,
+        steps: 3,
+        row_count: 3,
+        rows: [
+          { label: 'Step 1 · INSERT Account (ref "acct"): Name = "X"', warnings: [] },
+          { label: 'Step 2 · INSERT Contact: AccountId = <new Account from step 1>', warnings: [] },
+          { label: 'Step 3 · DELETE Account 001000000000001AAA', warnings: [], destructive: true },
+        ],
+      }),
+    });
+
+    const view = service.get(rec.id);
+    expect(view.changeRows.map((r) => r.label).join('\n')).toContain('Step 1 · INSERT Account');
+    expect(view.changeRows.map((r) => r.label).join('\n')).toContain('new Account from step 1');
+    expect(view.destructiveRows.map((r) => r.label).join('\n')).toContain('Step 3 · DELETE Account');
+    // The code never rides along in any view field.
+    expect(JSON.stringify(view)).not.toContain('PLAN-CODE');
+
+    // interceptAgentExecute treats a plan row as any dml row (kind is identity).
+    const held = service.interceptAgentExecute('s-plan', 'dml', connId);
+    expect(held).not.toBeNull();
+    await service.approve(rec.id, 'run the plan');
+    const result = await held!;
+    expect(result.isError).not.toBe(true);
+    expect(executed).toEqual([{ connId, code: 'PLAN-CODE', kind: 'dml' }]);
+  });
+});

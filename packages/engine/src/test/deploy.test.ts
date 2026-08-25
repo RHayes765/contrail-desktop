@@ -45,6 +45,11 @@ let lastQuickValidationId = '';
 let failNextQuickDeploy = false;
 let lastDeployBody = '';
 let failNextValidation = false;
+let failCompositeRef: string | null = null;
+let lastCompositeBody: {
+  allOrNone: boolean;
+  compositeRequest: Array<{ method: string; url: string; referenceId: string; body?: unknown }>;
+} | null = null;
 
 /**
  * Captures the structured approval views the engine presents (the test plays
@@ -182,6 +187,52 @@ function stubSalesforce(): void {
         ),
       );
     }
+    // The FULL Composite API (ordered subrequests + @{ref.id} substitution).
+    // Must stay AFTER the more specific /composite/sobjects branch above.
+    if (url.endsWith('/composite')) {
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        allOrNone: boolean;
+        compositeRequest: Array<{ method: string; url: string; referenceId: string; body?: unknown }>;
+      };
+      lastCompositeBody = body;
+      const subs = body.compositeRequest;
+      const failing = failCompositeRef !== null && subs.some((s) => s.referenceId === failCompositeRef);
+      let minted = 0;
+      const compositeResponse = subs.map((sub) => {
+        if (sub.referenceId === failCompositeRef) {
+          return {
+            referenceId: sub.referenceId,
+            httpStatusCode: 400,
+            body: [{ errorCode: 'FIELD_CUSTOM_VALIDATION_EXCEPTION', message: 'blocked by validation rule' }],
+          };
+        }
+        // Realistic PROCESSING_HALTED semantics: with allOrNone every sibling
+        // of the failure halts; without it, only steps that REFERENCE the
+        // failed ref halt (the org can't resolve their token).
+        const referencesFailed =
+          failCompositeRef !== null &&
+          (JSON.stringify(sub.body ?? {}).includes(`@{${failCompositeRef}.id}`) ||
+            sub.url.includes(`@{${failCompositeRef}.id}`));
+        if (failing && (body.allOrNone || referencesFailed)) {
+          return {
+            referenceId: sub.referenceId,
+            httpStatusCode: 400,
+            body: [{ errorCode: 'PROCESSING_HALTED', message: 'halted' }],
+          };
+        }
+        if (sub.method === 'POST') {
+          minted += 1;
+          return {
+            referenceId: sub.referenceId,
+            httpStatusCode: 201,
+            body: { id: `001PLAN0000000${minted}AAA`, success: true, errors: [] },
+          };
+        }
+        return { referenceId: sub.referenceId, httpStatusCode: 204, body: null };
+      });
+      // Top-level 200 even with failures — success lives per subrequest.
+      return new Response(JSON.stringify({ compositeResponse }));
+    }
     if (url.includes('/query?q=')) {
       const q = decodeURIComponent(url);
       if (q.includes('FROM Account')) {
@@ -238,6 +289,8 @@ beforeEach(async () => {
   deployCounter = { validations: 0, realDeploys: 0, quickDeploys: 0 };
   lastQuickValidationId = '';
   failNextQuickDeploy = false;
+  failCompositeRef = null;
+  lastCompositeBody = null;
   const tokens = new MemoryTokenStore();
   const grants = emptyGrantSet();
   grants.metadata_read = true;
@@ -1131,5 +1184,174 @@ describe('quick deploy of a validated package', () => {
     const text = textOf(result);
     expect(text).toContain('"quick_deploy": false');
     expect(text).toContain('quick_deploy_fallback');
+  });
+});
+
+/**
+ * S14 — multi-step DML plans (desktop engine). Same invariant set as the
+ * plugin suite, asserted against the STRUCTURED presenter view (the native
+ * Deploy Review consumes exactly these rows, so what passes here is what the
+ * human sees): one code approves an ordered chain, tokens reach the org
+ * verbatim, the Mode line is honest, delete steps route to the danger card.
+ */
+describe('multi-step dml plans', () => {
+  const FIVE_STEP_PLAN = [
+    { ref: 'acct', operation: 'insert', object: 'Account', record: { Name: 'Plan Test Account' } },
+    {
+      ref: 'con',
+      operation: 'insert',
+      object: 'Contact',
+      record: { LastName: 'PlanTest', AccountId: '@{acct.id}' },
+    },
+    {
+      ref: 'opp',
+      operation: 'insert',
+      object: 'Opportunity',
+      record: { Name: 'Plan Opp', StageName: 'Prospecting', AccountId: '@{acct.id}' },
+    },
+    {
+      operation: 'insert',
+      object: 'OpportunityContactRole',
+      record: { OpportunityId: '@{opp.id}', ContactId: '@{con.id}', Role: 'Decision Maker' },
+    },
+    {
+      operation: 'update',
+      object: 'Opportunity',
+      id: '@{opp.id}',
+      record: { StageName: 'Qualification' },
+    },
+  ];
+
+  async function proposePlan(extra: Record<string, unknown> = {}) {
+    return invokeCapability(deps, 'dml_propose', {
+      connection: 'deploy-org',
+      steps: FIVE_STEP_PLAN,
+      ...extra,
+    });
+  }
+
+  it('the 5-step use case: one view, one code, tokens sent verbatim, ids returned', async () => {
+    const propose = await proposePlan();
+    expect(propose.isError).not.toBe(true);
+    const view = presenter.views.at(-1)!;
+    const code = view.code;
+    expect(textOf(propose)).not.toContain(code); // THE invariant
+
+    const labels = view.changes.map((c) => c.label).join('\n');
+    expect(labels).toContain('Step 1 · INSERT Account');
+    expect(labels).toContain('Step 4 · INSERT OpportunityContactRole');
+    expect(labels).toContain('Step 5 · UPDATE Opportunity');
+    expect(labels).toContain('<new Account from step 1>');
+    const mode = view.results.find((r) => r.label === 'Mode')!;
+    expect(mode.value).toContain('rolls back every step');
+
+    const exec = await invokeCapability(deps, 'dml_execute', {
+      connection: 'deploy-org',
+      confirmation_code: code,
+    });
+    const execText = textOf(exec);
+    expect(execText).toContain('"executed": true');
+    // The org received the tokens UNRESOLVED — substitution is Salesforce's.
+    const sent = JSON.stringify(lastCompositeBody);
+    expect(sent).toContain('@{acct.id}');
+    expect(sent).toContain('@{opp.id}');
+    expect(lastCompositeBody!.compositeRequest.map((s) => s.referenceId).slice(0, 3)).toEqual([
+      'acct',
+      'con',
+      'opp',
+    ]);
+    expect(execText).toContain('"acct"');
+    expect(execText).toContain('001PLAN0000000');
+  });
+
+  it('the view is honest about continue-on-failure mode, with the non-atomic warning', async () => {
+    await proposePlan({ all_or_none: false });
+    const view = presenter.views.at(-1)!;
+    const mode = view.results.find((r) => r.label === 'Mode')!;
+    expect(mode.value).toContain('KEPT');
+    expect(mode.value).not.toContain('rolls back');
+    expect((view.warnings ?? []).join(' ')).toContain('NOT atomic');
+  });
+
+  it('a mixed plan routes delete steps to the destructive card', async () => {
+    await invokeCapability(deps, 'dml_propose', {
+      connection: 'deploy-org',
+      steps: [
+        { ref: 'a', operation: 'insert', object: 'Account', record: { Name: 'Keep' } },
+        { operation: 'delete', object: 'Account', id: '001000000000001AAA' },
+      ],
+    });
+    const view = presenter.views.at(-1)!;
+    expect(view.destructive.map((d) => d.label).join('\n')).toContain('Step 2 · DELETE Account');
+    expect(view.changes.map((c) => c.label).join('\n')).toContain('Step 1 · INSERT Account');
+  });
+
+  it('all-or-none failure reports rolled_back; continue-on-failure keeps independent ids', async () => {
+    await proposePlan();
+    failCompositeRef = 'opp';
+    const atomic = await invokeCapability(deps, 'dml_execute', {
+      connection: 'deploy-org',
+      confirmation_code: presenter.views.at(-1)!.code,
+    });
+    expect(textOf(atomic)).toContain('rolled_back');
+    expect(textOf(atomic)).not.toContain('"id": "001PLAN');
+
+    failCompositeRef = null;
+    await proposePlan({ all_or_none: false });
+    failCompositeRef = 'opp';
+    const partial = await invokeCapability(deps, 'dml_execute', {
+      connection: 'deploy-org',
+      confirmation_code: presenter.views.at(-1)!.code,
+    });
+    const text = textOf(partial);
+    expect(text).toContain('"acct"'); // independent insert kept its id
+    expect(text).toContain('dependent_failed');
+    expect(text).toContain('KEPT');
+  });
+
+  it('the reference grammar is validated shut (representative rejections)', async () => {
+    const forward = await invokeCapability(deps, 'dml_propose', {
+      connection: 'deploy-org',
+      steps: [
+        { operation: 'insert', object: 'Contact', record: { AccountId: '@{acct.id}' } },
+        { ref: 'acct', operation: 'insert', object: 'Account', record: { Name: 'X' } },
+      ],
+    });
+    expect(forward.isError).toBe(true);
+    expect(textOf(forward)).toMatch(/not an EARLIER insert/);
+
+    const idInRecord = await invokeCapability(deps, 'dml_propose', {
+      connection: 'deploy-org',
+      steps: [
+        { ref: 'a', operation: 'insert', object: 'Account', record: { Name: 'X' } },
+        { operation: 'update', object: 'Account', id: '@{a.id}', record: { Id: '001000000000001AAA', Name: 'Y' } },
+      ],
+    });
+    expect(idInRecord.isError).toBe(true);
+    expect(textOf(idInRecord)).toMatch(/never put Id inside record/);
+
+    const flatToken = await invokeCapability(deps, 'dml_propose', {
+      connection: 'deploy-org',
+      operation: 'insert',
+      object: 'Contact',
+      records: [{ LastName: 'X', AccountId: '@{acct.id}' }],
+    });
+    expect(flatToken.isError).toBe(true);
+    expect(textOf(flatToken)).toMatch(/only valid inside a plan/);
+  });
+
+  it('flat inserts now return created ids', async () => {
+    await invokeCapability(deps, 'dml_propose', {
+      connection: 'deploy-org',
+      operation: 'insert',
+      object: 'Account',
+      records: [{ Name: 'Flat Insert' }],
+    });
+    const exec = await invokeCapability(deps, 'dml_execute', {
+      connection: 'deploy-org',
+      confirmation_code: presenter.views.at(-1)!.code,
+    });
+    expect(textOf(exec)).toContain('"created_ids"');
+    expect(textOf(exec)).toContain('001NEW00000000');
   });
 });
