@@ -168,3 +168,50 @@ describe('diffFlowNodes', () => {
     expect(same).toEqual({ changed: [], addedInB: [], removedInB: [] });
   });
 });
+
+describe('Process Builder-generated flows (regression: metadata <name> shadowing)', () => {
+  it('names nodes by the ELEMENT name, not the first nested metadata key', () => {
+    // The PB signature: every element opens with processMetadataValues whose
+    // children carry their own <name> tags — first-match naming registered
+    // nodes as "index"/"referenceTargetField" and left the real names
+    // unresolved (found live in a re-synced org, 2026-08-26).
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <processType>Workflow</processType>
+    <start>
+        <connector><targetReference>myDecision</targetReference></connector>
+    </start>
+    <decisions>
+        <processMetadataValues>
+            <name>index</name>
+            <value><numberValue>0.0</numberValue></value>
+        </processMetadataValues>
+        <name>myDecision</name>
+        <label>myDecision</label>
+        <defaultConnectorLabel>default</defaultConnectorLabel>
+        <rules>
+            <name>myRule_1</name>
+            <conditionLogic>and</conditionLogic>
+            <connector><targetReference>myRule_1_A1</targetReference></connector>
+            <label>the rule</label>
+        </rules>
+    </decisions>
+    <recordUpdates>
+        <processMetadataValues>
+            <name>referenceTargetField</name>
+        </processMetadataValues>
+        <name>myRule_1_A1</name>
+        <label>RunTimeInStatus</label>
+        <filterLogic>and</filterLogic>
+        <object>Case</object>
+    </recordUpdates>
+</Flow>`;
+    const g = parseFlowGraph(xml);
+    const names = g.nodes.map((n) => n.name);
+    expect(names).toContain('myDecision');
+    expect(names).toContain('myRule_1_A1');
+    expect(names).not.toContain('index');
+    expect(names).not.toContain('referenceTargetField');
+    expect(g.unresolved).toEqual([]);
+  });
+});

@@ -86,6 +86,22 @@ function tagValue(block: string, tag: string): string | null {
   return match?.[1]?.trim() ?? null;
 }
 
+/**
+ * The element's OWN <name> — not the first <name> descendant. Process
+ * Builder-generated flows open every element with <processMetadataValues>
+ * blocks whose children include their own <name> tags, so first-match naming
+ * registered those nodes under a metadata key ("index", "referenceTargetField")
+ * and every connector pointing at the real name came back unresolved. Strip
+ * the nested wrappers that legitimately carry <name> children, then match.
+ */
+function elementName(block: string): string | null {
+  const cleaned = block
+    .replace(/<processMetadataValues>[\s\S]*?<\/processMetadataValues>/g, '')
+    .replace(/<inputParameters>[\s\S]*?<\/inputParameters>/g, '')
+    .replace(/<outputParameters>[\s\S]*?<\/outputParameters>/g, '');
+  return tagValue(cleaned, 'name');
+}
+
 /** First targetReference inside the FIRST occurrence of the given connector tag. */
 function connectorTarget(block: string, connectorTag: string): string | null {
   const match = block.match(
@@ -209,7 +225,7 @@ export function parseFlowGraph(xml: string): FlowGraph {
 
   for (const [tag, kind] of ELEMENT_KINDS) {
     for (const block of extractChildBlocks(xml, tag)) {
-      const name = tagValue(block, 'name');
+      const name = elementName(block);
       if (!name) continue;
       defined.add(name);
       let detail: string | null = null;
