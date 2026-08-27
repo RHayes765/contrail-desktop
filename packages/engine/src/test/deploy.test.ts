@@ -985,6 +985,32 @@ describe('dml two-step', () => {
     expect(db.queryAuditEvents({}).map((e) => e.eventType)).toContain('dml.executed');
   });
 
+  it('refuses __mdt objects on the flat path with a pointer to the metadata route (S19)', async () => {
+    const result = await invokeCapability(deps, 'dml_propose', {
+      connection: 'deploy-org',
+      operation: 'insert',
+      object: 'Trigger_Action__mdt',
+      records: [{ Label: 'Nope' }],
+    });
+    const text = textOf(result);
+    expect(text).toMatch(/METADATA, not data/);
+    expect(text).toMatch(/CustomMetadata/);
+    expect(text).toMatch(/<Type>\.<Record>/);
+  });
+
+  it('refuses __mdt objects inside a plan step (S19)', async () => {
+    const result = await invokeCapability(deps, 'dml_propose', {
+      connection: 'deploy-org',
+      steps: [
+        { ref: 'a', operation: 'insert', object: 'Account', record: { Name: 'X' } },
+        { operation: 'insert', object: 'Trigger_Action__mdt', record: { Label: 'Y' } },
+      ],
+    });
+    const text = textOf(result);
+    expect(text).toMatch(/step 2/);
+    expect(text).toMatch(/METADATA, not data/);
+  });
+
   it('deletes render in the destructive section of the approval page', async () => {
     await invokeCapability(deps, 'dml_propose', {
       connection: 'deploy-org',
