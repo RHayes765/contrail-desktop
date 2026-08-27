@@ -17,7 +17,7 @@ import { extractAllEdges, type KnownArtifacts } from '../deps/extract.js';
 
 /** Container types whose children are re-indexed alongside them. */
 export const CHILD_TYPES: Record<string, string[]> = {
-  CustomObject: ['CustomField', 'ValidationRule'],
+  CustomObject: ['CustomField', 'ValidationRule', 'ListView', 'RecordType'],
   CustomLabels: ['CustomLabel'],
 };
 
@@ -35,6 +35,18 @@ const TYPE_DIRS: Record<string, string> = {
   CustomObject: 'objects',
   CustomLabels: 'labels',
   PermissionSet: 'permissionsets',
+  CustomTab: 'tabs',
+  FlexiPage: 'flexipages',
+  CustomApplication: 'applications',
+  ReportType: 'reportTypes',
+  ApexPage: 'pages',
+  GlobalValueSet: 'globalValueSets',
+  ConnectedApp: 'connectedApps',
+  NamedCredential: 'namedCredentials',
+  ExternalCredential: 'externalCredentials',
+  PlatformEventChannel: 'platformEventChannels',
+  PlatformEventChannelMember: 'platformEventChannelMembers',
+  ManagedEventSubscription: 'managedEventSubscriptions',
 };
 
 /** The refreshed types' own directories — null if any requested type has no known mapping. */

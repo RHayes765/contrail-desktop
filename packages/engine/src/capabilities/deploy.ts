@@ -128,8 +128,11 @@ export const deployCapabilities: Capability[] = [
             type: z
               .string()
               .describe(
-                'ApexClass, ApexTrigger, Flow, CustomObject, PermissionSet, or child types ' +
-                  'CustomField / ValidationRule / CustomLabel.',
+                'ApexClass, ApexTrigger, ApexPage, Flow, CustomObject, PermissionSet, ' +
+                  'CustomTab, FlexiPage, CustomApplication, ReportType, GlobalValueSet, ' +
+                  'ConnectedApp, NamedCredential, ExternalCredential, PlatformEventChannel(Member), ' +
+                  'ManagedEventSubscription, or child types CustomField / ValidationRule / ' +
+                  'CustomLabel / ListView / RecordType.',
               ),
             api_name: z.string().describe('Full API name; children dotted (Account.MyField__c).'),
             content: z
