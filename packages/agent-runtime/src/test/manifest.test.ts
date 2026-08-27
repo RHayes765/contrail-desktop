@@ -334,8 +334,14 @@ describe('tool manifest (THE isolation snapshot)', () => {
     );
     expect(withSkills).not.toMatch(/\d{4}-\d{2}-\d{2}|\d{2}:\d{2}/);
 
+    // The house rules make loading a skill part of the contract, and phrase it
+    // conditionally so it still reads correctly when no skills are enabled.
+    expect(withSkills).toMatch(/Load the skill before you do the work/);
+    expect(withSkills).toMatch(/When the Skills section below lists one/);
+
     const without = String(buildSessionOptions(ctxWith([FULL]), invoke).systemPrompt);
     expect(without).not.toContain('# Skills');
+    expect(without).toMatch(/Load the skill before you do the work/); // rule survives, section doesn't
     const empty = String(
       buildSessionOptions({ ...ctxWith([FULL]), skills: [] }, invoke).systemPrompt,
     );
