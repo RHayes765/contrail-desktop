@@ -23,6 +23,8 @@ export {
   isStandardCatalogKey,
   externalServerKey,
   serverEnabled,
+  customSkillKey,
+  skillEnabled,
   catalogCoverageViolations,
   type CatalogEntry,
 } from './capabilities/catalog.js';
@@ -71,6 +73,8 @@ export type {
   CustomMcpServerRecord,
   CustomMcpServerExtras,
   ServerToggleRecord,
+  CustomSkillRecord,
+  SkillToggleRecord,
 } from './core/types.js';
 
 // Connect / Salesforce

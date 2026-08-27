@@ -26,7 +26,8 @@
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "zod": "^3.24.0",
-    "zustand": "^5.0.15"
+    "zustand": "^5.0.15",
+    "@contrail/skills": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",

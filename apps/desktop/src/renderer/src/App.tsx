@@ -11,6 +11,7 @@ import { SessionViewerScreen } from './screens/SessionViewer.js';
 import { MetadataScreen } from './screens/Metadata.js';
 import { DiffScreen } from './screens/Diff.js';
 import { ConnectorsScreen } from './screens/Connectors.js';
+import { SkillsScreen } from './screens/Skills.js';
 import { DeploysScreen } from './screens/Deploys.js';
 import { SettingsScreen } from './screens/Settings.js';
 
@@ -75,6 +76,12 @@ export function App() {
         >
           Connectors
         </button>
+        <button
+          className={screen === 'skills' ? 'active' : ''}
+          onClick={() => useNav.setState({ screen: 'skills', sessionId: null })}
+        >
+          Skills
+        </button>
         <div className="sidebar-spacer" />
         <button
           className={screen === 'settings' ? 'active' : ''}
@@ -116,6 +123,8 @@ export function App() {
           <DiffScreen />
         ) : screen === 'connectors' ? (
           <ConnectorsScreen />
+        ) : screen === 'skills' ? (
+          <SkillsScreen />
         ) : screen === 'deploys' ? (
           <DeploysScreen />
         ) : screen === 'settings' ? (

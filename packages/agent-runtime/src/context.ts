@@ -30,6 +30,15 @@ export function buildSystemPrompt(ctx: SessionContext): string {
     parts.push(`# Project instructions\n${ctx.project.instructions}`);
   }
 
+  // Names + descriptions only — bodies load on demand through read_skill.
+  // The list arrives sorted from main; nothing volatile may appear here.
+  if (ctx.skills && ctx.skills.length > 0) {
+    const lines = ctx.skills.map((s) => `- ${s.name} — ${s.description}`);
+    parts.push(
+      `# Skills\nLoad a skill with read_skill BEFORE relying on its domain:\n${lines.join('\n')}`,
+    );
+  }
+
   const rows = ctx.bindings.map((b) => {
     const granted = grantedList(b.grants).join(', ') || 'none';
     const denied = notGrantedList(b.grants).join(', ') || 'none';

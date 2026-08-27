@@ -39,6 +39,7 @@ import {
   type TranscriptView,
 } from '@contrail/shared';
 import type { ProjectService } from './projects.js';
+import type { SkillService } from './skills.js';
 
 /**
  * AgentSessionManager: one utilityProcess per live session, bridged
@@ -81,6 +82,7 @@ const PROJECT_TOOL_HANDLERS = new Set([
   'read_project_doc',
   'list_project_notes',
   'add_project_note',
+  'read_skill',
 ]);
 
 /** Argument keys that name a target connection, per capability shape. */
@@ -102,6 +104,8 @@ export interface SessionSpec {
   externalServers?: ExternalMcpServerSpec[];
   /** DB ids parallel to externalServers — revocation ends sessions by id. */
   externalServerIds?: string[];
+  /** Skills enabled for the project at session start (prompt listing; reads re-check live). */
+  skills?: Array<{ name: string; description: string }>;
 }
 
 export interface UsageTotals {
@@ -222,6 +226,8 @@ export class AgentSessionRun {
     private readonly silo: ProjectService,
     /** Late-bound native-approval service; null in tests and legacy paths. */
     private readonly deploysRef: () => DeployService | null = () => null,
+    /** Late-bound skill library; null in tests and legacy paths (read_skill refuses). */
+    private readonly skillsRef: () => SkillService | null = () => null,
   ) {}
 
   /**
@@ -413,6 +419,19 @@ export class AgentSessionRun {
           this.capabilityCalls.push({ name, refused: false });
           return okJson({ saved: true, created_at: note.createdAt });
         }
+        case 'read_skill': {
+          const skills = this.skillsRef();
+          if (!skills) {
+            this.capabilityCalls.push({ name, refused: true });
+            return refuse('The skill library is unavailable in this session.');
+          }
+          // Enablement re-checks THIS project's toggles live inside the
+          // service — same gate-is-law posture as connections and catalogs.
+          const result = skills.readSkillText(projectId, String(a.name ?? ''));
+          this.capabilityCalls.push({ name, refused: !result.ok });
+          if (!result.ok) return refuse(result.message);
+          return { content: [{ type: 'text', text: result.text }] };
+        }
         default:
           return refuse(`Unknown project tool: ${name}`);
       }
@@ -474,6 +493,7 @@ export class AgentSessionRun {
       apiKey,
       disabledCatalogKeys: this.spec.disabledCatalogKeys,
       externalServers: this.spec.externalServers,
+      skills: this.spec.skills,
     };
   }
 }
@@ -560,6 +580,13 @@ export class AgentSessionManager {
 
   /** Contrail-owned SDK config dir — session history lives here, never ~/.claude. */
   private readonly claudeConfigDir: string;
+
+  /** The skill library; wired post-construction like the budget service. */
+  private skillService: SkillService | null = null;
+
+  setSkillService(skills: SkillService): void {
+    this.skillService = skills;
+  }
 
   constructor(
     private readonly deps: EngineDeps,
@@ -785,6 +812,7 @@ export class AgentSessionManager {
       disabledCatalogKeys: mcp.disabledCatalogKeys,
       externalServers: mcp.externalServers,
       externalServerIds: mcp.externalServerIds,
+      skills: this.skillService?.resolveSessionSkills(projectId),
     };
 
     const transcriptDir = path.join(dataDir(), 'sessions');
@@ -880,6 +908,8 @@ export class AgentSessionManager {
       disabledCatalogKeys: mcp.disabledCatalogKeys,
       externalServers: mcp.externalServers,
       externalServerIds: mcp.externalServerIds,
+      // Same doctrine as toggles: a resume re-resolves from TODAY's state.
+      skills: this.skillService?.resolveSessionSkills(rec.projectId),
     };
 
     const transcriptPath =
@@ -914,7 +944,14 @@ export class AgentSessionManager {
     apiKey: string,
     resumeSdkSessionId?: string,
   ): LiveSession {
-    const run = new AgentSessionRun(this.deps, spec, sessionId, this.silo, () => this.deployService);
+    const run = new AgentSessionRun(
+      this.deps,
+      spec,
+      sessionId,
+      this.silo,
+      () => this.deployService,
+      () => this.skillService,
+    );
     const ctx = run.buildContext(sessionId, apiKey, this.claudeConfigDir, resumeSdkSessionId);
     const child = utilityProcess.fork(this.childPath, [], { stdio: 'pipe' });
 

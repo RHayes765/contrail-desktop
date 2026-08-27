@@ -271,6 +271,7 @@ describe('tool manifest (THE isolation snapshot)', () => {
       'list_project_docs',
       'list_project_notes',
       'read_project_doc',
+      'read_skill',
     ]);
     const noGrants: BindingWithGrants = {
       ...READ_ONLY,
@@ -314,5 +315,30 @@ describe('tool manifest (THE isolation snapshot)', () => {
     const b = buildSessionOptions(ctxWith([FULL]), invoke).systemPrompt;
     expect(a).toEqual(b);
     expect(String(a)).not.toMatch(/\d{4}-\d{2}-\d{2}|\d{2}:\d{2}/); // no dates/clocks in the prefix
+  });
+
+  it('skills section: present when skills ride the context, absent when none do', () => {
+    const skills = [
+      { name: 'building-salesforce-metadata', description: 'Author deployable metadata.' },
+      { name: 'salesforce-house-rules', description: 'The operating contract for org work.' },
+    ];
+    const withSkills = String(
+      buildSessionOptions({ ...ctxWith([FULL]), skills }, invoke).systemPrompt,
+    );
+    expect(withSkills).toContain('# Skills');
+    expect(withSkills).toContain('read_skill');
+    expect(withSkills).toContain('- salesforce-house-rules — The operating contract for org work.');
+    // Stability applies with skills too.
+    expect(withSkills).toEqual(
+      String(buildSessionOptions({ ...ctxWith([FULL]), skills }, invoke).systemPrompt),
+    );
+    expect(withSkills).not.toMatch(/\d{4}-\d{2}-\d{2}|\d{2}:\d{2}/);
+
+    const without = String(buildSessionOptions(ctxWith([FULL]), invoke).systemPrompt);
+    expect(without).not.toContain('# Skills');
+    const empty = String(
+      buildSessionOptions({ ...ctxWith([FULL]), skills: [] }, invoke).systemPrompt,
+    );
+    expect(empty).not.toContain('# Skills');
   });
 });

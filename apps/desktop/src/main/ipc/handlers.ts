@@ -8,6 +8,7 @@ import { SnapshotService } from '../services/snapshots.js';
 import { DiffService, MetadataService } from '../services/metadata.js';
 import { SummaryService } from '../services/summaries.js';
 import { McpConfigService } from '../services/mcpConfig.js';
+import { SkillService } from '../services/skills.js';
 import { DeployService } from '../services/deploys.js';
 import { SettingsService } from '../services/settings.js';
 import { BudgetService } from '../services/budget.js';
@@ -27,6 +28,7 @@ export interface MainServices {
   diff: DiffService;
   summaries: SummaryService;
   mcp: McpConfigService;
+  skills: SkillService;
   deploys: DeployService;
   settings: SettingsService;
   budget: BudgetService;
@@ -35,7 +37,7 @@ export interface MainServices {
 }
 
 export function makeHandlers(health: HealthView, services: MainServices) {
-  const { connections, projects, sessions, snapshots, metadata, diff, summaries, mcp, deploys, settings, budget } =
+  const { connections, projects, sessions, snapshots, metadata, diff, summaries, mcp, skills, deploys, settings, budget } =
     services;
   return {
     'app:health': (deps: EngineDeps): HealthView => ({
@@ -202,6 +204,21 @@ export function makeHandlers(health: HealthView, services: MainServices) {
     ) => mcp.updateServer(req),
     'mcp:servers:setDefaultOn': (_deps: EngineDeps, req: { id: string; defaultOn: boolean }) =>
       mcp.setDefaultOn(req.id, req.defaultOn),
+
+    'skills:list': () => skills.listLibrary(),
+    'skills:add': () => skills.addViaDialog(services.getWindow()),
+    'skills:remove': (_deps: EngineDeps, req: { id: string }) => {
+      skills.remove(req.id);
+      return { ok: true };
+    },
+    'skills:setDefaultOn': (_deps: EngineDeps, req: { id: string; defaultOn: boolean }) =>
+      skills.setDefaultOn(req.id, req.defaultOn),
+    'skills:project': (_deps: EngineDeps, req: { projectId: string }) =>
+      skills.projectView(req.projectId),
+    'skills:setToggle': (
+      _deps: EngineDeps,
+      req: { projectId: string; skillKey: string; enabled: boolean },
+    ) => skills.setToggle(req.projectId, req.skillKey, req.enabled),
     'mcp:servers:remove': async (_deps: EngineDeps, req: { id: string }) => {
       await mcp.removeServer(req.id);
       return { ok: true };

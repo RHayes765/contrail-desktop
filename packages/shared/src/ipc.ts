@@ -21,6 +21,8 @@ import type {
   PingResultView,
   ProjectDocView,
   ProjectMcpView,
+  ProjectSkillsView,
+  SkillView,
   ProjectNoteView,
   ProjectView,
   SavedSummaryView,
@@ -180,6 +182,18 @@ export const REQUEST_SCHEMAS = {
   'mcp:servers:test': z.object({ id: ID }),
   'mcp:servers:authorize': z.object({ id: ID }),
 
+  // Skill library (S18): universal library, selected per project.
+  'skills:list': z.object({}),
+  'skills:add': z.object({}), // main-side folder dialog
+  'skills:remove': z.object({ id: ID }),
+  'skills:setDefaultOn': z.object({ id: ID, defaultOn: z.boolean() }),
+  'skills:project': z.object({ projectId: ID }),
+  'skills:setToggle': z.object({
+    projectId: ID,
+    skillKey: z.string().min(1).max(160),
+    enabled: z.boolean(),
+  }),
+
   'deploys:list': z.object({ connectionId: ID.optional() }),
   'deploys:get': z.object({ id: ID }),
   'deploys:approve': z.object({ id: ID, comment: z.string().max(1000).optional() }),
@@ -337,6 +351,16 @@ export interface Contracts {
   'mcp:servers:authorize': {
     req: { id: string };
     res: { ok: boolean; detail: string; test: McpServerTestView | null };
+  };
+
+  'skills:list': { req: Record<string, never>; res: SkillView[] };
+  'skills:add': { req: Record<string, never>; res: SkillView };
+  'skills:remove': { req: { id: string }; res: { ok: boolean } };
+  'skills:setDefaultOn': { req: { id: string; defaultOn: boolean }; res: SkillView };
+  'skills:project': { req: { projectId: string }; res: ProjectSkillsView };
+  'skills:setToggle': {
+    req: { projectId: string; skillKey: string; enabled: boolean };
+    res: ProjectSkillsView;
   };
 
   'deploys:list': { req: { connectionId?: string }; res: DeployRequestView[] };

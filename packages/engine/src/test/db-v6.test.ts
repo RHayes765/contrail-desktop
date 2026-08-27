@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { ContrailDb } from '../core/db.js';
+import { customSkillKey, skillEnabled } from '../capabilities/catalog.js';
 
 /**
  * Schema v6 — the desktop additions — and the v5 freeze contract: the shared
@@ -26,8 +27,8 @@ afterEach(() => {
 });
 
 describe('schema v6', () => {
-  it('fresh databases land on user_version 12', () => {
-    expect(db.schemaVersion()).toBe(12);
+  it('fresh databases land on user_version 13', () => {
+    expect(db.schemaVersion()).toBe(13);
   });
 
   it('creates every desktop table', () => {
@@ -109,7 +110,7 @@ describe('schema v6', () => {
   it('reopening an already-v6 database is a no-op migration', () => {
     db.close();
     const again = new ContrailDb(dbPath);
-    expect(again.schemaVersion()).toBe(12);
+    expect(again.schemaVersion()).toBe(13);
     again.close();
     db = new ContrailDb(dbPath); // for afterEach
   });
@@ -160,7 +161,7 @@ describe('v10 → v11 upgrade on an existing database', () => {
     raw.close();
 
     db = new ContrailDb(dbPath);
-    expect(db.schemaVersion()).toBe(12);
+    expect(db.schemaVersion()).toBe(13);
 
     const check = new Database(dbPath, { readonly: true });
     const tables = (
@@ -214,7 +215,7 @@ describe('v11 -> v12 upgrade on an existing database', () => {
     raw.close();
 
     db = new ContrailDb(dbPath);
-    expect(db.schemaVersion()).toBe(12);
+    expect(db.schemaVersion()).toBe(13);
     const upgraded = db.getCustomMcpServer(server.id);
     expect(upgraded?.name).toBe('Legacy Slack');
     // Old servers stay opt-in per project — the upgrade changes nothing about
@@ -223,5 +224,63 @@ describe('v11 -> v12 upgrade on an existing database', () => {
 
     db.updateCustomMcpServer(server.id, { defaultOn: true });
     expect(db.getCustomMcpServer(server.id)?.defaultOn).toBe(true);
+  });
+});
+
+/** The v12 → v13 step: the skill library's two tables. */
+describe('v12 -> v13 upgrade and the skill library', () => {
+  it('creates the tables on upgrade from a real v12 file', () => {
+    db.close();
+    const raw = new Database(dbPath);
+    raw.exec(`DROP TABLE custom_skills; DROP TABLE skill_toggles;`);
+    raw.pragma('user_version = 12');
+    raw.close();
+
+    db = new ContrailDb(dbPath);
+    expect(db.schemaVersion()).toBe(13);
+    expect(db.listCustomSkills()).toEqual([]);
+  });
+
+  it('custom skills round-trip; removal cleans every project toggle in one tx', () => {
+    const skill = db.addCustomSkill({
+      name: 'client-style-guide',
+      description: 'House style for the client engagement.',
+      dirName: 'abc123',
+    });
+    expect(skill.defaultOn).toBe(false);
+    expect(db.setCustomSkillDefaultOn(skill.id, true)?.defaultOn).toBe(true);
+
+    // Name uniqueness is case-insensitive.
+    expect(() =>
+      db.addCustomSkill({ name: 'CLIENT-STYLE-GUIDE', description: 'dupe', dirName: 'x' }),
+    ).toThrow();
+
+    db.setSkillToggle('proj-1', `ext:${skill.id}`, false);
+    db.setSkillToggle('proj-2', `ext:${skill.id}`, true);
+    expect(db.getSkillToggles('proj-1')).toEqual([{ skillKey: `ext:${skill.id}`, enabled: false }]);
+
+    db.removeCustomSkill(skill.id);
+    expect(db.getCustomSkill(skill.id)).toBeNull();
+    expect(db.getSkillToggles('proj-1')).toEqual([]);
+    expect(db.getSkillToggles('proj-2')).toEqual([]);
+  });
+
+  it('skillEnabled: explicit toggles beat bundled-on and custom defaults', () => {
+    // bundled: on absent a row; explicit off wins
+    expect(skillEnabled([], 'salesforce-house-rules', true)).toBe(true);
+    expect(skillEnabled([{ skillKey: 'salesforce-house-rules', enabled: false }], 'salesforce-house-rules', true)).toBe(false);
+    // custom: default_on drives the absent-row case; explicit on wins over default-off
+    expect(skillEnabled([], 'ext:abc', false, false)).toBe(false);
+    expect(skillEnabled([], 'ext:abc', false, true)).toBe(true);
+    expect(skillEnabled([{ skillKey: 'ext:abc', enabled: true }], 'ext:abc', false, false)).toBe(true);
+    expect(customSkillKey('abc')).toBe('ext:abc');
+  });
+
+  it('deleting a project removes its skill toggles', () => {
+    const p = db.createProject({ name: 'Doomed' });
+    db.setSkillToggle(p.id, 'salesforce-house-rules', false);
+    expect(db.getSkillToggles(p.id)).toHaveLength(1);
+    db.deleteProject(p.id);
+    expect(db.getSkillToggles(p.id)).toEqual([]);
   });
 });

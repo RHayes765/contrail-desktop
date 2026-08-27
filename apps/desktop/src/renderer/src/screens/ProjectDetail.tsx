@@ -3,12 +3,13 @@ import type { EnvRole } from '@contrail/shared';
 import { useProjects } from '../stores/projects.js';
 import { useConnections } from '../stores/connections.js';
 import { useMcp } from '../stores/mcp.js';
+import { useSkills } from '../stores/skills.js';
 import { useNav } from '../stores/nav.js';
 import { useChat } from '../stores/chat.js';
 
 const ENV_ROLES: EnvRole[] = ['dev', 'qa', 'uat', 'prod', 'other'];
 
-type Tab = 'sessions' | 'bindings' | 'capabilities' | 'instructions' | 'docs' | 'notes';
+type Tab = 'sessions' | 'bindings' | 'capabilities' | 'skills' | 'instructions' | 'docs' | 'notes';
 
 /** Per-project catalog family + external-server toggle panel. */
 function CapabilitiesTab({ projectId }: { projectId: string }) {
@@ -92,6 +93,63 @@ function CapabilitiesTab({ projectId }: { projectId: string }) {
             ))}
           </>
         )}
+      </div>
+    </>
+  );
+}
+
+/** Per-project skill selection: bundled default-on, custom opt-in, explicit choices win. */
+function SkillsTab({ projectId }: { projectId: string }) {
+  const { project, projectId: loadedFor, loadProject, setToggle, error, clearError } = useSkills();
+  const { goSkills } = useNav();
+
+  useEffect(() => {
+    void loadProject(projectId);
+  }, [projectId, loadProject]);
+
+  if (!project || loadedFor !== projectId) {
+    return error ? (
+      <div className="notice clickable" onClick={clearError} title="Dismiss">
+        {error}
+      </div>
+    ) : (
+      <div className="empty">Loading…</div>
+    );
+  }
+
+  const bundled = project.skills.filter((s) => s.source === 'bundled');
+  const custom = project.skills.filter((s) => s.source === 'custom');
+
+  return (
+    <>
+      {error && (
+        <div className="notice clickable" onClick={clearError} title="Dismiss">
+          {error}
+        </div>
+      )}
+      <div className="panel grants-editor">
+        <h3>Skills</h3>
+        <p className="hint">
+          Enabled skills are announced to this project&apos;s sessions (the agent loads the full
+          instructions on demand). New sessions pick up changes at start; a running session loses a
+          disabled skill on its next read.{' '}
+          <button className="crumb" onClick={goSkills}>
+            Manage the library →
+          </button>
+        </p>
+        {[...bundled, ...custom].map((s) => (
+          <label key={s.key} className="grant-toggle">
+            <input
+              type="checkbox"
+              checked={s.enabled}
+              onChange={(e) => void setToggle(projectId, s.key, e.target.checked)}
+            />
+            <span>
+              <strong>{s.name}</strong>{' '}
+              <span className="meter-dim">({s.source})</span> — {s.description}
+            </span>
+          </label>
+        ))}
       </div>
     </>
   );
@@ -208,7 +266,7 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
       )}
 
       <div className="tabs">
-        {(['sessions', 'bindings', 'capabilities', 'instructions', 'docs', 'notes'] as Tab[]).map(
+        {(['sessions', 'bindings', 'capabilities', 'skills', 'instructions', 'docs', 'notes'] as Tab[]).map(
           (t) => (
             <button key={t} className={tab === t ? 'on' : ''} onClick={() => setTab(t)}>
               {t}
@@ -218,6 +276,7 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
       </div>
 
       {tab === 'capabilities' && <CapabilitiesTab projectId={project.id} />}
+      {tab === 'skills' && <SkillsTab projectId={project.id} />}
 
       {tab === 'sessions' && (
         <div className="panel-list">

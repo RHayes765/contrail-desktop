@@ -99,6 +99,29 @@ export function serverEnabled(
   return isStandardCatalogKey(serverKey) || externalDefault;
 }
 
+/** skill_key for a custom (uploaded) skill row — stable across renames. */
+export function customSkillKey(skillId: string): string {
+  return `ext:${skillId}`;
+}
+
+/**
+ * Resolve a skill toggle (v13) — serverEnabled's sibling with the same
+ * precedence: an explicit per-project row always wins; absent a row, bundled
+ * skills are ON and custom skills fall back to their own default_on flag
+ * (engagement isolation: an uploaded skill must never flow into a client
+ * project silently unless its owner said "on by default").
+ */
+export function skillEnabled(
+  toggles: ReadonlyArray<{ skillKey: string; enabled: boolean }>,
+  skillKey: string,
+  isBundled: boolean,
+  customDefault = false,
+): boolean {
+  const row = toggles.find((t) => t.skillKey === skillKey);
+  if (row) return row.enabled;
+  return isBundled || customDefault;
+}
+
 /** Every grant-bearing capability must appear in exactly one catalog entry. */
 export function catalogCoverageViolations(): string[] {
   const problems: string[] = [];

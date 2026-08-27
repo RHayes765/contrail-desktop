@@ -120,6 +120,16 @@ export const PROJECT_TOOLS: ProjectToolDef[] = [
       body: z.string().describe('The note text (plain text or markdown, max 10,000 chars).'),
     },
   },
+  {
+    name: 'read_skill',
+    description:
+      'Load a skill by name — the available skills are listed in the system prompt. ' +
+      'Returns the skill\'s full instructions; load it BEFORE relying on its domain. ' +
+      'Skills a project has disabled refuse to load.',
+    inputSchema: {
+      name: z.string().describe('Exact skill name from the system prompt\'s Skills list.'),
+    },
+  },
 ];
 
 export const PROJECT_TOOL_NAMES: readonly string[] = PROJECT_TOOLS.map((t) => t.name);

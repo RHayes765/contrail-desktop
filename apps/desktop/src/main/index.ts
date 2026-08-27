@@ -13,6 +13,7 @@ import { SnapshotService, SnapshotWorkerBridge } from './services/snapshots.js';
 import { DiffService, MetadataService } from './services/metadata.js';
 import { SummaryService } from './services/summaries.js';
 import { McpConfigService, resolveSessionMcp } from './services/mcpConfig.js';
+import { SkillService } from './services/skills.js';
 import { DeployService, type DeployAlert } from './services/deploys.js';
 import { SettingsService } from './services/settings.js';
 import { BudgetService } from './services/budget.js';
@@ -1334,6 +1335,9 @@ ${logFilePath()}`,
   budget.logPolicy();
   sessionManager.setBudgetService(budget);
 
+  const skillService = new SkillService(boot.deps);
+  sessionManager.setSkillService(skillService);
+
   const services: MainServices = {
     connections,
     projects,
@@ -1350,6 +1354,7 @@ ${logFilePath()}`,
       // live sessions that resolved the server (see McpConfigService).
       await sessionManager?.endForExternalServer(serverId, scopedProjectId);
     }),
+    skills: skillService,
     getWindow: () => mainWindow,
   };
 

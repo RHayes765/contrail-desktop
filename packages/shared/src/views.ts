@@ -440,6 +440,31 @@ export interface ProjectMcpView {
   externalServers: ExternalServerProjectView[];
 }
 
+/** One skill in the universal library (S18). */
+export interface SkillView {
+  /** Toggle key: bundled = the skill name, custom = 'ext:<id>'. */
+  key: string;
+  name: string;
+  description: string;
+  source: 'bundled' | 'custom';
+  /** Joins projects with no explicit toggle row. Bundled skills are always true. */
+  defaultOn: boolean;
+  /** Custom skills only; null for bundled (they cannot be removed). */
+  id: string | null;
+}
+
+/** The per-project skill selection panel. */
+export interface ProjectSkillsView {
+  projectId: string;
+  skills: Array<{
+    key: string;
+    name: string;
+    description: string;
+    source: 'bundled' | 'custom';
+    enabled: boolean;
+  }>;
+}
+
 /**
  * Registry view of a custom MCP server. Header and env VALUES are auth
  * material and never leave the main process — views carry names only.

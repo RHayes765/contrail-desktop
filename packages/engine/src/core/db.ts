@@ -11,6 +11,7 @@ import type {
   ConnectionRecord,
   CustomMcpServerExtras,
   CustomMcpServerRecord,
+  CustomSkillRecord,
   DependencyEdge,
   DeployRequestRecord,
   OrgType,
@@ -19,6 +20,7 @@ import type {
   ProjectRecord,
   SavedSummaryRecord,
   ServerToggleRecord,
+  SkillToggleRecord,
 } from './types.js';
 
 // ── split-brain guard ────────────────────────────────────────────────────
@@ -84,7 +86,7 @@ function assertDbLineage(db: Database.Database): void {
   );
 }
 
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 
 /**
  * Local SQLite store: connection metadata and the audit log (P0.1); the
@@ -463,6 +465,36 @@ export class ContrailDb {
           `ALTER TABLE custom_mcp_servers ADD COLUMN default_on INTEGER NOT NULL DEFAULT 0;`,
         );
       }
+      if (current < 13) {
+        // v13 (desktop-owned, additive — freeze-contract legal): the skill
+        // library. Bundled skills live in @contrail/skills and are NOT
+        // persisted (like STANDARD_CATALOG); custom_skills holds uploads,
+        // skill_toggles the per-project selection. Same key scheme as MCP:
+        // bundled = '<name>', custom = 'ext:<id>' (see catalog.ts
+        // skillEnabled — bundled default ON, custom default = default_on,
+        // explicit toggles always win). Toggle writes require a project id
+        // — same NULL-distinct-UNIQUE trap as mcp_server_toggles.
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS custom_skills (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL DEFAULT 'default',
+            name         TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            description  TEXT NOT NULL,
+            dir_name     TEXT NOT NULL,
+            default_on   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS skill_toggles (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL DEFAULT 'default',
+            project_id   TEXT,
+            skill_key    TEXT NOT NULL,
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            UNIQUE (project_id, skill_key)
+          );
+        `);
+      }
       this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     });
     tx();
@@ -560,6 +592,7 @@ export class ContrailDb {
       this.db.prepare(`DELETE FROM project_docs WHERE project_id = ?`).run(id);
       this.db.prepare(`DELETE FROM project_notes WHERE project_id = ?`).run(id);
       this.db.prepare(`DELETE FROM mcp_server_toggles WHERE project_id = ?`).run(id);
+      this.db.prepare(`DELETE FROM skill_toggles WHERE project_id = ?`).run(id);
       this.db.prepare(`DELETE FROM projects WHERE id = ?`).run(id);
     });
     tx();
@@ -840,6 +873,97 @@ export class ContrailDb {
       this.db.prepare(`DELETE FROM custom_mcp_servers WHERE id = ?`).run(id);
     });
     tx();
+  }
+
+  // ── Skill library (v13) ────────────────────────────────────────────────
+  // Same discipline as the MCP toggles above: toggle writes require a
+  // project id, reads filter on it. Bundled skills never touch these tables.
+
+  getSkillToggles(projectId: string): SkillToggleRecord[] {
+    return (
+      this.db
+        .prepare(`SELECT skill_key, enabled FROM skill_toggles WHERE project_id = ?`)
+        .all(projectId) as Array<{ skill_key: string; enabled: number }>
+    ).map((r) => ({ skillKey: r.skill_key, enabled: r.enabled === 1 }));
+  }
+
+  setSkillToggle(projectId: string, skillKey: string, enabled: boolean): void {
+    if (!projectId) throw new Error('setSkillToggle requires a project id.');
+    if (!skillKey) throw new Error('setSkillToggle requires a skill key.');
+    this.db
+      .prepare(
+        `INSERT INTO skill_toggles (id, workspace_id, project_id, skill_key, enabled)
+         VALUES (?, 'default', ?, ?, ?)
+         ON CONFLICT (project_id, skill_key) DO UPDATE SET enabled = excluded.enabled`,
+      )
+      .run(randomUUID(), projectId, skillKey, enabled ? 1 : 0);
+  }
+
+  listCustomSkills(): CustomSkillRecord[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT id, name, description, dir_name, default_on, created_at, updated_at
+           FROM custom_skills ORDER BY name COLLATE NOCASE`,
+        )
+        .all() as Array<Record<string, unknown>>
+    ).map((r) => this.customSkillFromRow(r));
+  }
+
+  getCustomSkill(id: string): CustomSkillRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, name, description, dir_name, default_on, created_at, updated_at
+         FROM custom_skills WHERE id = ?`,
+      )
+      .get(id) as Record<string, unknown> | undefined;
+    return row ? this.customSkillFromRow(row) : null;
+  }
+
+  addCustomSkill(input: { name: string; description: string; dirName: string }): CustomSkillRecord {
+    if (!input.name.trim()) throw new Error('Skill name is required.');
+    if (!input.description.trim()) throw new Error('Skill description is required.');
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO custom_skills (id, workspace_id, name, description, dir_name, default_on, created_at, updated_at)
+         VALUES (?, 'default', ?, ?, ?, 0, ?, ?)`,
+      )
+      .run(id, input.name.trim(), input.description.trim(), input.dirName, now, now);
+    const created = this.getCustomSkill(id);
+    if (!created) throw new Error('custom skill insert did not persist');
+    return created;
+  }
+
+  setCustomSkillDefaultOn(id: string, defaultOn: boolean): CustomSkillRecord | null {
+    const current = this.getCustomSkill(id);
+    if (!current) return null;
+    this.db
+      .prepare(`UPDATE custom_skills SET default_on = ?, updated_at = ? WHERE id = ?`)
+      .run(defaultOn ? 1 : 0, new Date().toISOString(), id);
+    return this.getCustomSkill(id);
+  }
+
+  /** Removes the skill and every project's toggle rows for it. */
+  removeCustomSkill(id: string): void {
+    const tx = this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM skill_toggles WHERE skill_key = ?`).run(`ext:${id}`);
+      this.db.prepare(`DELETE FROM custom_skills WHERE id = ?`).run(id);
+    });
+    tx();
+  }
+
+  private customSkillFromRow(r: Record<string, unknown>): CustomSkillRecord {
+    return {
+      id: r.id as string,
+      name: r.name as string,
+      description: r.description as string,
+      dirName: r.dir_name as string,
+      defaultOn: (r.default_on as number) === 1,
+      createdAt: r.created_at as string,
+      updatedAt: r.updated_at as string,
+    };
   }
 
   private customServerFromRow(r: Record<string, unknown>): CustomMcpServerRecord {

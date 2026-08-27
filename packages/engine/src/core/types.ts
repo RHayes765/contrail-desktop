@@ -200,6 +200,24 @@ export interface ServerToggleRecord {
   enabled: boolean;
 }
 
+/** A user-uploaded skill in the universal library (v13). Bundled skills are not persisted. */
+export interface CustomSkillRecord {
+  id: string;
+  name: string;
+  description: string;
+  /** Folder name under dataDir()/skills/ holding SKILL.md (+ assets). */
+  dirName: string;
+  /** Absent a per-project toggle row, is this skill on for a project? */
+  defaultOn: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SkillToggleRecord {
+  skillKey: string;
+  enabled: boolean;
+}
+
 /** A saved AI summary, addressed by what it describes (see db v11). */
 export interface SavedSummaryRecord {
   kind: 'artifact' | 'diff';

@@ -68,6 +68,13 @@ export interface SessionContext {
   disabledCatalogKeys?: string[];
   /** External MCP servers enabled for this project (see ExternalMcpServerSpec). */
   externalServers?: ExternalMcpServerSpec[];
+  /**
+   * Skills enabled for this project at session start, listed in the system
+   * prompt (name + description only — bodies load via read_skill). Sorted by
+   * name upstream so the prompt prefix stays cache-stable. The executor
+   * re-checks enablement live on every read.
+   */
+  skills?: Array<{ name: string; description: string }>;
 }
 
 /** Events the runtime streams back to main (and main forwards to the renderer). */
