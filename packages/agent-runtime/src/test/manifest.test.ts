@@ -83,6 +83,7 @@ describe('tool manifest (THE isolation snapshot)', () => {
       'list_metadata',
       'refresh_snapshot',
       'retrieve_metadata',
+      'run_apex_tests',
       'search_metadata',
       'soql_query',
       'validate_deploy',
@@ -166,6 +167,7 @@ describe('tool manifest (THE isolation snapshot)', () => {
       'deactivate_flow',
       'get_debug_logs',
       'get_flow_errors',
+      'run_apex_tests',
     ]) {
       expect(names).not.toContain(gone);
     }

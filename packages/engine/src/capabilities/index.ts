@@ -21,7 +21,7 @@ const ALL: Capability[] = [
 
 const BY_NAME = new Map(ALL.map((c) => [c.name, c]));
 
-/** Every capability, in registration order (23 as of the Phase 0 port). */
+/** Every capability, in registration order (the Phase 0 tools plus later additions). */
 export function allCapabilities(): Capability[] {
   return [...ALL];
 }

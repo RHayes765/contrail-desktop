@@ -18,7 +18,7 @@ const BANNED: Array<{ re: RegExp; why: string }> = [
   { re: /run_code_analyzer/i, why: 'DX MCP analyzer tool' },
   { re: /--target-org/i, why: 'sf CLI org addressing' },
   { re: /\bexecute_metadata_action\b/i, why: 'DX MCP generation pipeline' },
-  { re: /\bapex\s+run\s+test\b/i, why: 'standalone test runner' },
+  { re: /\bapex\s+run\s+test\b/i, why: 'sf CLI test invocation (Contrail: validate_deploy or run_apex_tests)' },
 ];
 
 describe('bundled skill pack', () => {
