@@ -53,6 +53,9 @@ publish:
   provider: github
   owner: RHayes765
   repo: contrail-desktop
+  # Publish as a real release, not electron-builder's default draft — drafts
+  # are invisible to the updater feed and the public releases list.
+  releaseType: release
 
 win:
   target: nsis
