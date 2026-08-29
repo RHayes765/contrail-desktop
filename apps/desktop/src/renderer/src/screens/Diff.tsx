@@ -406,9 +406,10 @@ type FlowViewMode = 'changes' | 'split' | 'diagramA' | 'diagramB' | 'raw';
 /**
  * Both versions of a flow side by side, fullscreen. ONE selection name is
  * shared across the panes: clicking a node highlights its same-named twin in
- * the other version — and a node that exists on only one side (an add or a
- * remove) highlights there alone, because there is nothing to twin it with.
- * Name matching is case-insensitive (diffFlowNodes matches the same way).
+ * the other version AND snaps the other pane's view onto it — and a node
+ * that exists on only one side (an add or a remove) highlights there alone,
+ * because there is nothing to twin it with. Name matching is
+ * case-insensitive (diffFlowNodes matches the same way).
  */
 function SplitFlowView({
   drill,
@@ -424,8 +425,16 @@ function SplitFlowView({
   const [sel, setSel] = useState<string | null>(null);
   const graphA = drill.flowGraphA!;
   const graphB = drill.flowGraphB!;
-  const namesA = useMemo(() => new Set(graphA.nodes.map((n) => n.name.toLowerCase())), [graphA]);
-  const namesB = useMemo(() => new Set(graphB.nodes.map((n) => n.name.toLowerCase())), [graphB]);
+  // lowercased name → that graph's ACTUAL casing (node DOM ids carry the
+  // per-graph casing, and it can differ across orgs).
+  const namesA = useMemo(
+    () => new Map(graphA.nodes.map((n) => [n.name.toLowerCase(), n.name])),
+    [graphA],
+  );
+  const namesB = useMemo(
+    () => new Map(graphB.nodes.map((n) => [n.name.toLowerCase(), n.name])),
+    [graphB],
+  );
 
   // The overlay owns Escape — the embedded diagrams deliberately don't listen
   // (two listeners would double-fire).
@@ -437,7 +446,26 @@ function SplitFlowView({
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
-  const inPane = (names: Set<string>) => (sel && names.has(sel.toLowerCase()) ? sel : null);
+  const inPane = (names: Map<string, string>) =>
+    sel && names.has(sel.toLowerCase()) ? sel : null;
+
+  /**
+   * A click in one pane selects everywhere AND snaps the OTHER pane's view
+   * to the twin (same mechanism as the Go-To pills — the panes' id prefixes
+   * keep the lookup unambiguous). Adds/removes have no twin: nothing snaps.
+   */
+  const selectFrom =
+    (otherPrefix: 'a:' | 'b:', otherNames: Map<string, string>) => (name: string | null) => {
+      setSel(name);
+      if (!name) return;
+      const twin = otherNames.get(name.toLowerCase());
+      if (!twin) return;
+      document.getElementById(`flow-node-${otherPrefix}${twin}`)?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+        inline: 'center',
+      });
+    };
 
   return (
     <div className="flow-fullscreen flow-split">
@@ -450,7 +478,7 @@ function SplitFlowView({
           <span className="flow-legend-swatch added" /> added
           <span className="flow-legend-swatch removed" /> removed
           <span className="flow-split-hint">
-            click a node — its twin lights up in the other version
+            click a node — the other version snaps to its twin
           </span>
         </span>
         <button onClick={onClose}>Close (Esc)</button>
@@ -464,7 +492,7 @@ function SplitFlowView({
             embedded
             idPrefix="a:"
             selectedName={inPane(namesA)}
-            onSelectName={setSel}
+            onSelectName={selectFrom('b:', namesB)}
           />
         </div>
         <div className="flow-split-pane">
@@ -475,7 +503,7 @@ function SplitFlowView({
             embedded
             idPrefix="b:"
             selectedName={inPane(namesB)}
-            onSelectName={setSel}
+            onSelectName={selectFrom('a:', namesA)}
           />
         </div>
       </div>
