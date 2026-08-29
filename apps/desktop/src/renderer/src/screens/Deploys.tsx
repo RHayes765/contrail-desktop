@@ -77,7 +77,12 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
           {request.orgName ?? request.instanceUrl} · <strong>{request.orgType}</strong>
         </div>
         <div className="conn-detail meter-dim">
-          {request.kind === 'deploy' ? 'Metadata deploy' : 'Data change (DML)'} ·{' '}
+          {request.kind === 'deploy'
+            ? 'Metadata deploy'
+            : request.kind === 'apex'
+              ? 'Anonymous Apex script'
+              : 'Data change (DML)'}{' '}
+          ·{' '}
           {stateLabel(request)} · expires {new Date(request.expiresAt).toLocaleTimeString()}
         </div>
       </div>
@@ -258,7 +263,11 @@ export function DeploysScreen() {
                   <span className={`env-badge env-${orgClass(r.orgType)}`}>{r.orgType}</span>{' '}
                   <span className="conn-alias">{r.alias}</span>{' '}
                   <span className="meter-dim">
-                    {r.kind === 'deploy' ? 'metadata deploy' : 'data change'}
+                    {r.kind === 'deploy'
+                      ? 'metadata deploy'
+                      : r.kind === 'apex'
+                        ? 'anonymous Apex'
+                        : 'data change'}
                   </span>
                 </div>
                 <div className="conn-detail">

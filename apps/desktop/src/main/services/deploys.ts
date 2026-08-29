@@ -3,6 +3,7 @@ import {
   type ApprovalPresentation,
   type ApprovalPresenter,
   type ApprovalRequestView,
+  type DeployRequestKind,
   type DeployRequestRecord,
   type EngineDeps,
 } from '@contrail/engine';
@@ -27,7 +28,7 @@ type PushFn = <C extends PushChannel>(channel: C, payload: PushEvents[C]) => voi
 
 export interface DeployAlert {
   requestId: string;
-  kind: 'deploy' | 'dml';
+  kind: DeployRequestKind;
   connection: string;
   orgType: string;
 }
@@ -298,6 +299,10 @@ export class DeployService {
           // told the agent "executed" for a failed deploy.
           failed = outcomeFailed(outcome.result);
         }
+      } else if (rec.kind === 'apex') {
+        const result = await this.deps.deploys.executeApex(conn, code);
+        failed = outcomeFailed(result);
+        detail = result;
       } else {
         const result = await this.deps.deploys.executeDml(conn, code);
         failed = outcomeFailed(result);
@@ -362,7 +367,7 @@ export class DeployService {
    */
   interceptAgentExecute(
     sessionId: string,
-    kind: 'deploy' | 'dml',
+    kind: DeployRequestKind,
     connectionId: string,
   ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> | null {
     // Whole history for this (connection, kind) — NOT a 10-row window that a
@@ -550,6 +555,21 @@ export class DeployService {
           if (r.destructive) destructiveRows = [...destructiveRows, row];
           else changeRows = [...changeRows, row];
         }
+      } else if (rec.kind === 'apex') {
+        // An apex request proposed OUTSIDE this app (plugin path, shared DB)
+        // has no review_json — synthesize the script row from payload_json so
+        // the screen never shows an approvable blank for a script.
+        const payload = parseJson(rec.payloadJson ?? '') as { apex?: boolean; code?: string } | null;
+        const script = typeof payload?.code === 'string' ? payload.code : null;
+        changeRows = [
+          {
+            label: `Execute anonymous Apex (${script ? script.split(/\r?\n/).length : '?'} lines)`,
+            warnings: [
+              'ANONYMOUS APEX — runs with the approving user\'s permissions; DML it performs COMMITS on success.',
+            ],
+            ...(script ? { detail: script } : {}),
+          },
+        ];
       } else if (rec.kind === 'dml' && summary?.operation) {
         const label =
           `${String(summary.operation).toUpperCase()} ${summary.row_count ?? summary.rows?.length ?? '?'}` +

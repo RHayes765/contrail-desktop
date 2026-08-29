@@ -65,6 +65,8 @@ describe('capability surface', () => {
     const caps = allCapabilities();
     const names = caps.map((c) => c.name).sort();
     expect(names).toEqual([
+      'apex_execute',
+      'apex_propose',
       'connect_org',
       'deactivate_flow',
       'describe_schema',
@@ -87,6 +89,7 @@ describe('capability surface', () => {
       'retrieve_metadata',
       'run_apex_tests',
       'search_metadata',
+      'set_trace_flag',
       'soql_query',
       'validate_deploy',
     ]);
@@ -106,6 +109,8 @@ describe('capability surface', () => {
       .map((c) => c.name)
       .sort();
     expect(writes).toEqual([
+      'apex_execute',
+      'apex_propose',
       'deactivate_flow',
       'dml_execute',
       'dml_propose',

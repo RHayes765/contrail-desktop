@@ -536,4 +536,77 @@ export const deployCapabilities: Capability[] = [
         return ok(result);
       }),
   },
+  {
+    name: 'apex_propose',
+    title: 'Propose an anonymous Apex script (two-step)',
+    description:
+      'Stage an anonymous Apex script for human approval. This is the ONLY path to ' +
+      'executeAnonymous: nothing runs until the human approves the script — shown ' +
+      "verbatim — in Deploy Review, and it runs with the HUMAN's permissions, touching " +
+      'anything their user can. DML it performs COMMITS on success; an uncaught ' +
+      'exception rolls the whole script back. There is no dry-run — the org compiles and ' +
+      'executes in one shot at execute, and a compile error spends the approval like any ' +
+      'failed write. Max 32,000 chars (executeAnonymous is a URL-encoded GET); split ' +
+      'longer work into multiple proposals. The script returns no output — write ' +
+      'System.debug and set a trace flag first (set_trace_flag) if you need to see the log.',
+    grant: 'data_write',
+    writeClass: true,
+    inputSchema: {
+      connection: z
+        .string()
+        .describe('Target connection alias (or id) — name it unmissably to the human.'),
+      code: z
+        .string()
+        .min(1)
+        .max(32_000)
+        .describe('The anonymous Apex source, verbatim (this is the script, NOT a confirmation code).'),
+    },
+    handler: (deps, rawArgs) =>
+      guarded(async () => {
+        const args = rawArgs as { connection: string; code: string };
+        const conn = requireConnection(deps, args.connection, 'apex_propose');
+        if (args.code.trim().length === 0) return fail('The script is empty.');
+        const preview = await deps.deploys.proposeApex(conn, args.code);
+        return ok(
+          preview,
+          `Proposed — nothing executed. TARGET: ${conn.alias} (${conn.orgType}). ${APPROVAL_INSTRUCTIONS}`,
+        );
+      }),
+  },
+  {
+    name: 'apex_execute',
+    title: 'Execute a proposed anonymous Apex script',
+    description:
+      'Execute the most recently proposed anonymous Apex script. In the desktop app, call ' +
+      'WITHOUT a confirmation code — the user approves in Deploy Review and this call ' +
+      'waits for their decision. With the localhost approval page, pass the code the human ' +
+      'read from the page. Single-use, ~1h expiry, invalidated by a new apex_propose on ' +
+      "the same connection. On success the script's DML is committed; compile and runtime " +
+      'errors are returned honestly and spend the approval.',
+    grant: 'data_write',
+    writeClass: true,
+    inputSchema: {
+      connection: z.string().describe('Target connection alias (or id).'),
+      confirmation_code: z
+        .string()
+        .optional()
+        .describe(
+          'Only when the human read a code from the approval page (format XXXX-XXXX). ' +
+            'Omit in the desktop app — approval is native.',
+        ),
+    },
+    handler: (deps, rawArgs) =>
+      guarded(async () => {
+        const args = rawArgs as { connection: string; confirmation_code?: string };
+        const conn = requireConnection(deps, args.connection, 'apex_execute');
+        if (!args.confirmation_code) {
+          return fail(
+            'No confirmation code and no pending native approval. Propose first; then in the ' +
+              'desktop app call again without a code, or with the approval page pass its code.',
+          );
+        }
+        const result = await deps.deploys.executeApex(conn, args.confirmation_code);
+        return ok(result);
+      }),
+  },
 ];

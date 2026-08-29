@@ -66,6 +66,8 @@ describe('tool manifest (THE isolation snapshot)', () => {
   it('full grants mint exactly the expected capability set — no more, no less', () => {
     const names = mintableCapabilities([FULL]).map((c) => c.name).sort();
     expect(names).toEqual([
+      'apex_execute',
+      'apex_propose',
       'deactivate_flow',
       'describe_schema',
       'diff_artifact',
@@ -85,6 +87,7 @@ describe('tool manifest (THE isolation snapshot)', () => {
       'retrieve_metadata',
       'run_apex_tests',
       'search_metadata',
+      'set_trace_flag',
       'soql_query',
       'validate_deploy',
     ]);
@@ -168,6 +171,7 @@ describe('tool manifest (THE isolation snapshot)', () => {
       'get_debug_logs',
       'get_flow_errors',
       'run_apex_tests',
+      'set_trace_flag',
     ]) {
       expect(names).not.toContain(gone);
     }
@@ -262,7 +266,15 @@ describe('tool manifest (THE isolation snapshot)', () => {
   it('read-only sessions cannot see write tools even in allowedTools', () => {
     const options = buildSessionOptions(ctxWith([READ_ONLY]), invoke);
     const allowed = options.allowedTools ?? [];
-    for (const writeTool of ['validate_deploy', 'execute_deploy', 'dml_propose', 'dml_execute', 'deactivate_flow']) {
+    for (const writeTool of [
+      'validate_deploy',
+      'execute_deploy',
+      'dml_propose',
+      'dml_execute',
+      'deactivate_flow',
+      'apex_propose',
+      'apex_execute',
+    ]) {
       expect(allowed).not.toContain(`mcp__contrail__${writeTool}`);
     }
   });

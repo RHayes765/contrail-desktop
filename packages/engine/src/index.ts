@@ -64,6 +64,7 @@ export type {
   ConnectionRecord,
   ArtifactRecord,
   DependencyEdge,
+  DeployRequestKind,
   DeployRequestRecord,
   AuditEvent,
   EnvRole,

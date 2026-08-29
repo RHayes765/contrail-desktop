@@ -1199,6 +1199,8 @@ button.danger {
   font-size: 11px;
   padding-left: 14px;
   word-break: break-all;
+  /* Anonymous Apex scripts ride `detail` — their newlines must render. */
+  white-space: pre-wrap;
 }
 .deploy-result {
   display: flex;

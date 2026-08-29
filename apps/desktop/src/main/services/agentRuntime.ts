@@ -89,7 +89,12 @@ const PROJECT_TOOL_HANDLERS = new Set([
 const CONNECTION_ARG_KEYS = ['connection', 'connection_a', 'connection_b'] as const;
 
 /** Capabilities whose engine flow presents an approval (native presenter). */
-const APPROVAL_PRESENTING = new Set(['validate_deploy', 'dml_propose', 'deactivate_flow']);
+const APPROVAL_PRESENTING = new Set([
+  'validate_deploy',
+  'dml_propose',
+  'deactivate_flow',
+  'apex_propose',
+]);
 
 export interface SessionSpec {
   project: { id: string; name: string; description: string | null; instructions: string | null };
@@ -189,7 +194,7 @@ export function extractConfirmationCode(text: string): string | null {
 }
 
 /** Write-execute capabilities whose confirmation_code main fills from the vault. */
-const CODE_BEARING_CAPABILITIES = new Set(['execute_deploy', 'dml_execute']);
+const CODE_BEARING_CAPABILITIES = new Set(['execute_deploy', 'dml_execute', 'apex_execute']);
 
 /**
  * Substitute the vaulted code into a write-execute call. The agent passes
@@ -348,12 +353,14 @@ export class AgentSessionRun {
     // the classic path runs — the human already spoke the code in chat.
     const realCode =
       typeof a.confirmation_code === 'string' && a.confirmation_code.trim().length > 0;
-    if ((name === 'execute_deploy' || name === 'dml_execute') && !realCode &&
+    if (
+      (name === 'execute_deploy' || name === 'dml_execute' || name === 'apex_execute') &&
+      !realCode &&
       typeof a.connection === 'string'
     ) {
       const held = this.deploysRef()?.interceptAgentExecute(
         this.sessionId,
-        name === 'execute_deploy' ? 'deploy' : 'dml',
+        name === 'execute_deploy' ? 'deploy' : name === 'apex_execute' ? 'apex' : 'dml',
         a.connection,
       );
       if (held) {

@@ -42,14 +42,23 @@ export const STANDARD_CATALOG: CatalogEntry[] = [
   {
     key: 'data',
     label: 'Data & SOQL',
-    description: 'SOQL queries and record reads; DML proposal and execution.',
-    capabilities: ['soql_query', 'get_record', 'dml_propose', 'dml_execute'],
+    description:
+      'SOQL queries and record reads; DML and anonymous Apex proposal and execution.',
+    capabilities: [
+      'soql_query',
+      'get_record',
+      'dml_propose',
+      'dml_execute',
+      'apex_propose',
+      'apex_execute',
+    ],
   },
   {
     key: 'debug-logs',
     label: 'Debug logs',
-    description: 'Apex debug logs, flow error investigation, and standalone Apex test runs.',
-    capabilities: ['get_debug_logs', 'get_flow_errors', 'run_apex_tests'],
+    description:
+      'Apex debug logs, flow error investigation, standalone Apex test runs, and trace flags.',
+    capabilities: ['get_debug_logs', 'get_flow_errors', 'run_apex_tests', 'set_trace_flag'],
   },
   {
     key: 'deploy',

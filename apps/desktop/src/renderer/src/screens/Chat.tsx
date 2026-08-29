@@ -215,7 +215,11 @@ export function ChatScreen({ projectId }: { projectId: string }) {
         >
           <span>
             The agent wants to{' '}
-            {pendingApproval.kind === 'deploy' ? 'deploy metadata to' : 'change data on'}{' '}
+            {pendingApproval.kind === 'deploy'
+              ? 'deploy metadata to'
+              : pendingApproval.kind === 'apex'
+                ? 'run an anonymous Apex script on'
+                : 'change data on'}{' '}
             <strong>{pendingApproval.connection}</strong> ({pendingApproval.orgType}). Nothing runs
             until you decide.
           </span>

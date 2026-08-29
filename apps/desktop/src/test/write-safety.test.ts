@@ -18,7 +18,7 @@ import { ProjectService } from '../main/services/projects.js';
 
 let tmp: string;
 let db: ContrailDb;
-let executed: Array<{ connId: string; code: string; kind: 'deploy' | 'dml' }>;
+let executed: Array<{ connId: string; code: string; kind: 'deploy' | 'dml' | 'apex' }>;
 let deps: EngineDeps;
 let service: DeployService;
 
@@ -52,7 +52,7 @@ function seedRequest(
   connId: string,
   over: {
     code?: string;
-    kind?: 'deploy' | 'dml';
+    kind?: 'deploy' | 'dml' | 'apex';
     expiresAt?: string;
     sessionId?: string;
     destructive?: boolean;
@@ -109,6 +109,12 @@ beforeEach(() => {
     executeDml: async (conn: { id: string }, code: string) => {
       executed.push({ connId: conn.id, code, kind: 'dml' });
       const result = { executed: true };
+      finish(code, result);
+      return result;
+    },
+    executeApex: async (conn: { id: string }, code: string) => {
+      executed.push({ connId: conn.id, code, kind: 'apex' });
+      const result = { executed: true, status: 'executed' };
       finish(code, result);
       return result;
     },
@@ -386,5 +392,41 @@ describe('multi-step DML plans at the native seam (S14)', () => {
     const result = await held!;
     expect(result.isError).not.toBe(true);
     expect(executed).toEqual([{ connId, code: 'PLAN-CODE', kind: 'dml' }]);
+  });
+});
+
+describe('anonymous Apex at the native seam (S22)', () => {
+  it('a plugin-proposed apex row shows the script, hides the code, and approve drives executeApex', async () => {
+    const connId = seedConnection('developer', 'dev');
+    const script = "List<Account> a = [SELECT Id FROM Account];\ndelete a;";
+    // Proposed via the PLUGIN (shared DB): kind 'apex', payload carries the
+    // script, no desktop review_json. The screen must show the script — an
+    // approvable blank for a script would be the worst blank of all.
+    const rec = db.insertDeployRequest({
+      connectionId: connId,
+      kind: 'apex',
+      confirmationCode: 'APEX-CODE',
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      payloadJson: JSON.stringify({ apex: true, code: script }),
+      summaryJson: JSON.stringify({ lines: 2, chars: script.length }),
+    });
+
+    const view = service.get(rec.id);
+    expect(view.kind).toBe('apex');
+    expect(view.changeRows[0]?.label).toContain('anonymous Apex');
+    expect(view.changeRows[0]?.detail).toBe(script);
+    expect(view.changeRows[0]?.warnings.join(' ')).toContain('COMMITS');
+    // The code never rides along in any view field.
+    expect(JSON.stringify(view)).not.toContain('APEX-CODE');
+
+    // An agent apex_execute with no human-typed code is held on the 'apex'
+    // kind and resolved by the human's decision — driving executeApex, never
+    // executeDml.
+    const held = service.interceptAgentExecute('s-apex', 'apex', connId);
+    expect(held).not.toBeNull();
+    await service.approve(rec.id, 'run it');
+    const result = await held!;
+    expect(result.isError).not.toBe(true);
+    expect(executed).toEqual([{ connId, code: 'APEX-CODE', kind: 'apex' }]);
   });
 });
