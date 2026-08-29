@@ -22,7 +22,8 @@ export const STANDARD_CATALOG: CatalogEntry[] = [
   {
     key: 'metadata',
     label: 'Metadata',
-    description: 'Browse, search, retrieve, and diff org metadata from local snapshots.',
+    description:
+      'Browse, search, retrieve, and diff org metadata from local snapshots; org drift and setup audit.',
     capabilities: [
       'list_metadata',
       'retrieve_metadata',
@@ -31,6 +32,8 @@ export const STANDARD_CATALOG: CatalogEntry[] = [
       'refresh_snapshot',
       'diff_orgs',
       'diff_artifact',
+      'get_org_changes',
+      'get_setup_audit',
     ],
   },
   {
