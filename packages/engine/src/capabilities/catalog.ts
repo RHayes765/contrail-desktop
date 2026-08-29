@@ -50,6 +50,7 @@ export const STANDARD_CATALOG: CatalogEntry[] = [
     capabilities: [
       'soql_query',
       'get_record',
+      'explain_access',
       'dml_propose',
       'dml_execute',
       'apex_propose',
