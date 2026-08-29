@@ -30,3 +30,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: pnpm exec electron-builder --win nsis --publish always
+      # electron-builder's GitHub uploads flake silently on the big exe (three
+      # of the first four releases shipped missing assets while the step
+      # exited 0). Verify every asset actually landed and re-upload the
+      # stragglers with gh, whose uploader retries properly. latest.yml is the
+      # auto-update feed — a release without it 404s every installed app.
+      - name: Verify and repair release assets
+        shell: bash
+        working-directory: apps/desktop
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          have=$(gh release view "$TAG" --json assets -q '.assets[].name' || true)
+          for f in release/*.exe release/*.exe.blockmap release/latest.yml; do
+            [ -e "$f" ] || { echo "local artifact missing: $f"; exit 1; }
+            name=$(basename "$f")
+            if ! grep -qxF "$name" <<<"$have"; then
+              echo "missing on the release: $name — uploading"
+              gh release upload "$TAG" "$f" --clobber
+            fi
+          done
+          echo "release assets now:"
+          gh release view "$TAG" --json assets -q '.assets[].name'
