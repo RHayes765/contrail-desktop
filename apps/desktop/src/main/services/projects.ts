@@ -5,6 +5,7 @@ import {
   dataDir,
   type EngineDeps,
   type ProjectDocRecord,
+  type ProjectFolderRecord,
   type ProjectNoteRecord,
   type ProjectRecord,
 } from '@contrail/engine';
@@ -12,6 +13,7 @@ import type {
   BindingView,
   EnvRole,
   ProjectDocView,
+  ProjectFolderView,
   ProjectNoteView,
   ProjectView,
 } from '@contrail/shared';
@@ -29,6 +31,13 @@ import type {
 
 const DOC_MAX_BYTES = 25 * 1024 * 1024; // refuse uploads beyond this
 const DOC_READ_MAX_CHARS = 100_000; // agent-facing read cap, with truncation notice
+
+// Linked-folder walk bounds. A listing that outgrows them TRUNCATES with a
+// notice — it never throws, or one runaway folder would brick every listing.
+const FOLDER_LIST_MAX_FILES = 500;
+const FOLDER_WALK_MAX_DEPTH = 8;
+/** Directory names nobody means to expose to an agent by linking a project folder. */
+const FOLDER_SKIP_DIRS = new Set(['node_modules', '.git']);
 
 const TEXT_EXTENSIONS = new Set([
   '.md', '.markdown', '.txt', '.csv', '.tsv', '.json', '.xml', '.yaml', '.yml',
@@ -69,6 +78,15 @@ export function docView(rec: ProjectDocRecord): ProjectDocView {
     filename: rec.filename,
     mime: rec.mime,
     sizeBytes: rec.sizeBytes,
+    addedAt: rec.addedAt,
+  };
+}
+
+export function folderView(rec: ProjectFolderRecord): ProjectFolderView {
+  return {
+    id: rec.id,
+    name: path.basename(rec.path),
+    path: rec.path,
     addedAt: rec.addedAt,
   };
 }
@@ -203,6 +221,12 @@ export class ProjectService {
       );
     }
     const stat = fs.statSync(real);
+    if (stat.isDirectory()) {
+      throw new Error(
+        `"${path.basename(sourcePath)}" is a folder — attach individual files here, or link ` +
+          `the folder from the project's Docs tab (linked folders are read live, no copies).`,
+      );
+    }
     if (!stat.isFile()) throw new Error(`Not a file: ${sourcePath}`);
     if (stat.size > DOC_MAX_BYTES) {
       throw new Error(
@@ -297,6 +321,233 @@ export class ProjectService {
       text = fs.readFileSync(path.join(this.docsDir(projectId), doc.filename), 'utf8');
     } catch (err) {
       return { ok: false, message: `Could not read "${filename}": ${String(err).slice(0, 200)}` };
+    }
+    if (text.length > DOC_READ_MAX_CHARS) {
+      return {
+        ok: true,
+        text:
+          text.slice(0, DOC_READ_MAX_CHARS) +
+          `\n\n[truncated: showing ${DOC_READ_MAX_CHARS.toLocaleString()} of ${text.length.toLocaleString()} characters]`,
+      };
+    }
+    return { ok: true, text };
+  }
+
+  // ── linked folders (v14) ───────────────────────────────────────────────
+  //
+  // The docs invariants deliberately RELAX here, in exactly one way: a linked
+  // folder is a LIVE view of the user's own files — nothing is copied, edits
+  // land immediately, unlinking touches nothing on disk. What does not relax:
+  // every read re-resolves and re-contains the path per call (a symlink can
+  // appear inside a linked tree AFTER linking), and the data dir can never be
+  // reached through a linked folder in either direction.
+
+  listFolders(projectId: string): ProjectFolderRecord[] {
+    return this.deps.db.listProjectFolders(projectId);
+  }
+
+  linkFolder(projectId: string, dir: string): ProjectFolderRecord {
+    this.mustGet(projectId);
+    // Containment, same posture as addDocFromPath — realpath first so a
+    // symlink cannot smuggle the data dir past the check. Both directions:
+    // a folder INSIDE the data dir leaks silo/db files, and a folder that
+    // CONTAINS the data dir (e.g. the home directory) hands the agent
+    // contrail.db through list/read.
+    const real = fs.realpathSync(dir);
+    const dataRoot = fs.realpathSync(dataDir());
+    if (real === dataRoot || real.startsWith(dataRoot + path.sep)) {
+      throw new Error('Folders inside the Contrail data directory cannot be linked.');
+    }
+    if (dataRoot.startsWith(real + path.sep)) {
+      throw new Error(
+        'This folder contains the Contrail data directory — link a more specific folder instead.',
+      );
+    }
+    if (!fs.statSync(real).isDirectory()) throw new Error(`Not a folder: ${dir}`);
+    const name = path.basename(real);
+    if (!name || name.startsWith('.')) throw new Error(`Unusable folder name: "${name}"`);
+    // The basename is the agent-facing handle, so it must be unambiguous
+    // within the project (and the same path can only be linked once).
+    for (const existing of this.deps.db.listProjectFolders(projectId)) {
+      if (existing.path.toLowerCase() === real.toLowerCase()) {
+        throw new Error('That folder is already linked to this project.');
+      }
+      if (path.basename(existing.path).toLowerCase() === name.toLowerCase()) {
+        throw new Error(
+          `A folder named "${path.basename(existing.path)}" is already linked — sessions name ` +
+            'folders by basename, so link a differently-named folder (or unlink the other one).',
+        );
+      }
+    }
+    return this.deps.db.insertProjectFolder({ projectId, path: real });
+  }
+
+  /** Renderer path: OS folder picker (main-side — the renderer has no fs). */
+  async linkFolderViaDialog(
+    projectId: string,
+    win: BrowserWindow | null,
+  ): Promise<ProjectFolderRecord | null> {
+    this.mustGet(projectId);
+    const opts = {
+      title: 'Link a local folder (read live by this project’s sessions)',
+      properties: ['openDirectory' as const],
+    };
+    const result = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return this.linkFolder(projectId, result.filePaths[0]!);
+  }
+
+  /** Unlink removes the ROW only — the folder and its files are the user's. */
+  unlinkFolder(projectId: string, folderId: string): void {
+    const folder = this.deps.db.getProjectFolderById(folderId);
+    // Silo check: the folder must belong to the project named in the request.
+    if (!folder || folder.projectId !== projectId) {
+      throw new Error('Folder not found in this project.');
+    }
+    this.deps.db.removeProjectFolder(folderId);
+  }
+
+  /**
+   * Agent-facing live listing: the CURRENT text files of every linked folder,
+   * bounded (depth, count, symlinks skipped) and truncation-honest.
+   */
+  listFolderFiles(projectId: string): Array<{
+    folder: string;
+    path: string;
+    files: Array<{ path: string; size_bytes: number }>;
+    truncated: boolean;
+    unavailable?: string;
+  }> {
+    const out: ReturnType<ProjectService['listFolderFiles']> = [];
+    for (const rec of this.deps.db.listProjectFolders(projectId)) {
+      const entry = {
+        folder: path.basename(rec.path),
+        path: rec.path,
+        files: [] as Array<{ path: string; size_bytes: number }>,
+        truncated: false,
+      };
+      let root: string;
+      try {
+        root = fs.realpathSync(rec.path);
+        if (!fs.statSync(root).isDirectory()) throw new Error('not a directory');
+      } catch {
+        out.push({ ...entry, unavailable: 'the linked folder no longer exists (or is unreadable)' });
+        continue;
+      }
+      const walk = (dir: string, rel: string, depthLeft: number): void => {
+        if (entry.truncated) return;
+        let entries: fs.Dirent[];
+        try {
+          entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+          return; // an unreadable subdirectory is skipped, not fatal
+        }
+        for (const d of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+          if (entry.files.length >= FOLDER_LIST_MAX_FILES) {
+            entry.truncated = true;
+            return;
+          }
+          // Symlinks are skipped OUTRIGHT — following them re-opens every
+          // containment question (a link to the data dir, a link cycle).
+          if (d.isSymbolicLink()) continue;
+          if (d.name.startsWith('.')) continue;
+          const p = path.join(dir, d.name);
+          if (d.isDirectory()) {
+            if (FOLDER_SKIP_DIRS.has(d.name.toLowerCase())) continue;
+            if (depthLeft > 0) walk(p, rel ? `${rel}/${d.name}` : d.name, depthLeft - 1);
+            continue;
+          }
+          if (!d.isFile()) continue;
+          if (!TEXT_EXTENSIONS.has(path.extname(d.name).toLowerCase())) continue;
+          let size = 0;
+          try {
+            size = fs.statSync(p).size;
+          } catch {
+            continue;
+          }
+          entry.files.push({ path: rel ? `${rel}/${d.name}` : d.name, size_bytes: size });
+        }
+      };
+      walk(root, '', FOLDER_WALK_MAX_DEPTH);
+      out.push(entry);
+    }
+    return out;
+  }
+
+  /**
+   * Agent-facing live read of one file inside a linked folder. THE
+   * security-load-bearing path of the feature: the folder is resolved from
+   * the project's rows by basename, the relative path is resolved under it,
+   * and the RESULT is realpath'd and re-checked against the re-realpath'd
+   * root — so neither `..`, an absolute path, nor a symlink planted inside
+   * the tree after linking can escape it.
+   */
+  readFolderFile(
+    projectId: string,
+    folderName: string,
+    relPath: string,
+  ): { ok: true; text: string } | { ok: false; message: string } {
+    if (typeof folderName !== 'string' || folderName.length === 0 || folderName.length > 255) {
+      return { ok: false, message: 'folder must be a folder name from list_project_files.' };
+    }
+    if (typeof relPath !== 'string' || relPath.length === 0 || relPath.length > 1000) {
+      return { ok: false, message: 'path must be a non-empty relative path (max 1000 chars).' };
+    }
+    const rec = this.deps.db
+      .listProjectFolders(projectId)
+      .find((f) => path.basename(f.path).toLowerCase() === folderName.toLowerCase());
+    if (!rec) {
+      return {
+        ok: false,
+        message: `No linked folder named "${folderName}" in this project. Use list_project_files to see what exists.`,
+      };
+    }
+    // Friendly early rejects; the realpath containment below is the real guard.
+    if (path.isAbsolute(relPath) || relPath.split(/[\\/]/).includes('..')) {
+      return { ok: false, message: 'path must be relative to the folder, without "..".' };
+    }
+    let root: string;
+    let real: string;
+    try {
+      root = fs.realpathSync(rec.path);
+    } catch {
+      return { ok: false, message: 'The linked folder no longer exists — unlink it, or restore the folder.' };
+    }
+    try {
+      real = fs.realpathSync(path.resolve(root, relPath));
+    } catch {
+      return { ok: false, message: `No file at "${relPath}" in "${folderName}".` };
+    }
+    if (real !== root && !real.startsWith(root + path.sep)) {
+      return { ok: false, message: 'That path resolves outside the linked folder — refused.' };
+    }
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(real);
+    } catch {
+      return { ok: false, message: `No file at "${relPath}" in "${folderName}".` };
+    }
+    if (!stat.isFile()) {
+      return { ok: false, message: `"${relPath}" is not a file.` };
+    }
+    const ext = path.extname(real).toLowerCase();
+    if (!TEXT_EXTENSIONS.has(ext)) {
+      return {
+        ok: false,
+        message: `"${relPath}" is ${ext || 'a binary format'} — only text formats are readable in v1.`,
+      };
+    }
+    if (stat.size > DOC_MAX_BYTES) {
+      return {
+        ok: false,
+        message: `"${relPath}" is ${Math.round(stat.size / 1024 / 1024)}MB — too large to read (limit 25MB).`,
+      };
+    }
+    let text: string;
+    try {
+      text = fs.readFileSync(real, 'utf8');
+    } catch (err) {
+      return { ok: false, message: `Could not read "${relPath}": ${String(err).slice(0, 200)}` };
     }
     if (text.length > DOC_READ_MAX_CHARS) {
       return {

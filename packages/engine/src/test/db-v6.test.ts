@@ -27,8 +27,8 @@ afterEach(() => {
 });
 
 describe('schema v6', () => {
-  it('fresh databases land on user_version 13', () => {
-    expect(db.schemaVersion()).toBe(13);
+  it('fresh databases land on user_version 14', () => {
+    expect(db.schemaVersion()).toBe(14);
   });
 
   it('creates every desktop table', () => {
@@ -110,7 +110,7 @@ describe('schema v6', () => {
   it('reopening an already-v6 database is a no-op migration', () => {
     db.close();
     const again = new ContrailDb(dbPath);
-    expect(again.schemaVersion()).toBe(13);
+    expect(again.schemaVersion()).toBe(14);
     again.close();
     db = new ContrailDb(dbPath); // for afterEach
   });
@@ -161,7 +161,7 @@ describe('v10 → v11 upgrade on an existing database', () => {
     raw.close();
 
     db = new ContrailDb(dbPath);
-    expect(db.schemaVersion()).toBe(13);
+    expect(db.schemaVersion()).toBe(14);
 
     const check = new Database(dbPath, { readonly: true });
     const tables = (
@@ -215,7 +215,7 @@ describe('v11 -> v12 upgrade on an existing database', () => {
     raw.close();
 
     db = new ContrailDb(dbPath);
-    expect(db.schemaVersion()).toBe(13);
+    expect(db.schemaVersion()).toBe(14);
     const upgraded = db.getCustomMcpServer(server.id);
     expect(upgraded?.name).toBe('Legacy Slack');
     // Old servers stay opt-in per project — the upgrade changes nothing about
@@ -237,7 +237,7 @@ describe('v12 -> v13 upgrade and the skill library', () => {
     raw.close();
 
     db = new ContrailDb(dbPath);
-    expect(db.schemaVersion()).toBe(13);
+    expect(db.schemaVersion()).toBe(14);
     expect(db.listCustomSkills()).toEqual([]);
   });
 
@@ -282,5 +282,40 @@ describe('v12 -> v13 upgrade and the skill library', () => {
     expect(db.getSkillToggles(p.id)).toHaveLength(1);
     db.deleteProject(p.id);
     expect(db.getSkillToggles(p.id)).toEqual([]);
+  });
+});
+
+/** The v13 → v14 step: linked project folders (rows only — never file copies). */
+describe('v13 -> v14 upgrade and linked folders', () => {
+  it('creates the table on upgrade from a real v13 file', () => {
+    db.close();
+    const raw = new Database(dbPath);
+    raw.exec(`DROP TABLE project_folders;`);
+    raw.pragma('user_version = 13');
+    raw.close();
+
+    db = new ContrailDb(dbPath);
+    expect(db.schemaVersion()).toBe(14);
+    expect(db.listProjectFolders('any')).toEqual([]);
+  });
+
+  it('folders round-trip; path is unique per project case-insensitively', () => {
+    const p = db.createProject({ name: 'WithFolders' });
+    const rec = db.insertProjectFolder({ projectId: p.id, path: 'C:\\Work\\ClientDocs' });
+    expect(db.listProjectFolders(p.id)).toHaveLength(1);
+    expect(db.getProjectFolderById(rec.id)?.path).toBe('C:\\Work\\ClientDocs');
+    // Same path, different casing = the same folder on Windows/macOS.
+    expect(() =>
+      db.insertProjectFolder({ projectId: p.id, path: 'c:\\work\\CLIENTDOCS' }),
+    ).toThrow();
+    db.removeProjectFolder(rec.id);
+    expect(db.listProjectFolders(p.id)).toEqual([]);
+  });
+
+  it('deleting a project removes its folder rows', () => {
+    const p = db.createProject({ name: 'DoomedFolders' });
+    db.insertProjectFolder({ projectId: p.id, path: 'C:\\Work\\X' });
+    db.deleteProject(p.id);
+    expect(db.listProjectFolders(p.id)).toEqual([]);
   });
 });

@@ -80,6 +80,8 @@ const EXECUTOR_OWNED = new Set(['list_connections', 'get_permissions']);
 const PROJECT_TOOL_HANDLERS = new Set([
   'list_project_docs',
   'read_project_doc',
+  'list_project_files',
+  'read_project_file',
   'list_project_notes',
   'add_project_note',
   'read_skill',
@@ -390,7 +392,7 @@ export class AgentSessionRun {
     if (!this.deps.db.getProject(projectId)) {
       // The project was deleted out from under a live session — its silo is gone.
       this.capabilityCalls.push({ name, refused: true });
-      return refuse('This project no longer exists; its documents and notes are gone.');
+      return refuse('This project no longer exists; its documents, folders, and notes are gone.');
     }
     try {
       switch (name) {
@@ -406,6 +408,29 @@ export class AgentSessionRun {
         }
         case 'read_project_doc': {
           const result = this.silo.readDocText(projectId, String(a.filename ?? ''));
+          this.capabilityCalls.push({ name, refused: !result.ok });
+          if (!result.ok) return refuse(result.message);
+          return { content: [{ type: 'text', text: result.text }] };
+        }
+        case 'list_project_files': {
+          // Live per-call read of the linked folders' CURRENT state — the
+          // rows are re-read too, so an unlink takes effect on the next call.
+          this.capabilityCalls.push({ name, refused: false });
+          const folders = this.silo.listFolderFiles(projectId);
+          return okJson({
+            folders,
+            count: folders.length,
+            ...(folders.length === 0
+              ? { note: 'No folders are linked to this project (the user links them in the Docs tab).' }
+              : {}),
+          });
+        }
+        case 'read_project_file': {
+          const result = this.silo.readFolderFile(
+            projectId,
+            String(a.folder ?? ''),
+            String(a.path ?? ''),
+          );
           this.capabilityCalls.push({ name, refused: !result.ok });
           if (!result.ok) return refuse(result.message);
           return { content: [{ type: 'text', text: result.text }] };

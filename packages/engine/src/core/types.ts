@@ -137,6 +137,18 @@ export interface ProjectDocRecord {
   addedAt: string;
 }
 
+/**
+ * A local folder LINKED to a project (v14) — a live view of the user's own
+ * files, never a copy. Unlinking removes only the row; the folder is theirs.
+ */
+export interface ProjectFolderRecord {
+  id: string;
+  projectId: string;
+  /** Absolute realpath of the linked folder at link time. */
+  path: string;
+  addedAt: string;
+}
+
 export interface ProjectNoteRecord {
   id: string;
   projectId: string;

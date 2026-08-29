@@ -17,6 +17,7 @@ import type {
   DeployRequestRecord,
   OrgType,
   ProjectDocRecord,
+  ProjectFolderRecord,
   ProjectNoteRecord,
   ProjectRecord,
   SavedSummaryRecord,
@@ -87,7 +88,7 @@ function assertDbLineage(db: Database.Database): void {
   );
 }
 
-const SCHEMA_VERSION = 13;
+const SCHEMA_VERSION = 14;
 
 /**
  * Local SQLite store: connection metadata and the audit log (P0.1); the
@@ -496,6 +497,24 @@ export class ContrailDb {
           );
         `);
       }
+      if (current < 14) {
+        // v14 (desktop-owned, additive — freeze-contract legal): local
+        // folders LINKED to a project. Rows only — the folder stays the
+        // user's; sessions read its CURRENT contents live (no copies, unlike
+        // project_docs). Path is the realpath at link time; NOCASE because
+        // Windows/macOS paths are one folder regardless of casing.
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS project_folders (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL DEFAULT 'default',
+            project_id   TEXT NOT NULL,
+            path         TEXT NOT NULL,
+            added_at     TEXT NOT NULL,
+            UNIQUE (project_id, path COLLATE NOCASE)
+          );
+          CREATE INDEX IF NOT EXISTS idx_folders_project ON project_folders (project_id);
+        `);
+      }
       this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     });
     tx();
@@ -592,6 +611,7 @@ export class ContrailDb {
       this.db.prepare(`DELETE FROM project_bindings WHERE project_id = ?`).run(id);
       this.db.prepare(`DELETE FROM project_docs WHERE project_id = ?`).run(id);
       this.db.prepare(`DELETE FROM project_notes WHERE project_id = ?`).run(id);
+      this.db.prepare(`DELETE FROM project_folders WHERE project_id = ?`).run(id);
       this.db.prepare(`DELETE FROM mcp_server_toggles WHERE project_id = ?`).run(id);
       this.db.prepare(`DELETE FROM skill_toggles WHERE project_id = ?`).run(id);
       this.db.prepare(`DELETE FROM projects WHERE id = ?`).run(id);
@@ -1087,6 +1107,55 @@ export class ContrailDb {
 
   removeProjectDoc(id: string): void {
     this.db.prepare(`DELETE FROM project_docs WHERE id = ?`).run(id);
+  }
+
+  // ── linked folders (v14) ───────────────────────────────────────────────
+
+  private folderFromRow(row: {
+    id: string;
+    project_id: string;
+    path: string;
+    added_at: string;
+  }): ProjectFolderRecord {
+    return { id: row.id, projectId: row.project_id, path: row.path, addedAt: row.added_at };
+  }
+
+  listProjectFolders(projectId: string): ProjectFolderRecord[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT id, project_id, path, added_at
+           FROM project_folders WHERE project_id = ? ORDER BY path`,
+        )
+        .all(projectId) as Parameters<ContrailDb['folderFromRow']>[0][]
+    ).map((r) => this.folderFromRow(r));
+  }
+
+  getProjectFolderById(id: string): ProjectFolderRecord | null {
+    const row = this.db
+      .prepare(`SELECT id, project_id, path, added_at FROM project_folders WHERE id = ?`)
+      .get(id) as Parameters<ContrailDb['folderFromRow']>[0] | undefined;
+    return row ? this.folderFromRow(row) : null;
+  }
+
+  insertProjectFolder(input: { projectId: string; path: string }): ProjectFolderRecord {
+    const rec: ProjectFolderRecord = {
+      id: randomUUID(),
+      projectId: input.projectId,
+      path: input.path,
+      addedAt: new Date().toISOString(),
+    };
+    this.db
+      .prepare(
+        `INSERT INTO project_folders (id, workspace_id, project_id, path, added_at)
+         VALUES (?, 'default', ?, ?, ?)`,
+      )
+      .run(rec.id, rec.projectId, rec.path, rec.addedAt);
+    return rec;
+  }
+
+  removeProjectFolder(id: string): void {
+    this.db.prepare(`DELETE FROM project_folders WHERE id = ?`).run(id);
   }
 
   listProjectNotes(projectId: string): ProjectNoteRecord[] {

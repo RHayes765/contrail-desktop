@@ -2,7 +2,7 @@ import type { BrowserWindow } from 'electron';
 import type { EffortLevel, GrantSetView, HealthView } from '@contrail/shared';
 import type { EngineDeps } from '@contrail/engine';
 import { ConnectionService } from '../services/connections.js';
-import { docView, noteView, ProjectService } from '../services/projects.js';
+import { docView, folderView, noteView, ProjectService } from '../services/projects.js';
 import { AgentSessionManager } from '../services/agentRuntime.js';
 import { SnapshotService } from '../services/snapshots.js';
 import { DiffService, MetadataService } from '../services/metadata.js';
@@ -138,6 +138,20 @@ export function makeHandlers(health: HealthView, services: MainServices) {
     'projects:docs:addFromPath': (_deps: EngineDeps, req: { projectId: string; path: string }) => ({
       added: docView(projects.addDocFromPath(req.projectId, req.path)),
     }),
+
+    'projects:folders:list': (_deps: EngineDeps, req: { projectId: string }) =>
+      projects.listFolders(req.projectId).map(folderView),
+    'projects:folders:add': async (_deps: EngineDeps, req: { projectId: string }) => {
+      const rec = await projects.linkFolderViaDialog(req.projectId, services.getWindow());
+      return { added: rec ? folderView(rec) : null };
+    },
+    'projects:folders:addFromPath': (_deps: EngineDeps, req: { projectId: string; path: string }) => ({
+      added: folderView(projects.linkFolder(req.projectId, req.path)),
+    }),
+    'projects:folders:remove': (_deps: EngineDeps, req: { projectId: string; folderId: string }) => {
+      projects.unlinkFolder(req.projectId, req.folderId);
+      return { ok: true };
+    },
 
     'projects:notes:list': (_deps: EngineDeps, req: { projectId: string }) =>
       projects.listNotes(req.projectId).map(noteView),

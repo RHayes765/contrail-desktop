@@ -70,6 +70,7 @@ export type {
   EnvRole,
   ProjectRecord,
   ProjectDocRecord,
+  ProjectFolderRecord,
   ProjectNoteRecord,
   AgentSessionRecord,
   CustomMcpServerRecord,

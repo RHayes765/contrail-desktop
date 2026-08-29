@@ -1002,6 +1002,48 @@ button.danger {
 
 .flow-fullscreen .flow-inspector { max-height: none; }
 
+/* ── S23: split-screen flow diff (fullscreen-only, cross-highlighting) ── */
+
+.flow-split-panes {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+}
+.flow-split-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+.flow-embed { display: flex; flex-direction: column; gap: 6px; flex: 1; min-height: 0; }
+.flow-embed .flow-stage { min-height: 0; }
+.flow-embed .flow-scroll { flex: 1; max-height: none; }
+.flow-split-hint { margin-left: 14px; color: var(--text-dim); }
+
+/* The cross-highlight has to read across two busy canvases — accent stroke
+   plus a short pulse, scoped so normal single-diagram selection is untouched. */
+.flow-split .flow-node.selected {
+  stroke: var(--accent);
+  stroke-width: 4;
+  filter: brightness(1.3);
+  animation: flow-split-pulse 1.1s ease-in-out 3;
+}
+@keyframes flow-split-pulse {
+  0%, 100% { stroke-width: 4; filter: brightness(1.3); }
+  50% { stroke-width: 6; filter: brightness(1.6); }
+}
+
+/* Docs tab now holds two silo surfaces (linked folders + documents). */
+.silo-section-head {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  margin: 14px 0 6px;
+}
+
 .flow-inspector-head {
   display: flex;
   justify-content: space-between;

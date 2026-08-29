@@ -283,8 +283,10 @@ describe('tool manifest (THE isolation snapshot)', () => {
     expect([...PROJECT_TOOL_NAMES].sort()).toEqual([
       'add_project_note',
       'list_project_docs',
+      'list_project_files',
       'list_project_notes',
       'read_project_doc',
+      'read_project_file',
       'read_skill',
     ]);
     const noGrants: BindingWithGrants = {

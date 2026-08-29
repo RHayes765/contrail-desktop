@@ -159,6 +159,7 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
   const {
     projects,
     docs,
+    folders,
     notes,
     sessions,
     select,
@@ -168,6 +169,8 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
     unbind,
     addDocs,
     removeDoc,
+    linkFolder,
+    unlinkFolder,
     addNote,
     deleteSession,
     renameSession,
@@ -468,6 +471,41 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
 
       {tab === 'docs' && (
         <>
+          <h3 className="silo-section-head">Linked folders</h3>
+          <div className="panel-list">
+            {folders.length === 0 ? (
+              <div className="empty">
+                No linked folders. Link a local folder and the agent sees its current contents —
+                live, no copies, nothing to re-upload.
+              </div>
+            ) : (
+              folders.map((f) => (
+                <div className="row-card" key={f.id}>
+                  <div className="conn-main">
+                    <div className="conn-alias">{f.name}</div>
+                    <div className="conn-detail" title={f.path}>
+                      {f.path} · linked {new Date(f.addedAt).toLocaleDateString()}
+                    </div>
+                  </div>
+                  <div className="row-actions">
+                    <button
+                      title="Removes the link only — your folder and files are untouched."
+                      onClick={() => void unlinkFolder(project.id, f.id)}
+                    >
+                      Unlink
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+          <div className="form-actions">
+            <button className="primary" onClick={() => void linkFolder(project.id)}>
+              Link a folder…
+            </button>
+          </div>
+
+          <h3 className="silo-section-head">Documents</h3>
           <div className="panel-list">
             {docs.length === 0 ? (
               <div className="empty">
@@ -548,7 +586,10 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
       <div className="danger-zone">
         {confirmDelete ? (
           <>
-            <span>Delete this project, its docs, notes, and bindings? Sessions history stays.</span>
+            <span>
+              Delete this project, its docs, notes, and bindings? Linked folders are unlinked
+              (your files are untouched). Sessions history stays.
+            </span>
             <button
               className="danger"
               onClick={() => {

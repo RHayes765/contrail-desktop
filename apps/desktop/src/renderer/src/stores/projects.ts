@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type {
   EnvRole,
   ProjectDocView,
+  ProjectFolderView,
   ProjectNoteView,
   ProjectView,
   SessionView,
@@ -12,6 +13,7 @@ interface ProjectsState {
   projects: ProjectView[] | null;
   selectedId: string | null;
   docs: ProjectDocView[];
+  folders: ProjectFolderView[];
   notes: ProjectNoteView[];
   sessions: SessionView[];
   error: string | null;
@@ -31,6 +33,8 @@ interface ProjectsState {
   unbind: (projectId: string, connectionId: string) => Promise<void>;
   addDocs: (projectId: string) => Promise<void>;
   removeDoc: (projectId: string, docId: string) => Promise<void>;
+  linkFolder: (projectId: string) => Promise<void>;
+  unlinkFolder: (projectId: string, folderId: string) => Promise<void>;
   /** Returns true on success — callers must NOT discard drafts on false. */
   addNote: (projectId: string, body: string) => Promise<boolean>;
   refreshSessions: (projectId: string) => Promise<void>;
@@ -49,6 +53,7 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   projects: null,
   selectedId: null,
   docs: [],
+  folders: [],
   notes: [],
   sessions: [],
   error: null,
@@ -58,14 +63,15 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   },
 
   select: async (id) => {
-    set({ selectedId: id, docs: [], notes: [], sessions: [] });
+    set({ selectedId: id, docs: [], folders: [], notes: [], sessions: [] });
     if (!id) return;
-    const [docs, notes, sessions] = await Promise.all([
+    const [docs, folders, notes, sessions] = await Promise.all([
       ipc.invoke('projects:docs:list', { projectId: id }),
+      ipc.invoke('projects:folders:list', { projectId: id }),
       ipc.invoke('projects:notes:list', { projectId: id }),
       ipc.invoke('sessions:list', { projectId: id }),
     ]);
-    set({ docs, notes, sessions });
+    set({ docs, folders, notes, sessions });
   },
 
   create: async (name, description) => {
@@ -124,6 +130,24 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     try {
       await ipc.invoke('projects:docs:remove', { projectId, docId });
       set({ docs: await ipc.invoke('projects:docs:list', { projectId }) });
+    } catch (err) {
+      set({ error: String(err) });
+    }
+  },
+
+  linkFolder: async (projectId) => {
+    try {
+      await ipc.invoke('projects:folders:add', { projectId });
+      set({ folders: await ipc.invoke('projects:folders:list', { projectId }) });
+    } catch (err) {
+      set({ error: String(err) });
+    }
+  },
+
+  unlinkFolder: async (projectId, folderId) => {
+    try {
+      await ipc.invoke('projects:folders:remove', { projectId, folderId });
+      set({ folders: await ipc.invoke('projects:folders:list', { projectId }) });
     } catch (err) {
       set({ error: String(err) });
     }

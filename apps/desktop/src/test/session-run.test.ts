@@ -214,6 +214,35 @@ describe('project tools', () => {
     });
     expect(result.isError).toBe(true);
   });
+
+  it('linked-folder tools use the SESSION project and surface reader refusals', async () => {
+    const world = fakeWorld();
+    const seenProjects: string[] = [];
+    const run = makeRun(world, {
+      listFolderFiles: (projectId: string) => {
+        seenProjects.push(projectId);
+        return [];
+      },
+      readFolderFile: () => ({
+        ok: false as const,
+        message: 'That path resolves outside the linked folder — refused.',
+      }),
+    } as unknown as Partial<ProjectService>);
+
+    const listing = await run.executeCapability('list_project_files', {
+      project_id: 'p-SOMEONE-ELSE',
+    });
+    expect(listing.isError).toBeFalsy();
+    // Agent-supplied project args are ignored: identity comes from the session.
+    expect(seenProjects).toEqual(['p1']);
+
+    const traversal = await run.executeCapability('read_project_file', {
+      folder: 'docs',
+      path: '../../../etc/passwd',
+    });
+    expect(traversal.isError).toBe(true);
+    expect(traversal.content[0]?.text).toContain('outside the linked folder');
+  });
 });
 
 describe('redaction (invariant 2)', () => {

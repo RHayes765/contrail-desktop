@@ -118,6 +118,16 @@ export interface ProjectNoteView {
   createdAt: string;
 }
 
+/** A linked local folder — a live view of the user's own files, never a copy. */
+export interface ProjectFolderView {
+  id: string;
+  /** Folder basename — the handle sessions use to name files inside it. */
+  name: string;
+  /** Absolute path of the linked folder. */
+  path: string;
+  addedAt: string;
+}
+
 // ── metadata snapshots ───────────────────────────────────────────────────
 
 export interface SnapshotStatusView {

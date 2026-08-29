@@ -368,7 +368,15 @@ export function DiffScreen() {
               {drillLoading ? (
                 <div className="empty">Loading…</div>
               ) : drill ? (
-                <DrillPanel drill={drill} connectionA={connA} connectionB={connB} />
+                // Keyed per artifact: view-mode state (split/diagram/raw) must
+                // reset when the user drills into a different entry — carrying
+                // 'split' over would re-open the fullscreen overlay unasked.
+                <DrillPanel
+                  key={`${drill.type}:${drill.apiName}`}
+                  drill={drill}
+                  connectionA={connA}
+                  connectionB={connB}
+                />
               ) : (
                 <div className="empty">Pick an entry to see its changes.</div>
               )}
@@ -393,7 +401,87 @@ function fmtSide(value: unknown): string {
   return String(value);
 }
 
-type FlowViewMode = 'changes' | 'diagramA' | 'diagramB' | 'raw';
+type FlowViewMode = 'changes' | 'split' | 'diagramA' | 'diagramB' | 'raw';
+
+/**
+ * Both versions of a flow side by side, fullscreen. ONE selection name is
+ * shared across the panes: clicking a node highlights its same-named twin in
+ * the other version — and a node that exists on only one side (an add or a
+ * remove) highlights there alone, because there is nothing to twin it with.
+ * Name matching is case-insensitive (diffFlowNodes matches the same way).
+ */
+function SplitFlowView({
+  drill,
+  highlightsA,
+  highlightsB,
+  onClose,
+}: {
+  drill: ArtifactDiffView;
+  highlightsA: FlowHighlights;
+  highlightsB: FlowHighlights;
+  onClose: () => void;
+}) {
+  const [sel, setSel] = useState<string | null>(null);
+  const graphA = drill.flowGraphA!;
+  const graphB = drill.flowGraphB!;
+  const namesA = useMemo(() => new Set(graphA.nodes.map((n) => n.name.toLowerCase())), [graphA]);
+  const namesB = useMemo(() => new Set(graphB.nodes.map((n) => n.name.toLowerCase())), [graphB]);
+
+  // The overlay owns Escape — the embedded diagrams deliberately don't listen
+  // (two listeners would double-fire).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const inPane = (names: Set<string>) => (sel && names.has(sel.toLowerCase()) ? sel : null);
+
+  return (
+    <div className="flow-fullscreen flow-split">
+      <div className="flow-fullscreen-head">
+        <span className="viewer-title">
+          {drill.apiName} · {drill.aliasA} vs {drill.aliasB}
+        </span>
+        <span className="conn-detail flow-legend">
+          <span className="flow-legend-swatch changed" /> changed
+          <span className="flow-legend-swatch added" /> added
+          <span className="flow-legend-swatch removed" /> removed
+          <span className="flow-split-hint">
+            click a node — its twin lights up in the other version
+          </span>
+        </span>
+        <button onClick={onClose}>Close (Esc)</button>
+      </div>
+      <div className="flow-split-panes">
+        <div className="flow-split-pane">
+          <div className="dep-label">{drill.aliasA}</div>
+          <FlowDiagram
+            graph={graphA}
+            highlights={highlightsA}
+            embedded
+            idPrefix="a:"
+            selectedName={inPane(namesA)}
+            onSelectName={setSel}
+          />
+        </div>
+        <div className="flow-split-pane">
+          <div className="dep-label">{drill.aliasB}</div>
+          <FlowDiagram
+            graph={graphB}
+            highlights={highlightsB}
+            embedded
+            idPrefix="b:"
+            selectedName={inPane(namesB)}
+            onSelectName={setSel}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function DrillPanel({
   drill,
@@ -409,6 +497,7 @@ function DrillPanel({
   const oneSided = drill.presence !== 'both';
   const unreadable = drill.unreadableA || drill.unreadableB;
   const isFlow = drill.flowGraphA != null || drill.flowGraphB != null;
+  const canSplit = drill.flowGraphA != null && drill.flowGraphB != null;
 
   // Diff summaries are saved per org pair; either side changing marks it stale.
   const summary = useSummary(drill.savedSummary, (refresh) => {
@@ -454,6 +543,7 @@ function DrillPanel({
               {(
                 [
                   ['changes', 'Changes'],
+                  ...(canSplit ? ([['split', 'Split']] as Array<[FlowViewMode, string]>) : []),
                   ['diagramA', drill.aliasA],
                   ['diagramB', drill.aliasB],
                   ['raw', 'Raw'],
@@ -491,8 +581,18 @@ function DrillPanel({
       {isFlow && !oneSided && !unreadable && flowView === 'diagramB' && drill.flowGraphB && (
         <FlowDiagram graph={drill.flowGraphB} highlights={highlightsB} />
       )}
+      {/* Split view is fullscreen-only by design (Ryley's spec: opening it
+          auto-expands) — a fixed overlay; Close/Esc returns to Changes. */}
+      {canSplit && !unreadable && flowView === 'split' && (
+        <SplitFlowView
+          drill={drill}
+          highlightsA={highlightsA}
+          highlightsB={highlightsB}
+          onClose={() => setFlowView('changes')}
+        />
+      )}
 
-      {(isFlow && !unreadable && (oneSided || flowView === 'diagramA' || flowView === 'diagramB')) ? null : unreadable ? (
+      {(isFlow && !unreadable && (oneSided || flowView === 'split' || flowView === 'diagramA' || flowView === 'diagramB')) ? null : unreadable ? (
         <div className="empty">
           The snapshot file could not be read in{' '}
           {[drill.unreadableA && drill.aliasA, drill.unreadableB && drill.aliasB]

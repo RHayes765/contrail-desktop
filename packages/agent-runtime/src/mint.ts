@@ -121,6 +121,24 @@ export const PROJECT_TOOLS: ProjectToolDef[] = [
     },
   },
   {
+    name: 'list_project_files',
+    description:
+      'List the text files inside the local folders the user LINKED to this project — a ' +
+      'live view of their current contents (no copies; edits on disk appear immediately). ' +
+      'Read one with read_project_file. Large folders are listed truncated, with a notice.',
+    inputSchema: {},
+  },
+  {
+    name: 'read_project_file',
+    description:
+      'Read one file from a linked project folder, live from disk. Text formats only; ' +
+      'long files are truncated with a notice.',
+    inputSchema: {
+      folder: z.string().describe('Folder name from list_project_files.'),
+      path: z.string().describe('File path relative to that folder, as listed (e.g. "notes/plan.md").'),
+    },
+  },
+  {
     name: 'read_skill',
     description:
       'Load a skill by name — the available skills are listed in the system prompt. ' +

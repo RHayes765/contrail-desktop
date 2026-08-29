@@ -65,7 +65,8 @@ describe('chat file-drop lands in the project silo', () => {
   it('refuses directories, missing files, and oversized files', () => {
     const projects = new ProjectService(deps);
     const p = projects.create('P');
-    expect(() => projects.addDocFromPath(p.id, src)).toThrow(/Not a file/);
+    // A dropped FOLDER points the human at the linked-folders feature (S23).
+    expect(() => projects.addDocFromPath(p.id, src)).toThrow(/is a folder — .*link/);
     expect(() => projects.addDocFromPath(p.id, path.join(src, 'nope.pdf'))).toThrow();
     const big = path.join(src, 'big.bin');
     fs.writeFileSync(big, Buffer.alloc(26 * 1024 * 1024));

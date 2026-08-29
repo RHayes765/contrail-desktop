@@ -311,12 +311,15 @@ function Canvas({
   selected,
   onSelect,
   highlights,
+  idPrefix = '',
 }: {
   graph: FlowGraphView;
   onJump: (name: string) => void;
   selected: string | null;
   onSelect: (node: FlowNode) => void;
   highlights?: FlowHighlights;
+  /** Namespaces node DOM ids — two mounted diagrams must never collide. */
+  idPrefix?: string;
 }) {
   const { placed, width, height, depth, stacks } = useMemo(() => layout(graph), [graph]);
   const { drawn, pills } = useMemo(
@@ -385,7 +388,7 @@ function Canvas({
         return (
           <g
             key={node.name}
-            id={`flow-node-${node.name}`}
+            id={`flow-node-${idPrefix}${node.name}`}
             className="flow-node-hit"
             onClick={() => full && onSelect(full)}
           >
@@ -472,12 +475,34 @@ function InspectorPanel({ node, onClose }: { node: FlowNode; onClose: () => void
 export function FlowDiagram({
   graph,
   highlights,
+  idPrefix = '',
+  selectedName,
+  onSelectName,
+  embedded = false,
 }: {
   graph: FlowGraphView;
   highlights?: FlowHighlights;
+  /** Namespaces node DOM ids so two mounted diagrams (split view) never collide. */
+  idPrefix?: string;
+  /**
+   * Controlled selection: when onSelectName is provided, the selected node is
+   * resolved from this name (case-insensitively — flow node names can differ
+   * in casing across orgs) and clicks report up instead of setting local
+   * state. Used by the split diff view for cross-pane highlighting.
+   */
+  selectedName?: string | null;
+  onSelectName?: (name: string | null) => void;
+  /** Chrome-less pane mode: no fullscreen button, no legend, no inspector. */
+  embedded?: boolean;
 }) {
   const [fullscreen, setFullscreen] = useState(false);
-  const [selected, setSelected] = useState<FlowNode | null>(null);
+  const [localSelected, setLocalSelected] = useState<FlowNode | null>(null);
+  const controlled = onSelectName !== undefined;
+  const selected = controlled
+    ? selectedName
+      ? (graph.nodes.find((n) => n.name.toLowerCase() === selectedName.toLowerCase()) ?? null)
+      : null
+    : localSelected;
 
   useEffect(() => {
     if (!fullscreen) return;
@@ -498,17 +523,25 @@ export function FlowDiagram({
   }
 
   const jump = (name: string) => {
-    document.getElementById(`flow-node-${name}`)?.scrollIntoView({
+    document.getElementById(`flow-node-${idPrefix}${name}`)?.scrollIntoView({
       behavior: 'smooth',
       block: 'center',
       inline: 'center',
     });
   };
 
+  const select = (node: FlowNode) => {
+    if (controlled) {
+      onSelectName!(selected?.name === node.name ? null : node.name);
+    } else {
+      setLocalSelected((cur) => (cur?.name === node.name ? null : node));
+    }
+  };
+
   const body = (
     <>
       {graph.trigger && <p className="conn-detail">Trigger: {graph.trigger}</p>}
-      {highlights && Object.keys(highlights).length > 0 && (
+      {!embedded && highlights && Object.keys(highlights).length > 0 && (
         <p className="conn-detail flow-legend">
           <span className="flow-legend-swatch changed" /> changed
           <span className="flow-legend-swatch added" /> added
@@ -521,17 +554,27 @@ export function FlowDiagram({
             graph={graph}
             onJump={jump}
             selected={selected?.name ?? null}
-            onSelect={(node) => setSelected((cur) => (cur?.name === node.name ? null : node))}
+            onSelect={select}
             highlights={highlights}
+            idPrefix={idPrefix}
           />
         </div>
-        {selected && <InspectorPanel node={selected} onClose={() => setSelected(null)} />}
+        {!embedded && selected && (
+          <InspectorPanel
+            node={selected}
+            onClose={() => (controlled ? onSelectName!(null) : setLocalSelected(null))}
+          />
+        )}
       </div>
       {graph.unresolved.length > 0 && (
         <p className="conn-detail">Unresolved connector targets: {graph.unresolved.join(', ')}</p>
       )}
     </>
   );
+
+  if (embedded) {
+    return <div className="flow-embed">{body}</div>;
+  }
 
   if (fullscreen) {
     return (

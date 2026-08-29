@@ -20,6 +20,7 @@ import type {
   OrgLimitsView,
   PingResultView,
   ProjectDocView,
+  ProjectFolderView,
   ProjectMcpView,
   ProjectSkillsView,
   SkillView,
@@ -131,6 +132,13 @@ export const REQUEST_SCHEMAS = {
   // Drag-and-drop into chat: the renderer names a real path (via the preload's
   // webUtils bridge); main validates and copies it into the project's silo.
   'projects:docs:addFromPath': z.object({ projectId: ID, path: z.string().min(1).max(2000) }),
+
+  // Linked folders (v14): rows point at the user's own folders — main
+  // validates containment; nothing is ever copied.
+  'projects:folders:list': z.object({ projectId: ID }),
+  'projects:folders:add': z.object({ projectId: ID }),
+  'projects:folders:addFromPath': z.object({ projectId: ID, path: z.string().min(1).max(2000) }),
+  'projects:folders:remove': z.object({ projectId: ID, folderId: ID }),
 
   'projects:notes:list': z.object({ projectId: ID }),
   'projects:notes:add': z.object({ projectId: ID, body: z.string().min(1).max(10_000) }),
@@ -295,6 +303,14 @@ export interface Contracts {
     req: { projectId: string; path: string };
     res: { added: ProjectDocView };
   };
+
+  'projects:folders:list': { req: { projectId: string }; res: ProjectFolderView[] };
+  'projects:folders:add': { req: { projectId: string }; res: { added: ProjectFolderView | null } };
+  'projects:folders:addFromPath': {
+    req: { projectId: string; path: string };
+    res: { added: ProjectFolderView };
+  };
+  'projects:folders:remove': { req: { projectId: string; folderId: string }; res: { ok: boolean } };
 
   'projects:notes:list': { req: { projectId: string }; res: ProjectNoteView[] };
   'projects:notes:add': { req: { projectId: string; body: string }; res: ProjectNoteView };
