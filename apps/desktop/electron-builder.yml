@@ -47,6 +47,13 @@ files:
 # (esbuild) so its dependency closure collapses to nothing.
 asar: false
 
+# Releases live on the public repo; electron-updater reads latest.yml from
+# there. Publishing happens in CI on tag push (release.yml), never locally.
+publish:
+  provider: github
+  owner: RHayes765
+  repo: contrail-desktop
+
 win:
   target: nsis
   # Space-free artifact name: electron-updater rewrites spaces when building

@@ -136,6 +136,11 @@ export function App() {
       {health && !fullBleed && (
         <footer className="statusbar">
           <span>Contrail {health.appVersion}</span>
+          {health.latestVersion && (
+            <span title="A newer version is available — the app updates itself on the next restart, or download the latest installer from the contrail-desktop releases page.">
+              {health.latestVersion} available
+            </span>
+          )}
           <span>engine ok · schema v{health.schemaVersion}</span>
           {/* The file the engine ACTUALLY opened — db.name, never a computed path. */}
           <span title={`dataDir: ${health.dataDir}`}>{health.dbFile}</span>

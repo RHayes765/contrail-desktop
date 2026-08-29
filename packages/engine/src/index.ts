@@ -34,6 +34,7 @@ export { ContrailDb } from './core/db.js';
 export { KeychainTokenStore, MemoryTokenStore, type TokenStore } from './core/keychain.js';
 export { AuditLog } from './core/audit.js';
 export { loadConfig, type ContrailConfig } from './core/config.js';
+export { getUpdateNotice, refreshUpdateCache, isNewerVersion, type UpdateNotice } from './core/updateCheck.js';
 export { dataDir, dbPath, configPath, deploysDir } from './core/paths.js';
 export { ContrailError, ConnectionNotFoundError } from './core/errors.js';
 export {

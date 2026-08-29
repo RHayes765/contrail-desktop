@@ -1,10 +1,14 @@
 import {
   createEngineDeps,
   dataDir,
+  getUpdateNotice,
   probeBetterSqlite3,
   probeKeyring,
   type EngineDeps,
 } from '@contrail/engine';
+
+/** The desktop app's own release feed (the plugin engine checks its own repo separately). */
+const DESKTOP_RELEASE_REPO = 'RHayes765/contrail-desktop';
 import type { HealthView } from '@contrail/shared';
 import { openBrowserViaShell } from './services/connections.js';
 import { NativeApprovalPresenter } from './services/deploys.js';
@@ -63,9 +67,19 @@ export function bootstrap(
       `CONTRAIL_DATA_DIR=${process.env.CONTRAIL_DATA_DIR ?? '(unset)'} cwd=${process.cwd()}`,
   );
 
+  // Cached-only read (never the network here): getUpdateNotice kicks its own
+  // background refresh when the daily stamp is stale. electron-updater does
+  // the real updating on packaged builds; this line keeps the statusbar honest.
+  const update = getUpdateNotice(
+    appVersion,
+    DESKTOP_RELEASE_REPO,
+    deps.config.updates.checkEnabled,
+  );
+
   const health: HealthView = {
     ok: true,
     appVersion,
+    ...(update ? { latestVersion: update.latest } : {}),
     dataDir: dataDir(),
     dbFile: deps.db.file,
     // Presence only — never the key. Drives the first-run banner.

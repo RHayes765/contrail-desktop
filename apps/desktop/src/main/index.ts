@@ -945,6 +945,27 @@ async function runSnapshotDemo(b: Bootstrap, question: string): Promise<void> {
 }
 
 app.whenReady().then(async () => {
+  // Auto-update (packaged builds only): check GitHub Releases, download in the
+  // background, install on quit. Every step logs; failures never surface as
+  // errors to the user — a broken feed just means no update this launch.
+  if (app.isPackaged) {
+    void (async () => {
+      try {
+        const { autoUpdater } = await import('electron-updater');
+        autoUpdater.on('update-available', (info) =>
+          log('info', 'update available', { version: info.version }),
+        );
+        autoUpdater.on('update-downloaded', (info) =>
+          log('info', 'update downloaded — installs on quit', { version: info.version }),
+        );
+        autoUpdater.on('error', (err) => log('warn', 'auto-update failed', { err: String(err) }));
+        await autoUpdater.checkForUpdatesAndNotify();
+      } catch (err) {
+        log('warn', 'auto-update init failed', { err: String(err) });
+      }
+    })();
+  }
+
   try {
     // The CPU seam is worker-backed in every mode — the demo exercises the
     // same process topology the windowed app uses.

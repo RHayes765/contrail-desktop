@@ -48,6 +48,8 @@ export interface ConnectionView {
 export interface HealthView {
   ok: boolean;
   appVersion: string;
+  /** Newest released version when it exceeds appVersion (cached daily check); absent otherwise. */
+  latestVersion?: string;
   dataDir: string;
   /** The database file the engine ACTUALLY opened (better-sqlite3 db.name). */
   dbFile: string;
