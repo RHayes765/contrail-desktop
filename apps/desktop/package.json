@@ -28,6 +28,7 @@
     "zod": "^3.24.0",
     "zustand": "^5.0.15",
     "@contrail/skills": "workspace:*",
+    "@contrail/apex-ls": "workspace:*",
     "electron-updater": "^6.3.9"
   },
   "devDependencies": {

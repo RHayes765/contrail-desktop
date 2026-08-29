@@ -1,0 +1,5 @@
+# Vendored language-server bundles (packages/apex-ls/vendor/): byte-exact
+# artifacts. -text prevents CRLF normalization from corrupting the 9MB JS
+# bundles on Windows checkouts; -diff keeps them out of git log -p / PR views.
+packages/apex-ls/vendor/** -text
+packages/apex-ls/vendor/**/*.js -diff

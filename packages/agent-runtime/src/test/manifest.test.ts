@@ -68,6 +68,8 @@ describe('tool manifest (THE isolation snapshot)', () => {
     expect(names).toEqual([
       'apex_execute',
       'apex_propose',
+      'check_apex',
+      'check_soql',
       'deactivate_flow',
       'describe_schema',
       'diff_artifact',
@@ -106,6 +108,8 @@ describe('tool manifest (THE isolation snapshot)', () => {
   it('metadata_read-only bindings get no write/data/diagnostics families', () => {
     const names = mintableCapabilities([READ_ONLY]).map((c) => c.name).sort();
     expect(names).toEqual([
+      'check_apex',
+      'check_soql',
       'describe_schema',
       'diff_artifact',
       'diff_orgs',

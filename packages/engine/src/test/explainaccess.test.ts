@@ -137,6 +137,7 @@ beforeEach(() => {
   stubSalesforce();
 
   const config: ContrailConfig = {
+    ...DEFAULT_CONFIG,
     salesforce: { ...DEFAULT_CONFIG.salesforce },
     oauth: { ...DEFAULT_CONFIG.oauth },
     snapshot: { ...DEFAULT_CONFIG.snapshot },

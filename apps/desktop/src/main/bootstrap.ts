@@ -1,11 +1,15 @@
+import { spawn } from 'node:child_process';
+import path from 'node:path';
 import {
   createEngineDeps,
+  createLocalDiagRunner,
   dataDir,
   getUpdateNotice,
   probeBetterSqlite3,
   probeKeyring,
   type EngineDeps,
 } from '@contrail/engine';
+import { apexLsDir } from '@contrail/apex-ls';
 
 /** The desktop app's own release feed (the plugin engine checks its own repo separately). */
 const DESKTOP_RELEASE_REPO = 'RHayes765/contrail-desktop';
@@ -51,11 +55,30 @@ export function bootstrap(
   // Electron owns the browser opener; approvals render NATIVELY (the
   // localhost approval page never appears in the desktop app).
   const approvals = new NativeApprovalPresenter();
-  const deps = createEngineDeps({
+  const engineDeps = createEngineDeps({
     flowOps: { openBrowser: openBrowserViaShell },
     snapshotWork: overrides?.snapshotWork,
     approvals,
   });
+  // check_apex / check_soql: the vendored bundles ride @contrail/apex-ls, and
+  // the spawn runs Electron's own binary AS NODE — end users have no node on
+  // PATH (the proven --mcp-demo pattern). index.ts calls
+  // deps.localDiag.shutdown() on before-quit.
+  const deps: EngineDeps = {
+    ...engineDeps,
+    localDiag: createLocalDiagRunner({
+      vendorDir: apexLsDir(),
+      enabled: engineDeps.config.localDiagnostics.enabled,
+      timeoutMs: engineDeps.config.localDiagnostics.timeoutMs,
+      workspaceRoot: path.join(dataDir(), 'localdiag-workspace'),
+      spawnLsp: (scriptPath, args, cwd) =>
+        spawn(process.execPath, [scriptPath, ...args], {
+          cwd,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+        }),
+    }),
+  };
   const schemaVersion = deps.db.schemaVersion();
   const connectionCount = deps.db.listConnections().length;
 

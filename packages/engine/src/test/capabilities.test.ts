@@ -67,6 +67,8 @@ describe('capability surface', () => {
     expect(names).toEqual([
       'apex_execute',
       'apex_propose',
+      'check_apex',
+      'check_soql',
       'connect_org',
       'deactivate_flow',
       'describe_schema',

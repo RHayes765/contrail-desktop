@@ -1400,6 +1400,9 @@ app.on('before-quit', (event) => {
   if (quitting || !sessionManager) return;
   event.preventDefault();
   quitting = true;
+  // Courtesy kill for any live local-diagnostics language server (they also
+  // die on stdin EOF with this process — this just makes it prompt).
+  void boot?.deps.localDiag.shutdown();
   void sessionManager.endAll().finally(() => app.quit());
 });
 

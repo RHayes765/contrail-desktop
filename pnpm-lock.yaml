@@ -13,6 +13,9 @@ importers:
       '@contrail/agent-runtime':
         specifier: workspace:*
         version: link:../../packages/agent-runtime
+      '@contrail/apex-ls':
+        specifier: workspace:*
+        version: link:../../packages/apex-ls
       '@contrail/engine':
         specifier: workspace:*
         version: link:../../packages/engine
@@ -86,6 +89,18 @@ importers:
       zod:
         specifier: ^3.24.0
         version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^22.15.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@22.20.1)(jiti@2.7.0)(lightningcss@1.33.0)(supports-color@7.2.0)
+
+  packages/apex-ls:
     devDependencies:
       '@types/node':
         specifier: ^22.15.0

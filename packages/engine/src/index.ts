@@ -110,6 +110,15 @@ export {
   type IndexedArtifact,
 } from './snapshot/indexer.js';
 export { extractAllEdges, buildKnownArtifacts, type KnownArtifacts } from './deps/extract.js';
+export { createLocalDiagRunner, type LocalDiagRunnerOptions } from './localdiag/runner.js';
+export type {
+  LocalDiagRunner,
+  LocalDiagResult,
+  LocalDiagnostic,
+  ApexSourceKind,
+  SpawnLsp,
+  UnavailableCode,
+} from './localdiag/types.js';
 export { queryDependencies } from './deps/graph.js';
 export { semanticDiff, type DiffLimits } from './diff/semantic.js';
 

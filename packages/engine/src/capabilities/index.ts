@@ -7,6 +7,7 @@ import { metadataCapabilities } from './metadata.js';
 import { diffCapabilities } from './diff.js';
 import { dataCapabilities } from './data.js';
 import { deployCapabilities } from './deploy.js';
+import { localDiagCapabilities } from './localdiag.js';
 
 export type { Capability } from './types.js';
 export { ok, fail, guarded, type ToolResult } from './result.js';
@@ -17,6 +18,7 @@ const ALL: Capability[] = [
   ...diffCapabilities,
   ...dataCapabilities,
   ...deployCapabilities,
+  ...localDiagCapabilities,
 ];
 
 const BY_NAME = new Map(ALL.map((c) => [c.name, c]));

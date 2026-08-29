@@ -24,6 +24,10 @@ jobs:
         run: pnpm build
       - name: Engine tests (includes write-safety + schema-freeze suites)
         run: pnpm --filter @contrail/engine test
+      - name: Vendored language-server tripwire
+        # A clean checkout is exactly where a gitignore mistake would strand
+        # the ~20MB apex-ls payload — this fails loudly if it ever does.
+        run: pnpm --filter @contrail/apex-ls test
       - name: Desktop smoke boot (isolated data dir)
         # Verifies the packaged main boots under Electron with both native
         # modules, against a FRESH data dir — CI must never need real orgs.

@@ -10,6 +10,10 @@ import { SnapshotEngine } from '../snapshot/engine.js';
 import type { SnapshotWorkUnits } from '../snapshot/work.js';
 import { DeployEngine } from '../deploy/engine.js';
 import type { ApprovalPresenter } from '../deploy/approval.js';
+import { createLocalDiagRunner } from '../localdiag/runner.js';
+import type { LocalDiagRunner } from '../localdiag/types.js';
+import { dataDir } from './paths.js';
+import path from 'node:path';
 
 /**
  * The engine's dependency container. Every surface that drives the engine —
@@ -27,6 +31,15 @@ export interface EngineDeps {
   store: SnapshotStore;
   engine: SnapshotEngine;
   deploys: DeployEngine;
+  /**
+   * check_apex / check_soql. On EngineDeps proper (unlike snapshotWork) so
+   * capability handlers can reach it. The ENGINE default has no vendored
+   * bundles (vendorDir null → honest "not_installed") — the host injects a
+   * real runner: the desktop app wires @contrail/apex-ls's path plus an
+   * ELECTRON_RUN_AS_NODE spawn; the plugin repo's twin wires its own
+   * vendorDir() (plain node).
+   */
+  localDiag: LocalDiagRunner;
 }
 
 /** Injection seams. Every field optional; defaults reproduce production wiring. */
@@ -40,6 +53,7 @@ export interface EngineOverrides {
   deploysDir?: string;
   /** CPU-work seam for the snapshot pipeline (desktop: worker process). */
   snapshotWork?: SnapshotWorkUnits;
+  localDiag?: LocalDiagRunner;
 }
 
 export function createEngineDeps(overrides?: EngineOverrides): EngineDeps {
@@ -54,5 +68,13 @@ export function createEngineDeps(overrides?: EngineOverrides): EngineDeps {
   const deploys = new DeployEngine(db, store, tokenMgr, config, audit, overrides?.approvals, {
     deploysDir: overrides?.deploysDir ?? deploysDir(),
   });
-  return { db, tokens, audit, config, flows, tokenMgr, store, engine, deploys };
+  const localDiag =
+    overrides?.localDiag ??
+    createLocalDiagRunner({
+      vendorDir: null, // the host injects the real runner — see EngineDeps.localDiag
+      enabled: config.localDiagnostics.enabled,
+      timeoutMs: config.localDiagnostics.timeoutMs,
+      workspaceRoot: path.join(dataDir(), 'localdiag-workspace'),
+    });
+  return { db, tokens, audit, config, flows, tokenMgr, store, engine, deploys, localDiag };
 }

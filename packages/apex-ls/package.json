@@ -1,0 +1,23 @@
+{
+  "name": "@contrail/apex-ls",
+  "version": "0.1.0",
+  "description": "Vendored Salesforce Apex/SOQL language-server bundles shipped with the desktop app (powering check_apex / check_soql), plus the path resolver the engine wiring uses. See vendor/PROVENANCE.md and NOTICE.",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
