@@ -1020,6 +1020,9 @@ button.danger {
 .flow-embed { display: flex; flex-direction: column; gap: 6px; flex: 1; min-height: 0; }
 .flow-embed .flow-stage { min-height: 0; }
 .flow-embed .flow-scroll { flex: 1; max-height: none; }
+/* Each split pane pops its own inspector for the shared selection — half-width
+   panes can't afford the full 320px, so it flexes down on smaller windows. */
+.flow-split .flow-inspector { width: min(300px, 45%); max-height: none; }
 .flow-split-hint { margin-left: 14px; color: var(--text-dim); }
 
 /* The cross-highlight has to read across two busy canvases — accent stroke

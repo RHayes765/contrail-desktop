@@ -492,7 +492,12 @@ export function FlowDiagram({
    */
   selectedName?: string | null;
   onSelectName?: (name: string | null) => void;
-  /** Chrome-less pane mode: no fullscreen button, no legend, no inspector. */
+  /**
+   * Chrome-less pane mode: no fullscreen button, no legend. The inspector
+   * STAYS — in the split view each pane resolves the shared selection
+   * against its own graph, so clicking a node pops that node's details in
+   * BOTH versions at once (the comparison is the point).
+   */
   embedded?: boolean;
 }) {
   const [fullscreen, setFullscreen] = useState(false);
@@ -559,7 +564,7 @@ export function FlowDiagram({
             idPrefix={idPrefix}
           />
         </div>
-        {!embedded && selected && (
+        {selected && (
           <InspectorPanel
             node={selected}
             onClose={() => (controlled ? onSelectName!(null) : setLocalSelected(null))}
