@@ -5,9 +5,14 @@ embedded Claude agent operates against your orgs through a first-party
 Salesforce engine — with grants, project isolation, and human approval for
 every write.
 
-> **Status: in development.** Milestones M0–M5 are built and exercised against
-> real orgs; the adversarial write-safety suite, packaging, and onboarding
-> (M6) are not done yet. There is no installer — you run it from source.
+> **Status: released and self-updating.** Installers ship on
+> [GitHub Releases](https://github.com/RHayes765/contrail-desktop/releases)
+> and installed apps auto-update. Built and exercised against real orgs,
+> with an adversarial write-safety suite guarding the approval invariants.
+>
+> **📖 The full tool & feature reference lives in the engine repo:
+> [contrail-plugin/TOOLS.md](https://github.com/RHayes765/contrail-plugin/blob/main/TOOLS.md)**
+> — same 34 capabilities in both surfaces, desktop differences noted there.
 
 ## Why it exists
 
@@ -41,8 +46,20 @@ tools. The engine owns Salesforce; MCP is a surface, not the substrate.
 - **External MCP connectors** — bring your own servers (stdio, HTTP, SSE) with
   a built-in OAuth 2.1 client (PKCE, dynamic client registration, or your own
   OAuth app). Off by default in every project.
-- **Deploys with native approval** — the agent can validate and request; only a
-  human clicking Approve in the Deploy Review screen can execute.
+- **Writes with native approval** — metadata deploys, DML (single changes or
+  multi-step plans with server-side id chaining), anonymous Apex (shown
+  verbatim), and Bulk API 2.0 CSV data loads (files frozen at propose, rows
+  never entering the conversation). The agent can validate and request; only
+  a human clicking Approve in the Deploy Review screen can execute.
+- **Org intelligence** — drift reports (live org vs your snapshot),
+  SetupAuditTrail reading, effective-access explanations (CRUD/FLS with
+  attribution), standalone Apex test runs, trace flags and debug logs, and
+  free offline Apex/SOQL pre-checks via vendored Salesforce language servers.
+- **Skills** — the bundled Salesforce skill pack (house rules, Apex/object/
+  field/permission-set/validation-rule authoring, data migration) plus custom
+  skill uploads, toggleable per project.
+- **Linked folders** — attach local folders to a project; the agent sees
+  their live contents (and bulk loads read CSVs from them by name).
 
 ## The safety model
 
@@ -85,7 +102,9 @@ filesystem tools — every capability executes in the main process over a bridge
 
 ## Running it
 
-Requires Node 22+, pnpm, and an Anthropic API key.
+**Installing:** grab the latest `Contrail-Setup-<version>.exe` from
+[Releases](https://github.com/RHayes765/contrail-desktop/releases) — installed
+apps update themselves. From source (Node 22+, pnpm, an Anthropic API key):
 
 ```bash
 pnpm install
@@ -98,7 +117,9 @@ account `anthropic-api-key`. Connect an org from the **SF Orgs** screen; create
 a project, bind the org, and start a session.
 
 Application data (SQLite database, metadata snapshots, transcripts) lives in
-`%LOCALAPPDATA%\Contrail` on Windows and the platform equivalent elsewhere.
+`%USERPROFILE%\.contrail` on Windows and the platform equivalent elsewhere,
+shared with the companion Claude plugin (additive-only schema, so either can
+run without the other).
 Nothing is uploaded anywhere: network egress is exactly your Salesforce orgs,
 the Anthropic API, and whatever external MCP connectors you enable.
 
@@ -108,16 +129,20 @@ the Anthropic API, and whatever external MCP connectors you enable.
 pnpm -r test
 ```
 
-226 tests today — engine unit and capability-surface tests, the agent-runtime
-tool-manifest tripwire (which pins the isolation invariants: no built-in tools,
-no ambient settings, no unexpected tool in the manifest), and desktop tests for
-project-silo enforcement, the code vault, and native deploy approval.
+540+ tests across the workspace — engine unit and capability-surface tests,
+the agent-runtime tool-manifest tripwire (which pins the isolation invariants:
+no built-in tools, no ambient settings, no unexpected tool in the manifest),
+and desktop tests for project-silo enforcement, the code vault, native deploy
+approval, and the adversarial write-safety suite.
 
 ## Related
 
-The same engine also ships as a Claude plugin (a local stdio MCP server) in a
-companion repository — that's how the tooling is used from Claude Desktop or
-Claude Code rather than from this app.
+The same engine also ships as a Claude plugin (a local stdio MCP server) at
+[RHayes765/contrail-plugin](https://github.com/RHayes765/contrail-plugin) —
+that's how the tooling is used from Claude Desktop or Claude Code rather than
+from this app. The tool/feature reference
+([TOOLS.md](https://github.com/RHayes765/contrail-plugin/blob/main/TOOLS.md))
+lives there.
 
 ## License
 
