@@ -487,6 +487,53 @@ export class ProjectService {
     folderName: string,
     relPath: string,
   ): { ok: true; text: string } | { ok: false; message: string } {
+    const resolved = this.resolveFolderPath(projectId, folderName, relPath);
+    if (!resolved.ok) return resolved;
+    const { real, stat } = resolved;
+    const ext = path.extname(real).toLowerCase();
+    if (!TEXT_EXTENSIONS.has(ext)) {
+      return {
+        ok: false,
+        message: `"${relPath}" is ${ext || 'a binary format'} — only text formats are readable in v1.`,
+      };
+    }
+    if (stat.size > DOC_MAX_BYTES) {
+      return {
+        ok: false,
+        message: `"${relPath}" is ${Math.round(stat.size / 1024 / 1024)}MB — too large to read (limit 25MB).`,
+      };
+    }
+    let text: string;
+    try {
+      text = fs.readFileSync(real, 'utf8');
+    } catch (err) {
+      return { ok: false, message: `Could not read "${relPath}": ${String(err).slice(0, 200)}` };
+    }
+    if (text.length > DOC_READ_MAX_CHARS) {
+      return {
+        ok: true,
+        text:
+          text.slice(0, DOC_READ_MAX_CHARS) +
+          `\n\n[truncated: showing ${DOC_READ_MAX_CHARS.toLocaleString()} of ${text.length.toLocaleString()} characters]`,
+      };
+    }
+    return { ok: true, text };
+  }
+
+  /**
+   * The shared containment chain behind every agent-facing linked-folder
+   * access — factored so the text-read path and the bulk-load path cannot
+   * drift apart on the security-load-bearing part: folder resolved from the
+   * PROJECT's rows by basename, the relative path resolved under it, and the
+   * RESULT realpath'd and re-checked against the re-realpath'd root, so
+   * neither `..`, an absolute path, nor a symlink planted inside the tree
+   * after linking can escape it.
+   */
+  private resolveFolderPath(
+    projectId: string,
+    folderName: string,
+    relPath: string,
+  ): { ok: true; real: string; stat: fs.Stats } | { ok: false; message: string } {
     if (typeof folderName !== 'string' || folderName.length === 0 || folderName.length > 255) {
       return { ok: false, message: 'folder must be a folder name from list_project_files.' };
     }
@@ -530,34 +577,32 @@ export class ProjectService {
     if (!stat.isFile()) {
       return { ok: false, message: `"${relPath}" is not a file.` };
     }
-    const ext = path.extname(real).toLowerCase();
-    if (!TEXT_EXTENSIONS.has(ext)) {
+    return { ok: true, real, stat };
+  }
+
+  /**
+   * Resolve a linked-folder CSV to its absolute path for a bulk load — the
+   * same guard chain as readFolderFile, but returning the PATH (the engine
+   * freezes the bytes itself) with no text-read truncation. CSV only: this
+   * hands a file to an org-bound pipeline, so the allowlist is exactly the
+   * format that pipeline speaks. Size is capped by the engine's
+   * bulkLoad.maxFileBytes when it stats the file again at freeze time.
+   */
+  resolveFolderDataFile(
+    projectId: string,
+    folderName: string,
+    relPath: string,
+  ): { ok: true; absPath: string; size: number } | { ok: false; message: string } {
+    const resolved = this.resolveFolderPath(projectId, folderName, relPath);
+    if (!resolved.ok) return resolved;
+    const ext = path.extname(resolved.real).toLowerCase();
+    if (ext !== '.csv') {
       return {
         ok: false,
-        message: `"${relPath}" is ${ext || 'a binary format'} — only text formats are readable in v1.`,
+        message: `"${relPath}" is ${ext || 'not a .csv file'} — bulk loads take .csv files only.`,
       };
     }
-    if (stat.size > DOC_MAX_BYTES) {
-      return {
-        ok: false,
-        message: `"${relPath}" is ${Math.round(stat.size / 1024 / 1024)}MB — too large to read (limit 25MB).`,
-      };
-    }
-    let text: string;
-    try {
-      text = fs.readFileSync(real, 'utf8');
-    } catch (err) {
-      return { ok: false, message: `Could not read "${relPath}": ${String(err).slice(0, 200)}` };
-    }
-    if (text.length > DOC_READ_MAX_CHARS) {
-      return {
-        ok: true,
-        text:
-          text.slice(0, DOC_READ_MAX_CHARS) +
-          `\n\n[truncated: showing ${DOC_READ_MAX_CHARS.toLocaleString()} of ${text.length.toLocaleString()} characters]`,
-      };
-    }
-    return { ok: true, text };
+    return { ok: true, absPath: resolved.real, size: resolved.stat.size };
   }
 
   // ── notes ──────────────────────────────────────────────────────────────

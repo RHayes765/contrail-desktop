@@ -609,4 +609,155 @@ export const deployCapabilities: Capability[] = [
         return ok(result);
       }),
   },
+  {
+    name: 'bulk_load_propose',
+    title: 'Propose a bulk data load from CSV files (two-step)',
+    description:
+      'Stage a multi-file Bulk API 2.0 data load behind the approval ritual. Rows go ' +
+      'FILE → ORG and never through this conversation: prepare UTF-8, comma-delimited ' +
+      'CSVs in a linked project folder (API-name headers; cross-object references as ' +
+      'relationship-by-external-ID columns like "Account.External_Id__c", resolved ' +
+      'org-side), then name one file per step by its {folder, path} coordinates from ' +
+      'list_project_files. Steps execute SEQUENTIALLY in the order given — parents ' +
+      'before children. Each file is scanned (headers, row count) and FROZEN at ' +
+      'propose; the human approves the whole plan in Deploy Review with counts and ' +
+      'hashes per step. Bulk steps are separate org-side jobs with NO cross-job ' +
+      'rollback; delete steps are SOFT deletes (Recycle Bin) and their CSV is a ' +
+      'single Id column. For small test-data seeding (≤200 rows) prefer dml_propose.',
+    grant: 'data_write',
+    writeClass: true,
+    inputSchema: {
+      connection: z
+        .string()
+        .describe('Target connection alias (or id) — name it unmissably to the human.'),
+      steps: z
+        .array(
+          z.object({
+            folder: z
+              .string()
+              .describe('Linked project folder name (as listed by list_project_files).'),
+            path: z
+              .string()
+              .describe("The CSV's path relative to that folder (forward slashes)."),
+            object: z.string().describe('SObject API name, e.g. Account or Invoice__c.'),
+            operation: z.enum(['insert', 'upsert', 'delete']),
+            external_id_field: z
+              .string()
+              .optional()
+              .describe(
+                "upsert only (required there): the match field. Pass 'Id' to update by " +
+                  'record id. Must be a column in the CSV.',
+              ),
+            abs_path: z
+              .string()
+              .optional()
+              .describe(
+                'Host-injected. Never set this yourself — it is stripped and re-resolved ' +
+                  'from {folder, path} by the desktop app.',
+              ),
+          }),
+        )
+        .min(1)
+        .max(50)
+        .describe('Ordered steps — one CSV each, executed sequentially.'),
+      stop_on_failure: z
+        .boolean()
+        .optional()
+        .describe(
+          'Default true: a step with failed rows halts the remaining steps (rows already ' +
+            'loaded STAY — bulk has no cross-job rollback). false runs every step.',
+        ),
+    },
+    handler: (deps, rawArgs) =>
+      guarded(async () => {
+        const args = rawArgs as {
+          connection: string;
+          steps: Array<{
+            folder: string;
+            path: string;
+            object: string;
+            operation: 'insert' | 'upsert' | 'delete';
+            external_id_field?: string;
+            abs_path?: string;
+          }>;
+          stop_on_failure?: boolean;
+        };
+        const conn = requireConnection(deps, args.connection, 'bulk_load_propose');
+        // SECURITY INVARIANT: the engine only ever receives paths the HOST
+        // resolved. agentRuntime strips any agent-supplied abs_path and
+        // re-resolves each {folder, path} against the session's own project's
+        // linked folders before this handler runs. A step arriving here
+        // without abs_path means the call did not come through that gate.
+        const missing = args.steps.find((s) => !s.abs_path);
+        if (missing) {
+          return fail(
+            'File coordinates are resolved by the desktop app from {folder, path} — ' +
+              'direct filesystem paths are not accepted. Link the folder holding the ' +
+              "CSVs in the project's Docs tab and name files by folder + relative path.",
+          );
+        }
+        const preview = await deps.deploys.proposeBulkLoad(conn, {
+          stopOnFailure: args.stop_on_failure ?? true,
+          steps: args.steps.map((s) => ({
+            sourcePath: s.abs_path!,
+            displayName: `${s.folder}/${s.path}`,
+            object: s.object,
+            operation: s.operation,
+            ...(s.external_id_field ? { externalIdField: s.external_id_field } : {}),
+          })),
+        });
+        return ok(
+          preview,
+          `Proposed — nothing loaded. TARGET: ${conn.alias} (${conn.orgType}). ${APPROVAL_INSTRUCTIONS}`,
+        );
+      }),
+  },
+  {
+    name: 'bulk_load_execute',
+    title: 'Execute a proposed bulk data load',
+    description:
+      'Run the most recently proposed bulk load plan: sequential Bulk API 2.0 ingest ' +
+      'jobs from the CSVs frozen at propose. In the desktop app, call WITHOUT a ' +
+      'confirmation code — the user approves in Deploy Review and this call waits for ' +
+      'their decision. With the localhost approval page, pass the code the human read ' +
+      'from the page. Large jobs take minutes: an in-progress result means call again ' +
+      'the same way to check on it. Failed and unprocessed rows come back as CSV file ' +
+      'paths (never row data); rows loaded by completed steps are never rolled back.',
+    grant: 'data_write',
+    writeClass: true,
+    inputSchema: {
+      connection: z.string().describe('Target connection alias (or id).'),
+      confirmation_code: z
+        .string()
+        .optional()
+        .describe(
+          'Only when the human read a code from the approval page (format XXXX-XXXX). ' +
+            'Omit in the desktop app — approval is native.',
+        ),
+    },
+    handler: (deps, rawArgs) =>
+      guarded(async () => {
+        const args = rawArgs as { connection: string; confirmation_code?: string };
+        const conn = requireConnection(deps, args.connection, 'bulk_load_execute');
+        if (!args.confirmation_code) {
+          return fail(
+            'No confirmation code and no pending native approval. Propose first; then in the ' +
+              'desktop app call again without a code, or with the approval page pass its code.',
+          );
+        }
+        const outcome = await deps.deploys.executeBulkLoad(conn, args.confirmation_code);
+        switch (outcome.status) {
+          case 'in_progress':
+            return ok(
+              { progress: outcome.progress, started_at: outcome.started_at },
+              'The bulk load is still running — call bulk_load_execute again the same way ' +
+                'to check on it.',
+            );
+          case 'failed':
+            return fail(`Bulk load errored: ${outcome.error}`);
+          case 'complete':
+            return ok(outcome.result);
+        }
+      }),
+  },
 ];

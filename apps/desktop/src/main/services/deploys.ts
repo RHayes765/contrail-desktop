@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import {
   ContrailError,
   type ApprovalPresentation,
@@ -140,6 +141,15 @@ export class DeployService {
           stranded: true,
         }),
       );
+      // A stranded row never reaches finishExecution, so its frozen payload
+      // (a zip, or a bulk payload DIRECTORY) would leak — sweep it here.
+      if (rec.payloadPath) {
+        try {
+          fs.rmSync(rec.payloadPath, { recursive: true, force: true });
+        } catch {
+          // Best-effort: a locked file is not worth failing startup over.
+        }
+      }
       this.deps.audit.record('deploy.stranded', {
         connectionId: rec.connectionId,
         tool: 'startup_reconcile',
@@ -297,6 +307,23 @@ export class DeployService {
           // The engine reports deploy outcomes as `deployed`, DML as
           // `executed` — there is no `success` key. Getting this wrong
           // told the agent "executed" for a failed deploy.
+          failed = outcomeFailed(outcome.result);
+        }
+      } else if (rec.kind === 'bulk') {
+        // Bulk loads are long-running like deploys: the same soft-wait poll
+        // loop, re-attaching by code. This branch MUST precede the DML
+        // fallthrough or a bulk row would silently call executeDml.
+        let outcome = await this.deps.deploys.executeBulkLoad(conn, code);
+        while (outcome.status === 'in_progress') {
+          this.push('deploys:changed', { requestId: id });
+          await new Promise((r) => setTimeout(r, EXECUTE_POLL_MS));
+          outcome = await this.deps.deploys.executeBulkLoad(conn, code);
+        }
+        if (outcome.status === 'failed') {
+          failed = true;
+          detail = { error: outcome.error };
+        } else {
+          detail = outcome.result;
           failed = outcomeFailed(outcome.result);
         }
       } else if (rec.kind === 'apex') {
@@ -542,16 +569,25 @@ export class DeployService {
     let changeRows = review?.changeRows ?? [];
     let destructiveRows = review?.destructiveRows ?? [];
     if (changeRows.length === 0 && destructiveRows.length === 0) {
-      // A multi-step DML plan (S14) proposed OUTSIDE this app (plugin path)
-      // has no review_json, but its summary carries per-step preview rows —
-      // use them rather than the raw-JSON fallback below.
+      // A multi-step DML plan (S14) or a bulk load plan (S27) proposed
+      // OUTSIDE this app (plugin path) has no review_json, but its summary
+      // carries per-step preview rows in the same shape — use them rather
+      // than the raw-JSON fallback below.
       const planRows = summary?.rows as
-        | Array<{ label?: string; warnings?: string[]; destructive?: boolean }>
+        | Array<{ label?: string; warnings?: string[]; detail?: string; destructive?: boolean }>
         | undefined;
-      if (rec.kind === 'dml' && Array.isArray(planRows) && planRows.some((r) => r?.label)) {
+      if (
+        (rec.kind === 'dml' || rec.kind === 'bulk') &&
+        Array.isArray(planRows) &&
+        planRows.some((r) => r?.label)
+      ) {
         for (const r of planRows.slice(0, 50)) {
           if (!r?.label) continue;
-          const row = { label: r.label, warnings: r.warnings ?? [] };
+          const row = {
+            label: r.label,
+            warnings: r.warnings ?? [],
+            ...(r.detail ? { detail: r.detail } : {}),
+          };
           if (r.destructive) destructiveRows = [...destructiveRows, row];
           else changeRows = [...changeRows, row];
         }

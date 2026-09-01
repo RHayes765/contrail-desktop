@@ -399,7 +399,7 @@ export type ChatEvent =
   | {
       type: 'approval_required';
       requestId: string;
-      kind: 'deploy' | 'dml' | 'apex';
+      kind: 'deploy' | 'dml' | 'apex' | 'bulk';
       connection: string;
       orgType: string;
     }
@@ -611,7 +611,7 @@ export interface DeployChangeView {
  */
 export interface DeployRequestView {
   id: string;
-  kind: 'deploy' | 'dml' | 'apex';
+  kind: 'deploy' | 'dml' | 'apex' | 'bulk';
   connectionId: string;
   alias: string;
   orgName: string | null;

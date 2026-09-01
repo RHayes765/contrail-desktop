@@ -68,6 +68,8 @@ describe('tool manifest (THE isolation snapshot)', () => {
     expect(names).toEqual([
       'apex_execute',
       'apex_propose',
+      'bulk_load_execute',
+      'bulk_load_propose',
       'check_apex',
       'check_soql',
       'deactivate_flow',
@@ -283,6 +285,8 @@ describe('tool manifest (THE isolation snapshot)', () => {
       'deactivate_flow',
       'apex_propose',
       'apex_execute',
+      'bulk_load_propose',
+      'bulk_load_execute',
     ]) {
       expect(allowed).not.toContain(`mcp__contrail__${writeTool}`);
     }

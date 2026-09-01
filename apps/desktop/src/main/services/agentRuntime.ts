@@ -96,6 +96,7 @@ const APPROVAL_PRESENTING = new Set([
   'dml_propose',
   'deactivate_flow',
   'apex_propose',
+  'bulk_load_propose',
 ]);
 
 export interface SessionSpec {
@@ -349,6 +350,33 @@ export class AgentSessionRun {
       return refuse('In a project session, get_audit_log requires a connection argument.');
     }
 
+    // bulk_load_propose names files by {folder, path} coordinates only. The
+    // host resolves them HERE, against THIS session's project's linked
+    // folders (server-side project id — the silo doctrine), and injects the
+    // abs_path the engine-side handler requires. SECURITY INVARIANT: any
+    // agent-supplied abs_path is stripped first — the injected key is
+    // trustworthy precisely because nothing the agent sends survives into it.
+    if (name === 'bulk_load_propose' && Array.isArray(a.steps)) {
+      const steps = a.steps as Array<Record<string, unknown>>;
+      for (const step of steps) {
+        if (step && typeof step === 'object') delete step.abs_path;
+      }
+      for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+        if (!step || typeof step !== 'object') continue;
+        const resolved = this.silo.resolveFolderDataFile(
+          this.spec.project.id,
+          String(step.folder ?? ''),
+          String(step.path ?? ''),
+        );
+        if (!resolved.ok) {
+          this.capabilityCalls.push({ name, refused: true });
+          return refuse(`step ${i + 1}: ${resolved.message}`);
+        }
+        step.abs_path = resolved.absPath;
+      }
+    }
+
     // Native approval interception: an agent write-execute WITHOUT a
     // human-typed code (the vault is empty) holds on the pending validated
     // request until the human decides in Deploy Review. With a vaulted code
@@ -356,13 +384,22 @@ export class AgentSessionRun {
     const realCode =
       typeof a.confirmation_code === 'string' && a.confirmation_code.trim().length > 0;
     if (
-      (name === 'execute_deploy' || name === 'dml_execute' || name === 'apex_execute') &&
+      (name === 'execute_deploy' ||
+        name === 'dml_execute' ||
+        name === 'apex_execute' ||
+        name === 'bulk_load_execute') &&
       !realCode &&
       typeof a.connection === 'string'
     ) {
       const held = this.deploysRef()?.interceptAgentExecute(
         this.sessionId,
-        name === 'execute_deploy' ? 'deploy' : name === 'apex_execute' ? 'apex' : 'dml',
+        name === 'execute_deploy'
+          ? 'deploy'
+          : name === 'apex_execute'
+            ? 'apex'
+            : name === 'bulk_load_execute'
+              ? 'bulk'
+              : 'dml',
         a.connection,
       );
       if (held) {

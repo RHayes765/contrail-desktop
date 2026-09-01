@@ -1329,7 +1329,13 @@ ${logFilePath()}`,
       if (Notification.isSupported()) {
         const n = new Notification({
           title: `Approval needed — ${info.connection} (${info.orgType})`,
-          body: `A ${info.kind === 'deploy' ? 'metadata deploy' : 'data change'} is waiting in Deploy Review.`,
+          body: `A ${
+            info.kind === 'deploy'
+              ? 'metadata deploy'
+              : info.kind === 'bulk'
+                ? 'bulk data load'
+                : 'data change'
+          } is waiting in Deploy Review.`,
         });
         n.on('click', () => {
           const w = mainWindow;

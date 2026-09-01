@@ -46,7 +46,8 @@ export const STANDARD_CATALOG: CatalogEntry[] = [
     key: 'data',
     label: 'Data & SOQL',
     description:
-      'SOQL queries and record reads; DML and anonymous Apex proposal and execution.',
+      'SOQL queries and record reads; DML, anonymous Apex, and bulk CSV data loads — ' +
+      'proposal and execution.',
     capabilities: [
       'soql_query',
       'get_record',
@@ -55,6 +56,8 @@ export const STANDARD_CATALOG: CatalogEntry[] = [
       'dml_execute',
       'apex_propose',
       'apex_execute',
+      'bulk_load_propose',
+      'bulk_load_execute',
     ],
   },
   {

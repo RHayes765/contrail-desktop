@@ -18,7 +18,9 @@ import { ProjectService } from '../main/services/projects.js';
 
 let tmp: string;
 let db: ContrailDb;
-let executed: Array<{ connId: string; code: string; kind: 'deploy' | 'dml' | 'apex' }>;
+let executed: Array<{ connId: string; code: string; kind: 'deploy' | 'dml' | 'apex' | 'bulk' }>;
+let bulkProposals: Array<{ stopOnFailure: boolean; steps: Array<Record<string, unknown>> }>;
+let bulkExecutedOk: boolean;
 let deps: EngineDeps;
 let service: DeployService;
 
@@ -52,7 +54,7 @@ function seedRequest(
   connId: string,
   over: {
     code?: string;
-    kind?: 'deploy' | 'dml' | 'apex';
+    kind?: 'deploy' | 'dml' | 'apex' | 'bulk';
     expiresAt?: string;
     sessionId?: string;
     destructive?: boolean;
@@ -90,6 +92,8 @@ beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'contrail-ws-'));
   db = new ContrailDb(path.join(tmp, 'test.db'));
   executed = [];
+  bulkProposals = [];
+  bulkExecutedOk = true;
   // Faithful engine stub (see deploy-approval.test.ts for why faithfulness
   // matters): claims the row and writes the terminal state like the real one.
   const finish = (code: string, payload: Record<string, unknown>) => {
@@ -117,6 +121,21 @@ beforeEach(() => {
       const result = { executed: true, status: 'executed' };
       finish(code, result);
       return result;
+    },
+    proposeBulkLoad: async (
+      _conn: { id: string },
+      input: { stopOnFailure: boolean; steps: Array<Record<string, unknown>> },
+    ) => {
+      bulkProposals.push(input);
+      return { request_id: 'bulk-req', total_rows: 1, stop_on_failure: input.stopOnFailure };
+    },
+    executeBulkLoad: async (conn: { id: string }, code: string) => {
+      executed.push({ connId: conn.id, code, kind: 'bulk' });
+      const result = bulkExecutedOk
+        ? { bulk: true, executed: true, total_processed: 3, total_failed: 0 }
+        : { bulk: true, executed: false, total_processed: 3, total_failed: 2, halted_after_step: 1 };
+      finish(code, result);
+      return { status: 'complete', result };
     },
   };
   deps = { db, audit: { record: () => undefined }, deploys: engine } as unknown as EngineDeps;
@@ -392,6 +411,157 @@ describe('multi-step DML plans at the native seam (S14)', () => {
     const result = await held!;
     expect(result.isError).not.toBe(true);
     expect(executed).toEqual([{ connId, code: 'PLAN-CODE', kind: 'dml' }]);
+  });
+});
+
+describe('bulk loads at the native seam (S27)', () => {
+  function seedBulkRequest(connId: string, sessionId?: string): string {
+    // Proposed via the PLUGIN (shared DB): kind 'bulk', plan-shaped summary
+    // rows (same shape as DML plans), no desktop review_json.
+    const rec = db.insertDeployRequest({
+      connectionId: connId,
+      kind: 'bulk',
+      confirmationCode: 'BULK-CODE',
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      summaryJson: JSON.stringify({
+        bulk: true,
+        steps: 2,
+        total_rows: 1200,
+        stop_on_failure: true,
+        rows: [
+          {
+            label: 'STEP 1  INSERT Account — 1,000 rows',
+            warnings: [],
+            detail: 'from Migration/accounts.csv\nfrozen sha256 ab12cd34ef567890… · 45,231 bytes',
+            destructive: false,
+          },
+          {
+            label: 'STEP 2  DELETE Contact — 200 rows',
+            warnings: ['Bulk delete is a SOFT delete — rows go to the Recycle Bin (~15 days).'],
+            destructive: true,
+          },
+        ],
+      }),
+    });
+    if (sessionId) db.setDeployRequestDesktopFields(rec.id, { sessionId });
+    return rec.id;
+  }
+
+  it('a plugin-proposed bulk row renders its steps (details, red deletes), hides the code, and approve drives executeBulkLoad', async () => {
+    const connId = seedConnection('developer', 'dev');
+    const id = seedBulkRequest(connId, 's-bulk');
+    const view = service.get(id);
+    expect(view.kind).toBe('bulk');
+    expect(view.changeRows[0]?.label).toContain('STEP 1  INSERT Account');
+    expect(view.changeRows[0]?.detail).toContain('frozen sha256');
+    expect(view.destructiveRows[0]?.label).toContain('DELETE Contact');
+    expect(view.destructiveRows[0]?.warnings.join(' ')).toContain('Recycle Bin');
+    expect(JSON.stringify(view)).not.toContain('BULK-CODE');
+
+    // An agent bulk_load_execute with no human-typed code holds on the
+    // 'bulk' kind and the decision drives executeBulkLoad — NEVER executeDml
+    // (the DML fallthrough was the trap here).
+    const held = service.interceptAgentExecute('s-bulk', 'bulk', connId);
+    expect(held).not.toBeNull();
+    await service.approve(id, 'load it');
+    expect(executed).toEqual([{ connId, code: 'BULK-CODE', kind: 'bulk' }]);
+    const result = await held!;
+    expect(result.isError).not.toBe(true);
+    expect(result.content[0]!.text).toContain('"approved": true');
+  });
+
+  it('a bulk outcome with executed:false is a FAILURE to the review flow and the held agent call', async () => {
+    bulkExecutedOk = false;
+    const connId = seedConnection('developer', 'dev');
+    const id = seedBulkRequest(connId, 's-bulk2');
+    const held = service.interceptAgentExecute('s-bulk2', 'bulk', connId);
+    await service.approve(id, 'try it');
+    const result = await held!;
+    // outcomeFailed understands the bulk payload's `executed` key — a partial
+    // load must never read back to the agent as a success.
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('execution failed');
+    expect(result.content[0]!.text).toContain('"total_failed": 2');
+  });
+
+  it('a deploy hold is NOT satisfied by a bulk decision (kind is identity)', () => {
+    const connId = seedConnection('developer', 'dev');
+    seedBulkRequest(connId, 's-y');
+    expect(service.interceptAgentExecute('s-y', 'deploy', connId)).toBeNull();
+  });
+});
+
+describe('bulk_load_propose path resolution (S27 silo)', () => {
+  it('strips agent-supplied abs_path, resolves {folder, path} in the linked folder, refuses escapes', async () => {
+    const projects = new ProjectService(deps);
+    const project = projects.create('Migration Project');
+    const connId = seedConnection('developer', 'dev');
+    db.addProjectBinding(project.id, connId, 'dev');
+
+    // A real linked folder with a real CSV, and a secret OUTSIDE it.
+    const folderDir = path.join(tmp, 'MigrationData');
+    fs.mkdirSync(folderDir, { recursive: true });
+    fs.writeFileSync(path.join(folderDir, 'good.csv'), 'Name\nAcme\n');
+    fs.writeFileSync(path.join(folderDir, 'notes.txt'), 'not a csv');
+    fs.writeFileSync(path.join(tmp, 'secret.csv'), 'Name\nleaked\n');
+    projects.linkFolder(project.id, folderDir);
+
+    const run = new AgentSessionRun(
+      deps,
+      {
+        project: { id: project.id, name: 'Migration Project', description: null, instructions: null },
+        bindings: [],
+        model: 'claude-haiku-4-5',
+        maxTurns: 10,
+        maxBudgetUsd: 0.5,
+      },
+      'session-bulk',
+      projects,
+      () => service,
+    );
+
+    // THE SPOOF: the agent names a real {folder, path} but smuggles an
+    // abs_path of its own choosing. The host must strip it and inject the
+    // resolved linked-folder path.
+    const spoofed = await run.executeCapability('bulk_load_propose', {
+      connection: 'dev',
+      steps: [
+        {
+          folder: 'MigrationData',
+          path: 'good.csv',
+          object: 'Account',
+          operation: 'insert',
+          abs_path: path.join(tmp, 'secret.csv'),
+        },
+      ],
+    });
+    expect(spoofed.isError).toBeFalsy();
+    expect(bulkProposals).toHaveLength(1);
+    const sent = String(bulkProposals[0]!.steps[0]!.sourcePath);
+    expect(sent).toBe(fs.realpathSync(path.join(folderDir, 'good.csv')));
+    expect(sent).not.toContain('secret');
+
+    // Traversal out of the folder is refused before the engine hears of it.
+    const escape = await run.executeCapability('bulk_load_propose', {
+      connection: 'dev',
+      steps: [
+        { folder: 'MigrationData', path: '../secret.csv', object: 'Account', operation: 'insert' },
+      ],
+    });
+    expect(escape.isError).toBe(true);
+    expect(escape.content[0]!.text).toMatch(/without "\.\."|outside the linked folder/);
+    expect(bulkProposals).toHaveLength(1);
+
+    // Non-CSV files are not bulk sources, even inside the folder.
+    const wrongType = await run.executeCapability('bulk_load_propose', {
+      connection: 'dev',
+      steps: [
+        { folder: 'MigrationData', path: 'notes.txt', object: 'Account', operation: 'insert' },
+      ],
+    });
+    expect(wrongType.isError).toBe(true);
+    expect(wrongType.content[0]!.text).toContain('.csv files only');
+    expect(bulkProposals).toHaveLength(1);
   });
 });
 

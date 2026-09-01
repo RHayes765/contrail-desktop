@@ -67,6 +67,8 @@ describe('capability surface', () => {
     expect(names).toEqual([
       'apex_execute',
       'apex_propose',
+      'bulk_load_execute',
+      'bulk_load_propose',
       'check_apex',
       'check_soql',
       'connect_org',
@@ -116,6 +118,8 @@ describe('capability surface', () => {
     expect(writes).toEqual([
       'apex_execute',
       'apex_propose',
+      'bulk_load_execute',
+      'bulk_load_propose',
       'deactivate_flow',
       'dml_execute',
       'dml_propose',

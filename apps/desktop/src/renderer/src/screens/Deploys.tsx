@@ -81,7 +81,9 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
             ? 'Metadata deploy'
             : request.kind === 'apex'
               ? 'Anonymous Apex script'
-              : 'Data change (DML)'}{' '}
+              : request.kind === 'bulk'
+                ? 'Bulk data load'
+                : 'Data change (DML)'}{' '}
           ·{' '}
           {stateLabel(request)} · expires {new Date(request.expiresAt).toLocaleTimeString()}
         </div>
@@ -267,7 +269,9 @@ export function DeploysScreen() {
                       ? 'metadata deploy'
                       : r.kind === 'apex'
                         ? 'anonymous Apex'
-                        : 'data change'}
+                        : r.kind === 'bulk'
+                          ? 'bulk data load'
+                          : 'data change'}
                   </span>
                 </div>
                 <div className="conn-detail">
