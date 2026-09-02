@@ -71,9 +71,9 @@ export class BudgetService {
     };
   }
 
-  /** Record real spend. Called for agent turn deltas AND summary calls. */
+  /** Record real spend. Called for agent turn deltas, summary calls, and Ultracode reviews. */
   record(
-    kind: 'session' | 'summary',
+    kind: 'session' | 'summary' | 'review',
     model: string | null,
     costUsd: number,
     sessionId?: string | null,

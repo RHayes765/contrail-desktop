@@ -43,11 +43,18 @@ export function ToolCardView({ card }: { card: ToolCard }) {
       return String(card.input);
     }
   }, [card.input]);
+  // S28 subagent badges: the Agent card names WHICH subagent it spawned, and
+  // any call a subagent made carries a chip so nested work never reads as the
+  // main agent's own.
+  const isSpawn = card.name === 'Agent';
   return (
     <div className={`tool-card env-${card.connection ? role : 'none'}`}>
       <button className="tool-head" onClick={() => setOpen((v) => !v)}>
         <span className="tool-status">{card.ok === null ? '…' : card.ok ? '✓' : '✗'}</span>
-        <span className="tool-name">{card.name}</span>
+        <span className="tool-name">
+          {isSpawn && card.subagentType ? `subagent: ${card.subagentType}` : card.name}
+        </span>
+        {!isSpawn && card.parentToolUseId && <span className="env-chip other">subagent</span>}
         {card.connection && (
           <span className={`env-chip ${role}`}>
             {card.connection} · {role}

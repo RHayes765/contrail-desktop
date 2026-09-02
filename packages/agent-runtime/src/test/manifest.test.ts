@@ -136,8 +136,9 @@ describe('tool manifest (THE isolation snapshot)', () => {
 
   it('session options hold every isolation invariant', () => {
     const options = buildSessionOptions(ctxWith([FULL]), invoke);
-    // NO built-in tools, by construction — the single most load-bearing line.
-    expect(options.tools).toEqual([]);
+    // Exactly ONE built-in tool — the subagent spawner (S28). Anything else
+    // appearing here means the session's tool universe changed: stop.
+    expect(options.tools).toEqual(['Agent']);
     // Never load the user's ~/.claude settings, CLAUDE.md, or skills.
     expect(options.settingSources).toEqual([]);
     // Session history persists ONLY in the Contrail-owned config dir — the
@@ -160,13 +161,15 @@ describe('tool manifest (THE isolation snapshot)', () => {
     expect((resumed as { resume?: string }).resume).toBe('sdk-123');
   });
 
-  it('allowedTools carries ONLY namespaced contrail capabilities — no built-in names ever', () => {
+  it('allowedTools carries namespaced contrail capabilities plus exactly the Agent spawner', () => {
     const options = buildSessionOptions(ctxWith([FULL]), invoke);
     const allowed = options.allowedTools ?? [];
     expect(allowed.length).toBeGreaterThan(0);
     for (const name of allowed) {
-      expect(name).toMatch(/^mcp__contrail__/);
+      expect(name).toMatch(/^(mcp__contrail__|Agent$)/);
     }
+    expect(allowed.filter((n) => n === 'Agent')).toHaveLength(1);
+    // 'Task' (the legacy alias) and every other built-in stay banned.
     const FORBIDDEN = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Task', 'Skill'];
     for (const builtIn of FORBIDDEN) {
       expect(allowed).not.toContain(builtIn);
@@ -217,9 +220,10 @@ describe('tool manifest (THE isolation snapshot)', () => {
     const allowed = options.allowedTools ?? [];
     expect(allowed).toContain('mcp__echo');
     expect(allowed).toContain('mcp__tracker');
-    // Every entry is either a contrail capability or a declared external server — nothing else.
+    // Every entry is a contrail capability, a declared external server, or
+    // the Agent spawner — nothing else.
     for (const name of allowed) {
-      expect(name).toMatch(/^mcp__(contrail__|echo$|tracker$)/);
+      expect(name).toMatch(/^(mcp__(contrail__|echo$|tracker$)|Agent$)/);
     }
     // Auth material must never leak into the model-visible system prompt.
     expect(JSON.stringify(options.systemPrompt)).not.toContain('Bearer tok');
@@ -375,5 +379,89 @@ describe('tool manifest (THE isolation snapshot)', () => {
       buildSessionOptions({ ...ctxWith([FULL]), skills: [] }, invoke).systemPrompt,
     );
     expect(empty).not.toContain('# Skills');
+  });
+});
+
+describe('subagents + Ultracode (S28) — the fan-out stays caged', () => {
+  it('every subagent definition is read-only: explicit tools, no writes, no recursion, no external servers', async () => {
+    const { SUBAGENT_BANNED_TOOLS } = await import('../agents.js');
+    const options = buildSessionOptions(
+      {
+        ...ctxWith([FULL]),
+        externalServers: [{ key: 'echo', transport: 'stdio', urlOrCommand: 'node' }],
+      },
+      invoke,
+    );
+    const agents = (options as { agents?: Record<string, { tools?: string[]; disallowedTools?: string[]; model?: string; prompt: string } > }).agents ?? {};
+    expect(Object.keys(agents).sort()).toEqual([
+      'deploy-reviewer',
+      'org-impact-scout',
+      'scout',
+      'test-critic',
+    ]);
+    const bannedSdkNames = SUBAGENT_BANNED_TOOLS.map((n: string) => `mcp__contrail__${n}`);
+    for (const [name, def] of Object.entries(agents)) {
+      // Tools are EXPLICIT (inheritance would grant the parent's write tools).
+      expect(def.tools, `${name} must declare explicit tools`).toBeDefined();
+      expect(def.tools!.length).toBeGreaterThan(0);
+      for (const t of def.tools!) {
+        expect(t, `${name} tool ${t}`).toMatch(/^mcp__contrail__/); // never external, never built-in
+        expect(bannedSdkNames, `${name} carries banned tool ${t}`).not.toContain(t);
+      }
+      expect(def.tools).not.toContain('Agent');
+      // Belt and suspenders: the bans are restated.
+      expect(def.disallowedTools).toContain('Agent');
+      expect(def.disallowedTools).toContain('mcp__contrail__validate_deploy');
+      expect(def.disallowedTools).toContain('mcp__contrail__bulk_load_execute');
+      expect(def.model).toBe('inherit');
+    }
+    // The adversarial reviewer keeps its investigation surface.
+    expect(agents['deploy-reviewer']!.tools).toContain('mcp__contrail__get_dependencies');
+    expect(agents['deploy-reviewer']!.tools).toContain('mcp__contrail__check_apex');
+    // run_apex_tests is the test-critic's alone.
+    expect(agents['test-critic']!.tools).toContain('mcp__contrail__run_apex_tests');
+    expect(agents['deploy-reviewer']!.tools).not.toContain('mcp__contrail__run_apex_tests');
+    expect(agents['scout']!.tools).not.toContain('mcp__contrail__run_apex_tests');
+  });
+
+  it('subagent tools shrink with the session grants (intersection with minting)', () => {
+    const options = buildSessionOptions(ctxWith([READ_ONLY]), invoke);
+    const agents = (options as { agents?: Record<string, { tools?: string[] }> }).agents ?? {};
+    // metadata_read only: no data, no diagnostics — for subagents either.
+    expect(agents['scout']!.tools).not.toContain('mcp__contrail__soql_query');
+    expect(agents['scout']!.tools).not.toContain('mcp__contrail__get_debug_logs');
+    expect(agents['test-critic']!.tools).not.toContain('mcp__contrail__run_apex_tests');
+    expect(agents['scout']!.tools).toContain('mcp__contrail__retrieve_metadata');
+  });
+
+  it('request_review is minted ONLY in Ultracode sessions', () => {
+    const off = buildSessionOptions(ctxWith([FULL]), invoke);
+    expect(off.allowedTools).not.toContain('mcp__contrail__request_review');
+    const on = buildSessionOptions({ ...ctxWith([FULL]), ultracode: true }, invoke);
+    expect(on.allowedTools).toContain('mcp__contrail__request_review');
+    // Subagents never get it, even in Ultracode.
+    const agents = (on as { agents?: Record<string, { tools?: string[]; disallowedTools?: string[] }> }).agents ?? {};
+    for (const def of Object.values(agents)) {
+      expect(def.tools).not.toContain('mcp__contrail__request_review');
+      expect(def.disallowedTools).toContain('mcp__contrail__request_review');
+    }
+  });
+
+  it('the Ultracode prompt section appears only in Ultracode sessions, and stays cache-stable', () => {
+    const off = String(buildSessionOptions(ctxWith([FULL]), invoke).systemPrompt);
+    expect(off).not.toContain('# Ultracode validation protocol');
+    const a = String(
+      buildSessionOptions({ ...ctxWith([FULL]), ultracode: true }, invoke).systemPrompt,
+    );
+    const b = String(
+      buildSessionOptions({ ...ctxWith([FULL]), ultracode: true }, invoke).systemPrompt,
+    );
+    expect(a).toContain('# Ultracode validation protocol');
+    expect(a).toContain('content-addressed');
+    expect(a).toEqual(b);
+    expect(a).not.toMatch(/\d{4}-\d{2}-\d{2}|\d{2}:\d{2}/); // no dates/clocks
+    // The section is APPENDED — the shared prefix up to it is byte-identical
+    // with an Ultracode-off session (cache discipline).
+    expect(a.startsWith(off)).toBe(true);
   });
 });

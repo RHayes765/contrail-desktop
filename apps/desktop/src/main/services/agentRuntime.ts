@@ -40,6 +40,8 @@ import {
 } from '@contrail/shared';
 import type { ProjectService } from './projects.js';
 import type { SkillService } from './skills.js';
+import { canonicalReviewHash, type ReviewSubject } from './reviewHash.js';
+import type { ReviewService, ReviewSubjectInput, StoredReview } from './reviews.js';
 
 /**
  * AgentSessionManager: one utilityProcess per live session, bridged
@@ -99,6 +101,65 @@ const APPROVAL_PRESENTING = new Set([
   'bulk_load_propose',
 ]);
 
+/** Ultracode (S28): write proposals gated on a content-addressed review. */
+const ULTRACODE_GATED = new Set([
+  'validate_deploy',
+  'dml_propose',
+  'apex_propose',
+  'bulk_load_propose',
+  'deactivate_flow',
+]);
+/** A review addresses one moment's content — 30 minutes, then re-review. */
+const REVIEW_FRESH_MS = 30 * 60_000;
+const MAX_STORED_REVIEWS = 10;
+/** Ultracode multiplies the session budget cap: fan-out validation is real spend. */
+const ULTRACODE_BUDGET_MULTIPLIER = 3;
+
+/**
+ * Build the review subject from a PROPOSE call's own arguments — the gate
+ * side of the content-addressed contract. MUST mirror what request_review
+ * hashes (see reviewHash.ts); both run in main over the same module.
+ */
+function gateSubjectFor(name: string, a: Record<string, unknown>): ReviewSubject | null {
+  switch (name) {
+    case 'validate_deploy':
+      return {
+        kind: 'deploy',
+        components: (a.components ?? []) as Array<{
+          type: string;
+          api_name: string;
+          content?: string;
+          content_file?: string;
+        }>,
+        deletions: (a.destructive ?? []) as Array<{ type: string; api_name: string }>,
+      };
+    case 'apex_propose':
+      return { kind: 'apex', script: String(a.code ?? '') };
+    case 'dml_propose': {
+      const args = { ...a };
+      delete args.connection; // request_review's dml subject carries no connection
+      return { kind: 'dml', args };
+    }
+    case 'bulk_load_propose': {
+      const steps = Array.isArray(a.steps) ? (a.steps as Array<Record<string, unknown>>) : [];
+      return {
+        kind: 'bulk',
+        // Runs AFTER the abs_path injection — hashes cover the resolved bytes.
+        steps: steps.map((s) => ({
+          absPath: String(s.abs_path ?? ''),
+          object: String(s.object ?? ''),
+          operation: String(s.operation ?? ''),
+          ...(s.external_id_field ? { externalIdField: String(s.external_id_field) } : {}),
+        })),
+      };
+    }
+    case 'deactivate_flow':
+      return { kind: 'flow_deactivation', apiName: String(a.flow ?? '') };
+    default:
+      return null;
+  }
+}
+
 export interface SessionSpec {
   project: { id: string; name: string; description: string | null; instructions: string | null };
   bindings: Array<{ connection: ConnectionRecord; envRole: string }>;
@@ -114,6 +175,8 @@ export interface SessionSpec {
   externalServerIds?: string[];
   /** Skills enabled for the project at session start (prompt listing; reads re-check live). */
   skills?: Array<{ name: string; description: string }>;
+  /** Ultracode mode (S28): mandatory content-addressed reviews before proposes. */
+  ultracode?: boolean;
 }
 
 export interface UsageTotals {
@@ -226,6 +289,13 @@ export class AgentSessionRun {
   readonly capabilityCalls: Array<{ name: string; refused: boolean }> = [];
   /** The code vault: the human's latest confirmation code, held in main only. */
   private vaultedCode: string | null = null;
+  /**
+   * Ultracode: content-addressed reviews for THIS session, keyed by the
+   * canonical hash of what they reviewed. In-memory only — a restarted
+   * session simply re-reviews (cheap and correct); the durable copy rides
+   * the matched request's review_json at propose time.
+   */
+  private readonly reviews = new Map<string, StoredReview>();
 
   constructor(
     private readonly deps: EngineDeps,
@@ -236,6 +306,8 @@ export class AgentSessionRun {
     private readonly deploysRef: () => DeployService | null = () => null,
     /** Late-bound skill library; null in tests and legacy paths (read_skill refuses). */
     private readonly skillsRef: () => SkillService | null = () => null,
+    /** Late-bound Ultracode reviewer; null outside Ultracode wiring. */
+    private readonly reviewsRef: () => ReviewService | null = () => null,
   ) {}
 
   /**
@@ -377,6 +449,76 @@ export class AgentSessionRun {
       }
     }
 
+    // request_review (Ultracode): executed entirely in MAIN — a direct model
+    // call the runtime cannot fabricate — and stored content-addressed.
+    if (name === 'request_review') {
+      if (!this.spec.ultracode) {
+        // Defense in depth: the tool is not even minted outside Ultracode.
+        this.capabilityCalls.push({ name, refused: true });
+        return refuse('request_review exists only in Ultracode sessions.');
+      }
+      const reviewer = this.reviewsRef();
+      if (!reviewer) {
+        this.capabilityCalls.push({ name, refused: true });
+        return refuse('The review service is not available in this environment.');
+      }
+      try {
+        const result = await reviewer.requestReview({
+          projectId: this.spec.project.id,
+          connection: String(a.connection ?? ''),
+          subject: (a.subject ?? {}) as ReviewSubjectInput,
+          notes: typeof a.notes === 'string' ? a.notes : undefined,
+        });
+        this.reviews.set(result.hash, result);
+        if (this.reviews.size > MAX_STORED_REVIEWS) {
+          const oldest = this.reviews.keys().next().value;
+          if (oldest) this.reviews.delete(oldest);
+        }
+        this.capabilityCalls.push({ name, refused: false });
+        return okJson({
+          review_id: result.reviewId,
+          verdict: result.verdict,
+          findings: result.findings,
+          content_hash: result.hash,
+          note:
+            'This review is bound to the EXACT content reviewed — propose that content ' +
+            'unchanged within 30 minutes. Any edit requires a new review. The human will ' +
+            'see this verdict and its findings on the approval card.',
+        });
+      } catch (err) {
+        this.capabilityCalls.push({ name, refused: true });
+        return refuse(`request_review failed: ${String(err instanceof Error ? err.message : err)}`);
+      }
+    }
+
+    // THE ULTRACODE GATE: in an Ultracode session, a write proposal is
+    // machine-refused unless the EXACT content being proposed carries a
+    // fresh review — the same canonicalization on both sides (reviewHash.ts)
+    // is the guarantee. Note the ordering: this runs AFTER the bulk abs_path
+    // injection, so bulk hashes cover the resolved files' bytes.
+    let matchedReview: StoredReview | null = null;
+    if (this.spec.ultracode && ULTRACODE_GATED.has(name)) {
+      const subject = gateSubjectFor(name, a);
+      const hash = subject ? canonicalReviewHash(subject) : null;
+      const review = hash ? this.reviews.get(hash) : undefined;
+      if (!review) {
+        this.capabilityCalls.push({ name, refused: true });
+        return refuse(
+          'Ultracode: this exact content has no adversarial review. Call request_review ' +
+            'with the FINAL content first — reviews are content-addressed, so any edit ' +
+            '(even one character) invalidates a prior review.',
+        );
+      }
+      if (Date.now() - Date.parse(review.at) > REVIEW_FRESH_MS) {
+        this.capabilityCalls.push({ name, refused: true });
+        return refuse(
+          'Ultracode: the adversarial review of this content is older than 30 minutes — ' +
+            'run request_review again on the same content.',
+        );
+      }
+      matchedReview = review;
+    }
+
     // Native approval interception: an agent write-execute WITHOUT a
     // human-typed code (the vault is empty) holds on the pending validated
     // request until the human decides in Deploy Review. With a vaulted code
@@ -410,10 +552,12 @@ export class AgentSessionRun {
 
     this.capabilityCalls.push({ name, refused: false });
     // Approval-presenting calls pair the presentation with THIS session so
-    // the approval card lands in the right chat.
+    // the approval card lands in the right chat. A matched Ultracode review
+    // rides along — onPresented persists it into the request's review_json,
+    // which is what Deploy Review shows the human.
     const presents = APPROVAL_PRESENTING.has(name);
     if (presents && typeof a.connection === 'string') {
-      this.deploysRef()?.expectPresentation(this.sessionId, a.connection);
+      this.deploysRef()?.expectPresentation(this.sessionId, a.connection, matchedReview);
     }
     try {
       // Layer-2 grant gate still runs inside the handler (assertGrant) —
@@ -563,6 +707,7 @@ export class AgentSessionRun {
       disabledCatalogKeys: this.spec.disabledCatalogKeys,
       externalServers: this.spec.externalServers,
       skills: this.spec.skills,
+      ultracode: this.spec.ultracode,
     };
   }
 }
@@ -615,6 +760,7 @@ export function sessionView(rec: AgentSessionRecord): SessionView {
     costUsd: rec.costUsd,
     createdAt: rec.createdAt,
     endedAt: rec.endedAt,
+    ultracode: rec.ultracode,
   };
 }
 
@@ -628,6 +774,13 @@ export class AgentSessionManager {
 
   setBudgetService(service: BudgetService): void {
     this.budget = service;
+  }
+
+  /** Ultracode reviewer, attached after construction (index.ts wires it). */
+  private reviewService: ReviewService | null = null;
+
+  setReviewService(service: ReviewService): void {
+    this.reviewService = service;
   }
 
   setDeployService(service: DeployService): void {
@@ -827,7 +980,12 @@ export class AgentSessionManager {
     return { usage: { ...entry.usage }, capabilityCalls: [...entry.run.capabilityCalls] };
   }
 
-  async start(projectId: string, model?: string, effort?: EffortLevel): Promise<SessionView> {
+  async start(
+    projectId: string,
+    model?: string,
+    effort?: EffortLevel,
+    ultracode?: boolean,
+  ): Promise<SessionView> {
     if (this.live.size >= MAX_LIVE_SESSIONS) {
       throw new Error(
         `${this.live.size} sessions are already running — end one before starting another.`,
@@ -865,6 +1023,10 @@ export class AgentSessionManager {
       if (s.enabled && s.transport !== 'stdio') await refreshMcpTokenIfExpired(s.id);
     }
     const mcp = resolveSessionMcp(this.deps, projectId);
+    // Ultracode raises the per-session cap (subagent validation is real
+    // spend) but never the daily line — allowanceForSession still clamps.
+    const modelCap =
+      catalog.maxBudgetUsd * (ultracode ? ULTRACODE_BUDGET_MULTIPLIER : 1);
     const spec: SessionSpec = {
       project,
       bindings,
@@ -875,13 +1037,12 @@ export class AgentSessionManager {
       // Never more than the model's own cap, never more than what's left of
       // today's allowance — so no session can cross the daily line, and a
       // resume cannot mint a fresh full budget the way it used to.
-      maxBudgetUsd: this.budget
-        ? this.budget.allowanceForSession(catalog.maxBudgetUsd)
-        : catalog.maxBudgetUsd,
+      maxBudgetUsd: this.budget ? this.budget.allowanceForSession(modelCap) : modelCap,
       disabledCatalogKeys: mcp.disabledCatalogKeys,
       externalServers: mcp.externalServers,
       externalServerIds: mcp.externalServerIds,
       skills: this.skillService?.resolveSessionSkills(projectId),
+      ultracode: ultracode ?? false,
     };
 
     const transcriptDir = path.join(dataDir(), 'sessions');
@@ -891,6 +1052,7 @@ export class AgentSessionManager {
       title: null,
       model: spec.model,
       effort: effort ?? null,
+      ultracode: ultracode ?? false,
     });
     const transcriptPath = path.join(transcriptDir, `${sessionId}.jsonl`);
     this.deps.db.setAgentSessionTranscriptPath(sessionId, transcriptPath);
@@ -963,6 +1125,11 @@ export class AgentSessionManager {
       if (s.enabled && s.transport !== 'stdio') await refreshMcpTokenIfExpired(s.id);
     }
     const mcp = resolveSessionMcp(this.deps, rec.projectId);
+    // The mode persists on the row — a resumed Ultracode session keeps its
+    // gate armed (and its raised cap).
+    const resumeCap =
+      CHAT_MODELS[modelId].maxBudgetUsd *
+      (rec.ultracode ? ULTRACODE_BUDGET_MULTIPLIER : 1);
     const spec: SessionSpec = {
       project,
       bindings,
@@ -971,14 +1138,13 @@ export class AgentSessionManager {
       maxTurns: CHAT_MAX_TURNS,
       // NOT a fresh full budget: the run gets whatever the daily allowance
       // still permits (the row keeps the lifetime total for display).
-      maxBudgetUsd: this.budget
-        ? this.budget.allowanceForSession(CHAT_MODELS[modelId].maxBudgetUsd)
-        : CHAT_MODELS[modelId].maxBudgetUsd,
+      maxBudgetUsd: this.budget ? this.budget.allowanceForSession(resumeCap) : resumeCap,
       disabledCatalogKeys: mcp.disabledCatalogKeys,
       externalServers: mcp.externalServers,
       externalServerIds: mcp.externalServerIds,
       // Same doctrine as toggles: a resume re-resolves from TODAY's state.
       skills: this.skillService?.resolveSessionSkills(rec.projectId),
+      ultracode: rec.ultracode,
     };
 
     const transcriptPath =
@@ -1020,6 +1186,7 @@ export class AgentSessionManager {
       this.silo,
       () => this.deployService,
       () => this.skillService,
+      () => this.reviewService,
     );
     const ctx = run.buildContext(sessionId, apiKey, this.claudeConfigDir, resumeSdkSessionId);
     const child = utilityProcess.fork(this.childPath, [], { stdio: 'pipe' });
@@ -1454,6 +1621,8 @@ export class AgentSessionManager {
         input: redactSensitive(event.input),
         connection: target.connection,
         envRole: target.envRole,
+        ...(event.parentToolUseId ? { parentToolUseId: event.parentToolUseId } : {}),
+        ...(event.subagentType ? { subagentType: event.subagentType } : {}),
       };
     } else {
       chat = event;

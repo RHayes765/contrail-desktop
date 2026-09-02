@@ -163,8 +163,8 @@ export function makeHandlers(health: HealthView, services: MainServices) {
     'sessions:list': (_deps: EngineDeps, req: { projectId: string }) => sessions.list(req.projectId),
     'sessions:start': (
       _deps: EngineDeps,
-      req: { projectId: string; model?: string; effort?: EffortLevel },
-    ) => sessions.start(req.projectId, req.model, req.effort),
+      req: { projectId: string; model?: string; effort?: EffortLevel; ultracode?: boolean },
+    ) => sessions.start(req.projectId, req.model, req.effort, req.ultracode),
     'sessions:send': (_deps: EngineDeps, req: { sessionId: string; text: string }) => {
       sessions.send(req.sessionId, req.text);
       return { ok: true };

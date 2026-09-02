@@ -168,4 +168,5 @@ export {
   fileSafeName,
   deployZipEntryPath,
 } from './deploy/package.js';
+export { resolveSourceFile, resolveSourcePath } from './deploy/sources.js';
 export { generateConfirmationCode } from './deploy/codes.js';

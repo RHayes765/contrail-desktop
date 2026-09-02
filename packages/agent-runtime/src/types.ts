@@ -75,14 +75,34 @@ export interface SessionContext {
    * re-checks enablement live on every read.
    */
   skills?: Array<{ name: string; description: string }>;
+  /**
+   * Ultracode mode (S28): request_review is minted and the executor refuses
+   * write proposals whose exact content lacks a fresh adversarial review.
+   * The gate lives in MAIN's executor — this flag only mints the tool and
+   * adds the protocol section to the prompt.
+   */
+  ultracode?: boolean;
 }
 
-/** Events the runtime streams back to main (and main forwards to the renderer). */
+/**
+ * Events the runtime streams back to main (and main forwards to the renderer).
+ * `parentToolUseId` (S28): set when the event came from a SUBAGENT's turn —
+ * it names the main thread's Agent tool_use that spawned it, so the renderer
+ * can badge nested work instead of presenting it as the main agent's.
+ */
 export type AgentEvent =
-  | { type: 'text_delta'; text: string }
-  | { type: 'text'; text: string }
-  | { type: 'tool_start'; toolUseId: string; name: string; input: unknown }
-  | { type: 'tool_end'; toolUseId: string; ok: boolean }
+  | { type: 'text_delta'; text: string; parentToolUseId?: string }
+  | { type: 'text'; text: string; parentToolUseId?: string }
+  | {
+      type: 'tool_start';
+      toolUseId: string;
+      name: string;
+      input: unknown;
+      parentToolUseId?: string;
+      /** For the Agent tool itself: which subagent it spawned. */
+      subagentType?: string;
+    }
+  | { type: 'tool_end'; toolUseId: string; ok: boolean; parentToolUseId?: string }
   | {
       type: 'usage';
       inputTokens: number;

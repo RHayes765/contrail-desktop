@@ -151,3 +151,86 @@ export const PROJECT_TOOLS: ProjectToolDef[] = [
 ];
 
 export const PROJECT_TOOL_NAMES: readonly string[] = PROJECT_TOOLS.map((t) => t.name);
+
+// ── Ultracode tools (S28) ────────────────────────────────────────────────
+
+/**
+ * Minted ONLY when the session runs in Ultracode mode. request_review is
+ * executed entirely in MAIN (a direct model call the runtime cannot fake);
+ * the executor's mandatory gate then refuses any write proposal whose exact
+ * content hash has no fresh review. Same executor-owned shape as
+ * PROJECT_TOOLS.
+ */
+export const ULTRACODE_TOOLS: ProjectToolDef[] = [
+  {
+    name: 'request_review',
+    description:
+      'ULTRACODE: obtain the mandatory adversarial review of content you are about to ' +
+      'propose. Pass the EXACT, FINAL content — reviews are content-addressed, so any ' +
+      'edit afterwards (a single character) invalidates the review and the propose will ' +
+      'be refused; reviews also expire after ~30 minutes. Provide exactly ONE subject ' +
+      'shape, mirroring the propose call you will make: components/deletions for ' +
+      'validate_deploy, script for apex_propose, dml for dml_propose (the same ' +
+      'arguments object), bulk_steps for bulk_load_propose, flow_deactivation for ' +
+      'deactivate_flow. Returns a verdict (pass | concerns | fail) with findings; the ' +
+      'human sees the review verbatim on the approval card. A fail does not block the ' +
+      'propose — fix the findings (then re-review the new content), or state your ' +
+      'justification in notes and let the human decide.',
+    inputSchema: {
+      connection: z.string().describe('The target connection the proposal will name.'),
+      subject: z
+        .object({
+          components: z
+            .array(
+              z.object({
+                type: z.string(),
+                api_name: z.string(),
+                content: z.string().optional(),
+                content_file: z.string().optional(),
+              }),
+            )
+            .max(50)
+            .optional()
+            .describe('validate_deploy: the exact components you will propose.'),
+          deletions: z
+            .array(z.object({ type: z.string(), api_name: z.string() }))
+            .max(50)
+            .optional()
+            .describe('validate_deploy: the exact destructive entries.'),
+          script: z.string().max(32_000).optional().describe('apex_propose: the exact script.'),
+          dml: z
+            .record(z.unknown())
+            .optional()
+            .describe(
+              'dml_propose: the exact arguments object you will send (operation/object/' +
+                'records/ids, or steps/all_or_none) — minus connection.',
+            ),
+          bulk_steps: z
+            .array(
+              z.object({
+                folder: z.string(),
+                path: z.string(),
+                object: z.string(),
+                operation: z.enum(['insert', 'upsert', 'delete']),
+                external_id_field: z.string().optional(),
+              }),
+            )
+            .max(50)
+            .optional()
+            .describe('bulk_load_propose: the exact steps ({folder, path} coordinates).'),
+          flow_deactivation: z
+            .object({ api_name: z.string() })
+            .optional()
+            .describe('deactivate_flow: the flow to deactivate.'),
+        })
+        .describe('Exactly ONE of the shapes above.'),
+      notes: z
+        .string()
+        .max(4000)
+        .optional()
+        .describe('Context for the reviewer, or your justification when proceeding past a fail.'),
+    },
+  },
+];
+
+export const ULTRACODE_TOOL_NAMES: readonly string[] = ULTRACODE_TOOLS.map((t) => t.name);

@@ -97,6 +97,47 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
         </div>
       )}
 
+      {request.agentReview && (
+        <div
+          className={`deploy-section${request.agentReview.verdict === 'fail' ? ' deploy-destructive' : ''}`}
+        >
+          <h3>
+            Adversarial review:{' '}
+            <span
+              className={`env-chip ${
+                request.agentReview.verdict === 'pass'
+                  ? 'dev'
+                  : request.agentReview.verdict === 'fail'
+                    ? 'prod'
+                    : 'uat'
+              }`}
+            >
+              {request.agentReview.verdict.toUpperCase()}
+            </span>{' '}
+            <span className="meter-dim">
+              {request.agentReview.model} · {new Date(request.agentReview.at).toLocaleString()}
+            </span>
+          </h3>
+          {request.agentReview.findings.length === 0 ? (
+            <div className="deploy-row">No findings — the reviewer looked and found nothing material.</div>
+          ) : (
+            request.agentReview.findings.map((f, i) => (
+              <div key={i} className="deploy-row">
+                <div>
+                  <strong>[{f.severity}]</strong> {f.title}
+                </div>
+                {f.detail && <div className="deploy-source">{f.detail}</div>}
+              </div>
+            ))
+          )}
+          {request.agentReview.notes && (
+            <div className="deploy-row">
+              <div className="meter-dim">Agent&apos;s notes: {request.agentReview.notes}</div>
+            </div>
+          )}
+        </div>
+      )}
+
       {destructiveRows.length > 0 && (
         <div className="deploy-section deploy-destructive">
           <h3>Destructive changes</h3>

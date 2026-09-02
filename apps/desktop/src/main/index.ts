@@ -16,6 +16,7 @@ import { McpConfigService, resolveSessionMcp } from './services/mcpConfig.js';
 import { SkillService } from './services/skills.js';
 import { DeployService, type DeployAlert } from './services/deploys.js';
 import { ManifestService } from './services/manifest.js';
+import { ReviewService } from './services/reviews.js';
 import { SettingsService } from './services/settings.js';
 import { BudgetService } from './services/budget.js';
 
@@ -1367,6 +1368,13 @@ ${logFilePath()}`,
   sessionManager.setSkillService(skillService);
 
   const summaryService = new SummaryService(boot.deps, metadata, diff, budget);
+  // Ultracode's adversarial reviewer (S28 W2): main-process authorship, with
+  // the projects service resolving bulk subjects' linked-folder files.
+  sessionManager.setReviewService(
+    new ReviewService(boot.deps, budget, (pid, folder, relPath) =>
+      projects.resolveFolderDataFile(pid, folder, relPath),
+    ),
+  );
   // The project manifest (S28): captures every successful execution at the
   // one moment the deployed bytes and the pre-deploy snapshot coexist, and
   // backfills history from executed request rows on boot (idempotent).

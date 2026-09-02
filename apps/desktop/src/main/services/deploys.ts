@@ -27,6 +27,15 @@ import type { ChatEvent, DeployRequestView, PushChannel, PushEvents } from '@con
 
 type PushFn = <C extends PushChannel>(channel: C, payload: PushEvents[C]) => void;
 
+/** The Ultracode adversarial review persisted with a request (S28). */
+export interface AgentReviewAttachment {
+  verdict: 'pass' | 'concerns' | 'fail';
+  findings: Array<{ severity: 'blocker' | 'concern' | 'note'; title: string; detail: string }>;
+  model: string;
+  at: string;
+  notes: string | null;
+}
+
 export interface DeployAlert {
   requestId: string;
   kind: DeployRequestKind;
@@ -103,7 +112,10 @@ export class DeployService {
    * stamped with B's session unless they share the connection — where
    * supersede already collapses them to one pending request anyway.
    */
-  private readonly expectations = new Map<string, { sessionId: string; at: number }>();
+  private readonly expectations = new Map<
+    string,
+    { sessionId: string; at: number; agentReview?: AgentReviewAttachment | null }
+  >();
   /** Held agent calls, keyed requestId → sessionId → call (never displaced silently). */
   private readonly held = new Map<string, Map<string, HeldCall>>();
 
@@ -162,9 +174,18 @@ export class DeployService {
     return swept;
   }
 
-  /** Executor marks which session's tool call is about to present, for a connection. */
-  expectPresentation(sessionId: string, connectionId: string): void {
-    this.expectations.set(connectionId, { sessionId, at: Date.now() });
+  /**
+   * Executor marks which session's tool call is about to present, for a
+   * connection. In Ultracode sessions the matched content-addressed review
+   * rides along, to be persisted into review_json at presentation — the
+   * human then reads the adversarial verdict beside the change.
+   */
+  expectPresentation(
+    sessionId: string,
+    connectionId: string,
+    agentReview?: AgentReviewAttachment | null,
+  ): void {
+    this.expectations.set(connectionId, { sessionId, at: Date.now(), agentReview });
   }
 
   /**
@@ -198,6 +219,9 @@ export class DeployService {
       blast: view.blast,
       warnings: view.warnings ?? [],
       expiresAt: view.expiresAt,
+      // The Ultracode adversarial review of this exact content, when one
+      // gated the propose (null otherwise).
+      agentReview: expectation?.agentReview ?? null,
     };
     this.deps.db.setDeployRequestDesktopFields(view.requestId, {
       sessionId,
@@ -545,6 +569,7 @@ export class DeployService {
       results?: Array<{ label: string; value: string; bad?: boolean }>;
       blast?: string[];
       warnings?: string[];
+      agentReview?: AgentReviewAttachment | null;
     } | null;
     const structured = (rows?: Array<DeploySummaryRow>) =>
       (rows ?? []).map((c) => ({
@@ -645,6 +670,7 @@ export class DeployService {
       results: review?.results ?? [],
       blast: review?.blast ?? summary?.blast ?? [],
       warnings: review?.warnings ?? [],
+      agentReview: review?.agentReview ?? null,
       resultSummary,
     };
   }

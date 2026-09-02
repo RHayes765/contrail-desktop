@@ -388,6 +388,8 @@ export interface SessionView {
   costUsd: number;
   createdAt: string;
   endedAt: string | null;
+  /** Ultracode mode (S28): mandatory adversarial review before every write proposal. */
+  ultracode: boolean;
 }
 
 /**
@@ -426,8 +428,12 @@ export type ChatEvent =
       input: unknown;
       connection: string | null;
       envRole: EnvRole | null;
+      /** S28: set when a SUBAGENT made this call — the spawning Agent tool_use id. */
+      parentToolUseId?: string;
+      /** S28: on the Agent tool itself — which subagent it spawned. */
+      subagentType?: string;
     }
-  | { type: 'tool_end'; toolUseId: string; ok: boolean }
+  | { type: 'tool_end'; toolUseId: string; ok: boolean; parentToolUseId?: string }
   | {
       type: 'usage';
       inputTokens: number;
@@ -693,6 +699,14 @@ export interface DeployRequestView {
   results: Array<{ label: string; value: string; bad?: boolean }>;
   blast: string[];
   warnings: string[];
+  /** The Ultracode adversarial review of this exact content, when one gated the propose (S28). */
+  agentReview: {
+    verdict: 'pass' | 'concerns' | 'fail';
+    findings: Array<{ severity: 'blocker' | 'concern' | 'note'; title: string; detail: string }>;
+    model: string;
+    at: string;
+    notes: string | null;
+  } | null;
   /** Human summary of the terminal outcome; null while pending. */
   resultSummary: string | null;
 }

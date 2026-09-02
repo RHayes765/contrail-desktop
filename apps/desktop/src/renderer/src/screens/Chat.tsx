@@ -26,8 +26,10 @@ export function ChatScreen({ projectId }: { projectId: string }) {
     pendingApproval,
     model,
     effort,
+    ultracode,
     sessionModel,
     sessionEffort,
+    sessionUltracode,
     start,
     configure,
     send,
@@ -41,6 +43,7 @@ export function ChatScreen({ projectId }: { projectId: string }) {
   const locked = messages.length > 0;
   const shownModel = locked ? (sessionModel ?? model) : model;
   const shownEffort = locked ? sessionEffort : effort;
+  const shownUltracode = locked ? (sessionUltracode ?? false) : ultracode;
   const { projects } = useProjects();
   const { openProject } = useNav();
   const [draft, setDraft] = useState('');
@@ -135,7 +138,7 @@ export function ChatScreen({ projectId }: { projectId: string }) {
           <select
             value={shownModel}
             disabled={locked}
-            onChange={(e) => void configure(e.target.value as ChatModelId, effort)}
+            onChange={(e) => void configure(e.target.value as ChatModelId, effort, ultracode)}
           >
             {(Object.keys(CHAT_MODELS) as ChatModelId[]).map((id) => (
               <option key={id} value={id}>
@@ -147,7 +150,7 @@ export function ChatScreen({ projectId }: { projectId: string }) {
             value={shownEffort ?? ''}
             disabled={locked}
             onChange={(e) =>
-              void configure(model, (e.target.value || null) as EffortLevel | null)
+              void configure(model, (e.target.value || null) as EffortLevel | null, ultracode)
             }
           >
             <option value="">default effort</option>
@@ -157,6 +160,22 @@ export function ChatScreen({ projectId }: { projectId: string }) {
               </option>
             ))}
           </select>
+          <label
+            className={`grant-toggle ultracode-toggle${shownUltracode ? ' on' : ''}`}
+            title={
+              'Ultracode: every write proposal is machine-refused until the exact content ' +
+              'passed an adversarial AI review (the verdict shows on the approval card). ' +
+              'Heavier validation = more token spend; raises this session\'s budget cap 3×.'
+            }
+          >
+            <input
+              type="checkbox"
+              checked={shownUltracode}
+              disabled={locked}
+              onChange={(e) => void configure(model, effort, e.target.checked)}
+            />
+            <span>Ultracode</span>
+          </label>
         </div>
         <div className="meter" title="input / output tokens · cache reads">
           <span>${usage.costUsd.toFixed(4)}</span>

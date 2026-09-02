@@ -701,7 +701,7 @@ export class ContrailDb {
    * them is not a budget.
    */
   recordSpend(input: {
-    kind: 'session' | 'summary';
+    kind: 'session' | 'summary' | 'review';
     model: string | null;
     costUsd: number;
     sessionId?: string | null;

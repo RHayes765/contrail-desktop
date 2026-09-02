@@ -150,6 +150,7 @@ export const REQUEST_SCHEMAS = {
     projectId: ID,
     model: z.string().max(80).optional(),
     effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+    ultracode: z.boolean().optional(),
   }),
   'sessions:send': z.object({ sessionId: ID, text: z.string().min(1).max(50_000) }),
   'sessions:interrupt': z.object({ sessionId: ID }),
@@ -325,7 +326,7 @@ export interface Contracts {
 
   'sessions:list': { req: { projectId: string }; res: SessionView[] };
   'sessions:start': {
-    req: { projectId: string; model?: string; effort?: EffortLevel };
+    req: { projectId: string; model?: string; effort?: EffortLevel; ultracode?: boolean };
     res: SessionView;
   };
   'sessions:send': { req: { sessionId: string; text: string }; res: { ok: boolean } };

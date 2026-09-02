@@ -22,6 +22,10 @@ export interface ToolCard {
   envRole: EnvRole | null;
   /** null while running */
   ok: boolean | null;
+  /** S28: set when a SUBAGENT made this call (badge it, don't blend it in). */
+  parentToolUseId?: string;
+  /** S28: on the Agent card itself — which subagent it spawned. */
+  subagentType?: string;
 }
 
 export type MessagePart = { kind: 'text'; text: string } | { kind: 'tool'; card: ToolCard };
@@ -58,18 +62,24 @@ interface ChatState {
     connection: string;
     orgType: string;
   } | null;
-  /** Model/effort the user WANTS (persisted). The live session may lag during a swap. */
+  /** Model/effort/ultracode the user WANTS (persisted). The live session may lag during a swap. */
   model: ChatModelId;
   effort: EffortLevel | null;
+  ultracode: boolean;
   /** What the LIVE session actually runs — reconciliation target for configure(). */
   sessionModel: ChatModelId | null;
   sessionEffort: EffortLevel | null;
+  sessionUltracode: boolean | null;
 
   start: (projectId: string) => Promise<void>;
   /** Continue an ended session with its history — visible AND model-side. */
   resume: (projectId: string, sessionId: string) => Promise<void>;
-  /** Change model/effort — restarts the session (only offered before the first message). */
-  configure: (model: ChatModelId, effort: EffortLevel | null) => Promise<void>;
+  /** Change model/effort/ultracode — restarts the session (only offered before the first message). */
+  configure: (
+    model: ChatModelId,
+    effort: EffortLevel | null,
+    ultracode: boolean,
+  ) => Promise<void>;
   send: (text: string) => Promise<void>;
   interrupt: () => Promise<void>;
   end: () => Promise<void>;
@@ -80,7 +90,7 @@ const ZERO_USAGE: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadToke
 
 const PREFS_KEY = 'contrail.chat.prefs';
 
-function loadPrefs(): { model: ChatModelId; effort: EffortLevel | null } {
+function loadPrefs(): { model: ChatModelId; effort: EffortLevel | null; ultracode: boolean } {
   try {
     const raw = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Record<string, unknown>;
     const model =
@@ -90,14 +100,14 @@ function loadPrefs(): { model: ChatModelId; effort: EffortLevel | null } {
     const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(raw.effort as string)
       ? (raw.effort as EffortLevel)
       : null;
-    return { model, effort };
+    return { model, effort, ultracode: raw.ultracode === true };
   } catch {
-    return { model: 'claude-haiku-4-5', effort: null };
+    return { model: 'claude-haiku-4-5', effort: null, ultracode: false };
   }
 }
 
-function savePrefs(model: ChatModelId, effort: EffortLevel | null): void {
-  localStorage.setItem(PREFS_KEY, JSON.stringify({ model, effort }));
+function savePrefs(model: ChatModelId, effort: EffortLevel | null, ultracode: boolean): void {
+  localStorage.setItem(PREFS_KEY, JSON.stringify({ model, effort, ultracode }));
 }
 
 /** Rebuild the visible thread from a persisted transcript (resume preload). */
@@ -160,6 +170,7 @@ export const useChat = create<ChatState>((set, get) => ({
   pendingApproval: null,
   sessionModel: null,
   sessionEffort: null,
+  sessionUltracode: null,
   ...loadPrefs(),
 
   start: async (projectId) => {
@@ -175,11 +186,12 @@ export const useChat = create<ChatState>((set, get) => ({
       if (prev) {
         await ipc.invoke('sessions:end', { sessionId: prev }).catch(() => undefined);
       }
-      const { model, effort } = get();
+      const { model, effort, ultracode } = get();
       const view = await ipc.invoke('sessions:start', {
         projectId,
         model,
         effort: effort ?? undefined,
+        ultracode: ultracode || undefined,
       });
       set({
         sessionId: view.id,
@@ -195,6 +207,7 @@ export const useChat = create<ChatState>((set, get) => ({
         // the start was in flight, configure() reconciles against these.
         sessionModel: model,
         sessionEffort: effort,
+        sessionUltracode: ultracode,
       });
     } catch (err) {
       set({ sessionId: null, projectId, error: String(err) });
@@ -235,11 +248,13 @@ export const useChat = create<ChatState>((set, get) => ({
         },
         error: null,
         pendingApproval: null,
-        // The session's OWN model/effort (from the row) — the user's saved
-        // preference is deliberately untouched; the locked picker displays
-        // sessionModel, so the header tells the truth about what is running.
+        // The session's OWN model/effort/mode (from the row) — the user's
+        // saved preference is deliberately untouched; the locked picker
+        // displays sessionModel, so the header tells the truth about what is
+        // running.
         sessionModel,
         sessionEffort: view.effort,
+        sessionUltracode: view.ultracode,
       });
     } catch (err) {
       set({ error: String(err) });
@@ -248,9 +263,9 @@ export const useChat = create<ChatState>((set, get) => ({
     }
   },
 
-  configure: async (model, effort) => {
-    savePrefs(model, effort);
-    set({ model, effort });
+  configure: async (model, effort, ultracode) => {
+    savePrefs(model, effort, ultracode);
+    set({ model, effort, ultracode });
     // Wait out any in-flight start so the check below sees the real session —
     // otherwise a mid-spawn picker change would be silently dropped and the
     // conversation would run (and bill) on a model the header doesn't show.
@@ -258,7 +273,10 @@ export const useChat = create<ChatState>((set, get) => ({
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     const s = get();
-    const matches = s.sessionModel === s.model && s.sessionEffort === s.effort;
+    const matches =
+      s.sessionModel === s.model &&
+      s.sessionEffort === s.effort &&
+      s.sessionUltracode === s.ultracode;
     // Before the first message the session is just an idle process — swap it
     // for one on the new config. After that, the picker is disabled in the UI.
     if (s.projectId && s.messages.length === 0 && !matches) {
@@ -334,6 +352,8 @@ function onEvent(event: ChatEvent): void {
               connection: event.connection,
               envRole: event.envRole,
               ok: null,
+              ...(event.parentToolUseId ? { parentToolUseId: event.parentToolUseId } : {}),
+              ...(event.subagentType ? { subagentType: event.subagentType } : {}),
             },
           },
         ];

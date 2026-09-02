@@ -8,15 +8,27 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import type { BridgeToolResult, ExternalMcpServerSpec, SessionContext } from './types.js';
 import { buildSystemPrompt } from './context.js';
-import { MCP_SERVER_NAME, mintableCapabilities, PROJECT_TOOLS, sdkToolName } from './mint.js';
+import { buildAgentDefinitions } from './agents.js';
+import {
+  MCP_SERVER_NAME,
+  mintableCapabilities,
+  PROJECT_TOOLS,
+  ULTRACODE_TOOLS,
+  sdkToolName,
+} from './mint.js';
 
 /**
  * THE session-options factory — the only code path allowed to construct
  * Agent SDK options. Every isolation invariant lives here, stated once:
  *
- *   - `tools: []`            → NO built-in tools, by construction. File tools
- *                              arrive in a later milestone via explicit
- *                              allowlist + path enforcement; Bash never in v1.
+ *   - `tools: ['Agent']`     → exactly ONE built-in: the subagent spawner
+ *                              (S28). Its spawnable agents are the read-only
+ *                              definitions in agents.ts — explicit tool
+ *                              lists, no writes, no external servers, no
+ *                              recursion. Everything else stays disabled by
+ *                              construction: file tools would arrive only via
+ *                              explicit allowlist + path enforcement; Bash
+ *                              never in v1.
  *   - `settingSources: []`   → never load ~/.claude settings, CLAUDE.md, or
  *                              the user's skills into a Contrail session.
  *   - CLAUDE_CONFIG_DIR      → ALWAYS the Contrail-owned dir from ctx. The
@@ -100,7 +112,10 @@ export function buildSessionOptions(
 
   // Project-silo tools mint unconditionally — the executor resolves the
   // project from the session, so there is no cross-project surface to gate.
-  for (const def of PROJECT_TOOLS) {
+  // Ultracode sessions additionally mint request_review (executed in MAIN;
+  // the executor's mandatory gate is what enforces the protocol).
+  const executorTools = [...PROJECT_TOOLS, ...(ctx.ultracode ? ULTRACODE_TOOLS : [])];
+  for (const def of executorTools) {
     tools.push(
       tool(
         def.name,
@@ -118,7 +133,10 @@ export function buildSessionOptions(
 
   const allowed = [
     ...caps.map((cap) => sdkToolName(cap.name)),
-    ...PROJECT_TOOLS.map((t) => sdkToolName(t.name)),
+    ...executorTools.map((t) => sdkToolName(t.name)),
+    // The subagent spawner — the ONE built-in tool (S28). 'Task', its legacy
+    // alias, stays deliberately absent.
+    'Agent',
     // Server-level allow spec (mcp__{key}) admits every tool the external
     // server exposes — we cannot know their names ahead of connection, and
     // the server was explicitly enabled for this project.
@@ -131,7 +149,13 @@ export function buildSessionOptions(
     ...(ctx.effort ? { effort: ctx.effort } : {}),
     ...(ctx.resumeSdkSessionId ? { resume: ctx.resumeSdkSessionId } : {}),
     systemPrompt: buildSystemPrompt(ctx),
-    tools: [],
+    tools: ['Agent'],
+    // Subagent definitions ride the control protocol (not settings files) —
+    // settingSources stays sealed.
+    agents: buildAgentDefinitions(ctx, [
+      ...caps.map((c) => c.name),
+      ...PROJECT_TOOLS.map((t) => t.name),
+    ]),
     settingSources: [],
     // persistSession defaults true — history lands in ctx.claudeConfigDir
     // (Contrail-owned), which is the whole resume mechanism.
