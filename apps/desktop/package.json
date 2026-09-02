@@ -19,17 +19,18 @@
   },
   "dependencies": {
     "@contrail/agent-runtime": "workspace:*",
+    "@contrail/apex-ls": "workspace:*",
     "@contrail/engine": "workspace:*",
     "@contrail/shared": "workspace:*",
+    "@contrail/skills": "workspace:*",
+    "electron-updater": "^6.3.9",
+    "fflate": "^0.8.3",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "zod": "^3.24.0",
-    "zustand": "^5.0.15",
-    "@contrail/skills": "workspace:*",
-    "@contrail/apex-ls": "workspace:*",
-    "electron-updater": "^6.3.9"
+    "zustand": "^5.0.15"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",

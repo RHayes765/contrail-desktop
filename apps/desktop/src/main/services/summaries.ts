@@ -28,6 +28,14 @@ const SYSTEM_PROMPT =
   'hardcoded, or unusual worth flagging. Short markdown — a sentence of purpose, then ' +
   'tight bullets. No preamble, no restating the raw XML.';
 
+const CHANGE_SYSTEM_PROMPT =
+  'You are a Salesforce metadata expert explaining ONE executed change for a project ' +
+  'change log. You are given the artifact before and after (either side may be absent ' +
+  'for adds/deletes) plus the recorded change metadata. Explain what the artifact does ' +
+  'and exactly what this change did to it: behavior added/removed/altered, ' +
+  'records/fields newly touched, and any risk the change carried. Lead with one ' +
+  'sentence naming the change; then tight bullets. No preamble.';
+
 const DIFF_SYSTEM_PROMPT =
   'You are a Salesforce metadata expert comparing two orgs\' versions of the same ' +
   'artifact for a consultant. Explain what CHANGED between version A and version B and ' +
@@ -144,6 +152,38 @@ export class SummaryService {
         `:\n\n\`\`\`\n${detail.content.slice(0, MAX_CONTENT_CHARS)}\n\`\`\``,
     );
     return this.save(key, summary, rec.contentHash);
+  }
+
+  /**
+   * S28 manifest: summarize one EXECUTED change from captured before/after
+   * content. Purely content-based — no snapshot-index lookup, no type union,
+   * no artifact_summaries row (its UNIQUE key admits one summary per
+   * artifact; per-change summaries live on the manifest entry, persisted by
+   * the caller). Budget-gated and ledgered exactly like every other summary.
+   */
+  async summarizeChange(input: {
+    title: string;
+    before: string | null;
+    after: string | null;
+    changeMeta?: Record<string, unknown>;
+  }): Promise<{ summary: string; model: string }> {
+    if (!input.before && !input.after) {
+      throw new Error('No captured content on this entry — nothing to summarize.');
+    }
+    const metaNote = input.changeMeta
+      ? `\n\nRecorded change metadata:\n${JSON.stringify(input.changeMeta).slice(0, 2000)}`
+      : '';
+    const beforeBlock = input.before
+      ? `BEFORE:\n\`\`\`\n${input.before.slice(0, DIFF_CONTENT_CHARS)}\n\`\`\``
+      : 'BEFORE: (did not exist — this change created it)';
+    const afterBlock = input.after
+      ? `AFTER:\n\`\`\`\n${input.after.slice(0, DIFF_CONTENT_CHARS)}\n\`\`\``
+      : 'AFTER: (deleted by this change)';
+    const summary = await this.callModel(
+      CHANGE_SYSTEM_PROMPT,
+      `${input.title}\n\n${beforeBlock}\n\n${afterBlock}${metaNote}`,
+    );
+    return { summary, model: SUMMARY_MODEL };
   }
 
   /**

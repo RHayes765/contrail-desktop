@@ -15,6 +15,7 @@ import { SummaryService } from './services/summaries.js';
 import { McpConfigService, resolveSessionMcp } from './services/mcpConfig.js';
 import { SkillService } from './services/skills.js';
 import { DeployService, type DeployAlert } from './services/deploys.js';
+import { ManifestService } from './services/manifest.js';
 import { SettingsService } from './services/settings.js';
 import { BudgetService } from './services/budget.js';
 
@@ -1365,6 +1366,14 @@ ${logFilePath()}`,
   const skillService = new SkillService(boot.deps);
   sessionManager.setSkillService(skillService);
 
+  const summaryService = new SummaryService(boot.deps, metadata, diff, budget);
+  // The project manifest (S28): captures every successful execution at the
+  // one moment the deployed bytes and the pre-deploy snapshot coexist, and
+  // backfills history from executed request rows on boot (idempotent).
+  const manifestService = new ManifestService(boot.deps, push, metadata, summaryService);
+  boot.deps.deploys.setExecutionObserver((info) => manifestService.capture(info));
+  manifestService.ensureBackfill();
+
   const services: MainServices = {
     connections,
     projects,
@@ -1372,8 +1381,9 @@ ${logFilePath()}`,
     snapshots,
     metadata,
     diff,
-    summaries: new SummaryService(boot.deps, metadata, diff, budget),
+    summaries: summaryService,
     deploys: deployService,
+    manifest: manifestService,
     settings: new SettingsService(boot.deps),
     budget,
     mcp: new McpConfigService(boot.deps, async (serverId, scopedProjectId) => {

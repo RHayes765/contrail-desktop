@@ -11,6 +11,8 @@ import type {
   BudgetStatusView,
   CustomMcpServerView,
   DeployRequestView,
+  ManifestEntryDetailView,
+  ProjectManifestView,
   DiffScopeView,
   McpServerTestView,
   EffortLevel,
@@ -207,6 +209,12 @@ export const REQUEST_SCHEMAS = {
   'deploys:approve': z.object({ id: ID, comment: z.string().max(1000).optional() }),
   'deploys:reject': z.object({ id: ID, comment: z.string().max(1000).optional() }),
 
+  // Project manifest (S28): what this project's sessions changed, through
+  // the ritual — read-only views over rows captured at execution time.
+  'manifest:list': z.object({ projectId: ID }),
+  'manifest:entry': z.object({ id: ID }),
+  'manifest:summarize': z.object({ id: ID, refresh: z.boolean().optional() }),
+
   'settings:keyStatus': z.object({}),
   // The key travels renderer→main ONLY. Nothing ever returns it.
   'settings:setKey': z.object({ key: z.string().min(10).max(500) }),
@@ -384,6 +392,13 @@ export interface Contracts {
   'deploys:approve': { req: { id: string; comment?: string }; res: DeployRequestView };
   'deploys:reject': { req: { id: string; comment?: string }; res: DeployRequestView };
 
+  'manifest:list': { req: { projectId: string }; res: ProjectManifestView };
+  'manifest:entry': { req: { id: string }; res: ManifestEntryDetailView };
+  'manifest:summarize': {
+    req: { id: string; refresh?: boolean };
+    res: SavedSummaryView & { cached: boolean };
+  };
+
   'settings:keyStatus': { req: Record<string, never>; res: ApiKeyStatusView };
   'settings:setKey': { req: { key: string }; res: ApiKeyStatusView };
   'settings:validateKey': { req: Record<string, never>; res: ApiKeyValidationView };
@@ -416,6 +431,8 @@ export interface PushEvents {
   'sessions:changed': { projectId: string };
   /** A deploy request appeared or changed state — Deploys screens are stale. */
   'deploys:changed': { requestId: string | null };
+  /** An execution landed in the project manifest — its Manifest tab is stale. */
+  'manifest:changed': { projectId: string };
 }
 
 export type PushChannel = keyof PushEvents;

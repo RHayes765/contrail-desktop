@@ -6,10 +6,19 @@ import { useMcp } from '../stores/mcp.js';
 import { useSkills } from '../stores/skills.js';
 import { useNav } from '../stores/nav.js';
 import { useChat } from '../stores/chat.js';
+import { ManifestTab } from './ManifestTab.js';
 
 const ENV_ROLES: EnvRole[] = ['dev', 'qa', 'uat', 'prod', 'other'];
 
-type Tab = 'sessions' | 'bindings' | 'capabilities' | 'skills' | 'instructions' | 'docs' | 'notes';
+type Tab =
+  | 'sessions'
+  | 'manifest'
+  | 'bindings'
+  | 'capabilities'
+  | 'skills'
+  | 'instructions'
+  | 'docs'
+  | 'notes';
 
 /** Per-project catalog family + external-server toggle panel. */
 function CapabilitiesTab({ projectId }: { projectId: string }) {
@@ -269,7 +278,7 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
       )}
 
       <div className="tabs">
-        {(['sessions', 'bindings', 'capabilities', 'skills', 'instructions', 'docs', 'notes'] as Tab[]).map(
+        {(['sessions', 'manifest', 'bindings', 'capabilities', 'skills', 'instructions', 'docs', 'notes'] as Tab[]).map(
           (t) => (
             <button key={t} className={tab === t ? 'on' : ''} onClick={() => setTab(t)}>
               {t}
@@ -280,6 +289,7 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
 
       {tab === 'capabilities' && <CapabilitiesTab projectId={project.id} />}
       {tab === 'skills' && <SkillsTab projectId={project.id} />}
+      {tab === 'manifest' && <ManifestTab projectId={project.id} />}
 
       {tab === 'sessions' && (
         <div className="panel-list">

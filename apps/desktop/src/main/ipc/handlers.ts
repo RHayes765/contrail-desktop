@@ -10,6 +10,7 @@ import { SummaryService } from '../services/summaries.js';
 import { McpConfigService } from '../services/mcpConfig.js';
 import { SkillService } from '../services/skills.js';
 import { DeployService } from '../services/deploys.js';
+import { ManifestService } from '../services/manifest.js';
 import { SettingsService } from '../services/settings.js';
 import { BudgetService } from '../services/budget.js';
 
@@ -30,6 +31,7 @@ export interface MainServices {
   mcp: McpConfigService;
   skills: SkillService;
   deploys: DeployService;
+  manifest: ManifestService;
   settings: SettingsService;
   budget: BudgetService;
   /** The window whose native dialogs (file picker) we parent. */
@@ -37,7 +39,7 @@ export interface MainServices {
 }
 
 export function makeHandlers(health: HealthView, services: MainServices) {
-  const { connections, projects, sessions, snapshots, metadata, diff, summaries, mcp, skills, deploys, settings, budget } =
+  const { connections, projects, sessions, snapshots, metadata, diff, summaries, mcp, skills, deploys, manifest, settings, budget } =
     services;
   return {
     'app:health': (deps: EngineDeps): HealthView => ({
@@ -250,6 +252,12 @@ export function makeHandlers(health: HealthView, services: MainServices) {
       deploys.approve(req.id, req.comment),
     'deploys:reject': (_deps: EngineDeps, req: { id: string; comment?: string }) =>
       deploys.reject(req.id, req.comment),
+
+    'manifest:list': (_deps: EngineDeps, req: { projectId: string }) =>
+      manifest.list(req.projectId),
+    'manifest:entry': (_deps: EngineDeps, req: { id: string }) => manifest.entryDetail(req.id),
+    'manifest:summarize': (_deps: EngineDeps, req: { id: string; refresh?: boolean }) =>
+      manifest.summarize(req.id, req.refresh ?? false),
 
     'settings:keyStatus': () => settings.keyStatus(),
     'settings:setKey': (_deps: EngineDeps, req: { key: string }) => settings.setKey(req.key),

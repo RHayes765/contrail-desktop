@@ -244,3 +244,48 @@ describe('the ledger still sees summary spend', () => {
     expect(recorded).toHaveLength(1);
   });
 });
+
+describe('summarizeChange (S28 manifest entries)', () => {
+  it('summarizes pure content with no index lookup and records the spend', async () => {
+    const spends: Array<{ kind: string; cost: number }> = [];
+    const budget = {
+      assertCanSpend: () => undefined,
+      record: (kind: string, _model: string, cost: number) => {
+        spends.push({ kind, cost });
+      },
+    } as unknown as import('../main/services/budget.js').BudgetService;
+    const svc = new SummaryService(deps, metadata, undefined, budget);
+    const out = await svc.summarizeChange({
+      title: 'MODIFY ApexClass "Thing"',
+      before: 'public class Thing { }',
+      after: 'public class Thing { void run() {} }',
+      changeMeta: { change: 'modify' },
+    });
+    expect(out.summary).toBe('summary #1');
+    expect(calls).toBe(1);
+    expect(spends).toHaveLength(1);
+    expect(spends[0]!.kind).toBe('summary');
+    expect(spends[0]!.cost).toBeGreaterThan(0);
+  });
+
+  it('a budget refusal blocks the call before any model traffic', async () => {
+    const budget = {
+      assertCanSpend: () => {
+        throw new Error('daily budget exhausted');
+      },
+      record: () => undefined,
+    } as unknown as import('../main/services/budget.js').BudgetService;
+    const svc = new SummaryService(deps, metadata, undefined, budget);
+    await expect(
+      svc.summarizeChange({ title: 'x', before: 'a', after: 'b' }),
+    ).rejects.toThrow(/budget/);
+    expect(calls).toBe(0);
+  });
+
+  it('refuses honestly when there is no content on either side', async () => {
+    await expect(
+      service().summarizeChange({ title: 'x', before: null, after: null }),
+    ).rejects.toThrow(/nothing to summarize/i);
+    expect(calls).toBe(0);
+  });
+});

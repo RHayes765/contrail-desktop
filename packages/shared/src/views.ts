@@ -325,6 +325,54 @@ export interface ArtifactDiffView {
   savedSummary: SavedSummaryView | null;
 }
 
+// ── project manifest (S28) ───────────────────────────────────────────────
+
+/** One row of a project's change record — a component (metadata) or a data write. */
+export interface ManifestEntryView {
+  id: string;
+  requestId: string;
+  connectionId: string;
+  /** Resolved alias; '(removed connection)' when the org was disconnected. */
+  alias: string;
+  kind: 'deploy' | 'dml' | 'apex' | 'bulk';
+  entryKind: 'metadata' | 'data';
+  type: string | null;
+  apiName: string | null;
+  change: 'add' | 'modify' | 'unchanged_content' | 'delete' | null;
+  label: string | null;
+  warnings: string[];
+  executedAt: string;
+  /** Captured before/after bytes exist (backfilled rows have none). */
+  hasCapturedContent: boolean;
+  hasSummary: boolean;
+}
+
+export interface ProjectManifestView {
+  metadata: ManifestEntryView[];
+  data: ManifestEntryView[];
+}
+
+export interface ManifestEntryDetailView {
+  entry: ManifestEntryView;
+  /**
+   * ArtifactDetailView-shaped so the shared ArtifactDetailPanel renders it
+   * exactly like the Metadata explorer. Content per contentSource; null when
+   * nothing is viewable (data rows, or a delete with no capture).
+   */
+  artifact: ArtifactDetailView | null;
+  contentSource: 'captured' | 'current_snapshot' | 'none';
+  beforeContent: string | null;
+  contentTruncated: boolean;
+  /** What-changed diff (captured rows with both sides only). */
+  identical: boolean | null;
+  format: 'xml' | 'text' | null;
+  changes: SemanticChangeView[] | null;
+  hunks: TextHunkView[] | null;
+  /** detail_json parsed — warnings/rows/steps metadata. */
+  detail: Record<string, unknown> | null;
+  summary: SavedSummaryView | null;
+}
+
 // ── agent sessions ───────────────────────────────────────────────────────
 
 export interface SessionView {
