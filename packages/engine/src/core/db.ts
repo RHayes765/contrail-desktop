@@ -15,6 +15,7 @@ import type {
   DependencyEdge,
   DeployRequestKind,
   DeployRequestRecord,
+  ManifestEntryRecord,
   OrgType,
   ProjectDocRecord,
   ProjectFolderRecord,
@@ -88,7 +89,7 @@ function assertDbLineage(db: Database.Database): void {
   );
 }
 
-const SCHEMA_VERSION = 14;
+const SCHEMA_VERSION = 15;
 
 /**
  * Local SQLite store: connection metadata and the audit log (P0.1); the
@@ -515,6 +516,55 @@ export class ContrailDb {
           CREATE INDEX IF NOT EXISTS idx_folders_project ON project_folders (project_id);
         `);
       }
+      if (current < 15) {
+        // v15 (desktop-owned, additive — freeze-contract legal):
+        // (1) manifest_entries — the project manifest: one row per COMPONENT
+        //     for executed deploys, one row per REQUEST for apex/dml/bulk,
+        //     attributed via the proposing session's project. before/after
+        //     content is captured at execution time — the only moment the
+        //     deployed bytes (frozen payload) and the pre-deploy snapshot
+        //     coexist. Backfilled rows have no content. NOTE: session_id
+        //     attribution inherits the per-connection expectation slot's
+        //     known concurrent-session overwrite window (deploys.ts).
+        // (2) sessions.ultracode — the S28 session mode flag (v7 `effort`
+        //     precedent; sessions is a v6 desktop-owned table). Lands here so
+        //     the W2 release ships with zero schema changes.
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS manifest_entries (
+            id                 TEXT PRIMARY KEY,
+            workspace_id       TEXT NOT NULL DEFAULT 'default',
+            project_id         TEXT NOT NULL,
+            session_id         TEXT NOT NULL,
+            request_id         TEXT NOT NULL,
+            connection_id      TEXT NOT NULL,
+            kind               TEXT NOT NULL,
+            entry_kind         TEXT NOT NULL,
+            type               TEXT,
+            api_name           TEXT,
+            change             TEXT,
+            label              TEXT,
+            detail_json        TEXT,
+            before_content     TEXT,
+            after_content      TEXT,
+            content_truncated  INTEGER NOT NULL DEFAULT 0,
+            executed_at        TEXT NOT NULL,
+            summary            TEXT,
+            summary_model      TEXT,
+            summary_created_at TEXT
+          );
+          CREATE INDEX IF NOT EXISTS idx_manifest_project ON manifest_entries (project_id, executed_at);
+          CREATE INDEX IF NOT EXISTS idx_manifest_request ON manifest_entries (request_id);
+        `);
+        // Guarded ALTER: keeps this block idempotent like every CREATE TABLE
+        // IF NOT EXISTS above it (re-running against a partially newer file —
+        // the rewind tests' shape — must not throw on a duplicate column).
+        const sessionCols = this.db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{
+          name: string;
+        }>;
+        if (!sessionCols.some((c) => c.name === 'ultracode')) {
+          this.db.exec(`ALTER TABLE sessions ADD COLUMN ultracode INTEGER NOT NULL DEFAULT 0;`);
+        }
+      }
       this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     });
     tx();
@@ -614,6 +664,7 @@ export class ContrailDb {
       this.db.prepare(`DELETE FROM project_folders WHERE project_id = ?`).run(id);
       this.db.prepare(`DELETE FROM mcp_server_toggles WHERE project_id = ?`).run(id);
       this.db.prepare(`DELETE FROM skill_toggles WHERE project_id = ?`).run(id);
+      this.db.prepare(`DELETE FROM manifest_entries WHERE project_id = ?`).run(id);
       this.db.prepare(`DELETE FROM projects WHERE id = ?`).run(id);
     });
     tx();
@@ -1224,6 +1275,7 @@ export class ContrailDb {
     cost_usd: number;
     created_at: string;
     ended_at: string | null;
+    ultracode: number;
   }): AgentSessionRecord {
     return {
       id: row.id,
@@ -1240,11 +1292,12 @@ export class ContrailDb {
       costUsd: row.cost_usd,
       createdAt: row.created_at,
       endedAt: row.ended_at,
+      ultracode: row.ultracode === 1,
     };
   }
 
   private static readonly SESSION_COLS =
-    'id, project_id, title, status, transcript_path, model, sdk_session_id, effort, input_tokens, output_tokens, cache_read_tokens, cost_usd, created_at, ended_at';
+    'id, project_id, title, status, transcript_path, model, sdk_session_id, effort, input_tokens, output_tokens, cache_read_tokens, cost_usd, created_at, ended_at, ultracode';
 
   createAgentSession(input: {
     projectId: string;
@@ -1252,12 +1305,13 @@ export class ContrailDb {
     model: string;
     effort?: string | null;
     transcriptPath?: string | null;
+    ultracode?: boolean;
   }): string {
     const id = randomUUID();
     this.db
       .prepare(
-        `INSERT INTO sessions (id, workspace_id, project_id, title, status, model, effort, transcript_path, created_at)
-         VALUES (?, 'default', ?, ?, 'active', ?, ?, ?, ?)`,
+        `INSERT INTO sessions (id, workspace_id, project_id, title, status, model, effort, transcript_path, created_at, ultracode)
+         VALUES (?, 'default', ?, ?, 'active', ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -1267,6 +1321,7 @@ export class ContrailDb {
         input.effort ?? null,
         input.transcriptPath ?? null,
         new Date().toISOString(),
+        input.ultracode ? 1 : 0,
       );
     return id;
   }
@@ -1337,6 +1392,140 @@ export class ContrailDb {
         )
         .all() as Parameters<ContrailDb['sessionFromRow']>[0][]
     ).map((r) => this.sessionFromRow(r));
+  }
+
+  // ── project manifest (v15, desktop-owned) ──────────────────────────────
+
+  private manifestFromRow(row: {
+    id: string;
+    project_id: string;
+    session_id: string;
+    request_id: string;
+    connection_id: string;
+    kind: string;
+    entry_kind: string;
+    type: string | null;
+    api_name: string | null;
+    change: string | null;
+    label: string | null;
+    detail_json: string | null;
+    before_content: string | null;
+    after_content: string | null;
+    content_truncated: number;
+    executed_at: string;
+    summary: string | null;
+    summary_model: string | null;
+    summary_created_at: string | null;
+  }): ManifestEntryRecord {
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      sessionId: row.session_id,
+      requestId: row.request_id,
+      connectionId: row.connection_id,
+      kind: row.kind as ManifestEntryRecord['kind'],
+      entryKind: row.entry_kind as ManifestEntryRecord['entryKind'],
+      type: row.type,
+      apiName: row.api_name,
+      change: row.change as ManifestEntryRecord['change'],
+      label: row.label,
+      detailJson: row.detail_json,
+      beforeContent: row.before_content,
+      afterContent: row.after_content,
+      contentTruncated: row.content_truncated === 1,
+      executedAt: row.executed_at,
+      summary: row.summary,
+      summaryModel: row.summary_model,
+      summaryCreatedAt: row.summary_created_at,
+    };
+  }
+
+  private static readonly MANIFEST_COLS =
+    'id, project_id, session_id, request_id, connection_id, kind, entry_kind, type, api_name, ' +
+    'change, label, detail_json, before_content, after_content, content_truncated, executed_at, ' +
+    'summary, summary_model, summary_created_at';
+
+  /** One transaction — a crash mid-capture leaves no partial request. */
+  insertManifestEntries(
+    rows: Array<
+      Omit<ManifestEntryRecord, 'id' | 'summary' | 'summaryModel' | 'summaryCreatedAt'>
+    >,
+  ): void {
+    const stmt = this.db.prepare(
+      `INSERT INTO manifest_entries (id, workspace_id, project_id, session_id, request_id,
+         connection_id, kind, entry_kind, type, api_name, change, label, detail_json,
+         before_content, after_content, content_truncated, executed_at)
+       VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const tx = this.db.transaction(() => {
+      for (const r of rows) {
+        stmt.run(
+          randomUUID(),
+          r.projectId,
+          r.sessionId,
+          r.requestId,
+          r.connectionId,
+          r.kind,
+          r.entryKind,
+          r.type,
+          r.apiName,
+          r.change,
+          r.label,
+          r.detailJson,
+          r.beforeContent,
+          r.afterContent,
+          r.contentTruncated ? 1 : 0,
+          r.executedAt,
+        );
+      }
+    });
+    tx();
+  }
+
+  /** Newest first — the manifest reads as a reverse-chronological change log. */
+  listManifestEntries(projectId: string): ManifestEntryRecord[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT ${ContrailDb.MANIFEST_COLS} FROM manifest_entries
+           WHERE project_id = ? ORDER BY executed_at DESC, api_name`,
+        )
+        .all(projectId) as Parameters<ContrailDb['manifestFromRow']>[0][]
+    ).map((r) => this.manifestFromRow(r));
+  }
+
+  getManifestEntry(id: string): ManifestEntryRecord | null {
+    const row = this.db
+      .prepare(`SELECT ${ContrailDb.MANIFEST_COLS} FROM manifest_entries WHERE id = ?`)
+      .get(id) as Parameters<ContrailDb['manifestFromRow']>[0] | undefined;
+    return row ? this.manifestFromRow(row) : null;
+  }
+
+  setManifestEntrySummary(id: string, summary: string, model: string): void {
+    this.db
+      .prepare(
+        `UPDATE manifest_entries SET summary = ?, summary_model = ?, summary_created_at = ? WHERE id = ?`,
+      )
+      .run(summary, model, new Date().toISOString(), id);
+  }
+
+  /**
+   * The backfill anti-join: executed, session-attributed requests with no
+   * manifest rows yet. Idempotent by construction (re-running after a partial
+   * failure picks up exactly the missing requests) and cheap once populated
+   * (idx_manifest_request). Deliberately unclamped — this is a boot-time
+   * sweep, not a UI page.
+   */
+  listExecutedRequestsWithoutManifest(): DeployRequestRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM deploy_requests
+         WHERE status = 'executed' AND session_id IS NOT NULL
+           AND id NOT IN (SELECT DISTINCT request_id FROM manifest_entries)
+         ORDER BY executed_at`,
+      )
+      .all() as DeployRequestRow[];
+    return rows.map((r) => rowToDeployRequest(r));
   }
 
   // ── app locks & snapshot runs (v6, desktop-owned) ──────────────────────

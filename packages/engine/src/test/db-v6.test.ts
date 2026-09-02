@@ -27,8 +27,8 @@ afterEach(() => {
 });
 
 describe('schema v6', () => {
-  it('fresh databases land on user_version 14', () => {
-    expect(db.schemaVersion()).toBe(14);
+  it('fresh databases land on user_version 15', () => {
+    expect(db.schemaVersion()).toBe(15);
   });
 
   it('creates every desktop table', () => {
@@ -110,7 +110,7 @@ describe('schema v6', () => {
   it('reopening an already-v6 database is a no-op migration', () => {
     db.close();
     const again = new ContrailDb(dbPath);
-    expect(again.schemaVersion()).toBe(14);
+    expect(again.schemaVersion()).toBe(15);
     again.close();
     db = new ContrailDb(dbPath); // for afterEach
   });
@@ -161,7 +161,7 @@ describe('v10 → v11 upgrade on an existing database', () => {
     raw.close();
 
     db = new ContrailDb(dbPath);
-    expect(db.schemaVersion()).toBe(14);
+    expect(db.schemaVersion()).toBe(15);
 
     const check = new Database(dbPath, { readonly: true });
     const tables = (
@@ -215,7 +215,7 @@ describe('v11 -> v12 upgrade on an existing database', () => {
     raw.close();
 
     db = new ContrailDb(dbPath);
-    expect(db.schemaVersion()).toBe(14);
+    expect(db.schemaVersion()).toBe(15);
     const upgraded = db.getCustomMcpServer(server.id);
     expect(upgraded?.name).toBe('Legacy Slack');
     // Old servers stay opt-in per project — the upgrade changes nothing about
@@ -237,7 +237,7 @@ describe('v12 -> v13 upgrade and the skill library', () => {
     raw.close();
 
     db = new ContrailDb(dbPath);
-    expect(db.schemaVersion()).toBe(14);
+    expect(db.schemaVersion()).toBe(15);
     expect(db.listCustomSkills()).toEqual([]);
   });
 
@@ -295,7 +295,7 @@ describe('v13 -> v14 upgrade and linked folders', () => {
     raw.close();
 
     db = new ContrailDb(dbPath);
-    expect(db.schemaVersion()).toBe(14);
+    expect(db.schemaVersion()).toBe(15);
     expect(db.listProjectFolders('any')).toEqual([]);
   });
 
@@ -317,5 +317,107 @@ describe('v13 -> v14 upgrade and linked folders', () => {
     db.insertProjectFolder({ projectId: p.id, path: 'C:\\Work\\X' });
     db.deleteProject(p.id);
     expect(db.listProjectFolders(p.id)).toEqual([]);
+  });
+});
+
+/** The v14 → v15 step: the project manifest table + the sessions ultracode flag. */
+describe('v14 -> v15 upgrade and the project manifest', () => {
+  it('creates manifest_entries and sessions.ultracode on upgrade from a real v14 file', () => {
+    db.close();
+    const raw = new Database(dbPath);
+    raw.exec(`DROP TABLE manifest_entries; ALTER TABLE sessions DROP COLUMN ultracode;`);
+    raw.pragma('user_version = 14');
+    raw.close();
+
+    db = new ContrailDb(dbPath);
+    expect(db.schemaVersion()).toBe(15);
+    expect(db.listManifestEntries('any')).toEqual([]);
+    // The new column reads back with its default on pre-existing rows.
+    const p = db.createProject({ name: 'V15' });
+    const sid = db.createAgentSession({ projectId: p.id, title: null, model: 'claude-haiku-4-5' });
+    expect(db.getAgentSession(sid)?.ultracode).toBe(false);
+  });
+
+  it('manifest entries round-trip, order newest-first, and summaries persist', () => {
+    const p = db.createProject({ name: 'ManifestProj' });
+    const sid = db.createAgentSession({ projectId: p.id, title: null, model: 'claude-haiku-4-5' });
+    db.insertManifestEntries([
+      {
+        projectId: p.id,
+        sessionId: sid,
+        requestId: 'req-1',
+        connectionId: 'conn-1',
+        kind: 'deploy',
+        entryKind: 'metadata',
+        type: 'ApexClass',
+        apiName: 'InvoiceService',
+        change: 'modify',
+        label: null,
+        detailJson: JSON.stringify({ warnings: [] }),
+        beforeContent: 'old body',
+        afterContent: 'new body',
+        contentTruncated: false,
+        executedAt: '2026-09-01T10:00:00.000Z',
+      },
+      {
+        projectId: p.id,
+        sessionId: sid,
+        requestId: 'req-2',
+        connectionId: 'conn-1',
+        kind: 'dml',
+        entryKind: 'data',
+        type: null,
+        apiName: null,
+        change: null,
+        label: 'UPDATE 3 row(s) on Account',
+        detailJson: null,
+        beforeContent: null,
+        afterContent: null,
+        contentTruncated: false,
+        executedAt: '2026-09-01T11:00:00.000Z',
+      },
+    ]);
+    const list = db.listManifestEntries(p.id);
+    expect(list).toHaveLength(2);
+    expect(list[0]!.label).toBe('UPDATE 3 row(s) on Account'); // newest first
+    expect(list[1]!.beforeContent).toBe('old body');
+
+    db.setManifestEntrySummary(list[1]!.id, 'It changed the body.', 'claude-haiku-4-5');
+    expect(db.getManifestEntry(list[1]!.id)?.summary).toBe('It changed the body.');
+    expect(db.getManifestEntry(list[1]!.id)?.summaryModel).toBe('claude-haiku-4-5');
+  });
+
+  it('sessions created with ultracode persist it; deleteProject removes manifest rows', () => {
+    const p = db.createProject({ name: 'UltraProj' });
+    const sid = db.createAgentSession({
+      projectId: p.id,
+      title: null,
+      model: 'claude-sonnet-5',
+      ultracode: true,
+    });
+    expect(db.getAgentSession(sid)?.ultracode).toBe(true);
+
+    db.insertManifestEntries([
+      {
+        projectId: p.id,
+        sessionId: sid,
+        requestId: 'req-3',
+        connectionId: 'conn-1',
+        kind: 'apex',
+        entryKind: 'data',
+        type: null,
+        apiName: null,
+        change: null,
+        label: 'Anonymous Apex (2 lines)',
+        detailJson: null,
+        beforeContent: null,
+        afterContent: 'System.debug(1);',
+        contentTruncated: false,
+        executedAt: '2026-09-01T12:00:00.000Z',
+      },
+    ]);
+    expect(db.listManifestEntries(p.id)).toHaveLength(1);
+    db.deleteProject(p.id);
+    expect(db.listManifestEntries(p.id)).toEqual([]);
   });
 });

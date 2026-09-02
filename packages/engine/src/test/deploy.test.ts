@@ -1383,3 +1383,81 @@ describe('multi-step dml plans', () => {
     expect(textOf(exec)).toContain('001NEW00000000');
   });
 });
+
+describe('execution observer (S28 manifest capture seam)', () => {
+  it('fires on a successful deploy with the frozen payload still readable, then the payload is cleaned', async () => {
+    const seen: Array<{ requestId: string; payloadExisted: boolean; path: string | null }> = [];
+    deps.deploys.setExecutionObserver(({ request, payload, payloadPath }) => {
+      seen.push({
+        requestId: request.id,
+        payloadExisted: payloadPath !== null && fs.existsSync(payloadPath),
+        path: payloadPath,
+      });
+      expect((payload as { deployed?: boolean }).deployed).toBe(true);
+    });
+    await validate();
+    const code = presenter.views[0]!.code;
+    const exec = await invokeCapability(deps, 'execute_deploy', {
+      connection: 'deploy-org',
+      confirmation_code: code,
+    });
+    expect(textOf(exec)).toContain('"deployed": true');
+    expect(seen).toHaveLength(1);
+    // The observer saw the exact deployed bytes — the last moment they exist.
+    expect(seen[0]!.payloadExisted).toBe(true);
+    expect(fs.existsSync(seen[0]!.path!)).toBe(false);
+  });
+
+  it('does NOT fire when execution fails', async () => {
+    let fired = 0;
+    deps.deploys.setExecutionObserver(() => {
+      fired += 1;
+    });
+    await validate();
+    const code = presenter.views[0]!.code;
+    failNextValidation = true; // the next checkDeployStatus reports failure — at EXECUTE time here
+    const exec = await invokeCapability(deps, 'execute_deploy', {
+      connection: 'deploy-org',
+      confirmation_code: code,
+    });
+    expect(textOf(exec)).toContain('"deployed": false');
+    expect(fired).toBe(0);
+  });
+
+  it('a throwing observer never alters the execution result, and is audited', async () => {
+    deps.deploys.setExecutionObserver(() => {
+      throw new Error('observer exploded');
+    });
+    await validate();
+    const code = presenter.views[0]!.code;
+    const exec = await invokeCapability(deps, 'execute_deploy', {
+      connection: 'deploy-org',
+      confirmation_code: code,
+    });
+    expect(textOf(exec)).toContain('"deployed": true');
+    expect(deployCounter.realDeploys).toBe(1);
+    expect(
+      db.queryAuditEvents({}).some((e) => e.eventType === 'deploy.observer_failed'),
+    ).toBe(true);
+  });
+
+  it('fires for successful DML with a null payload path', async () => {
+    const seen: Array<string | null> = [];
+    deps.deploys.setExecutionObserver(({ request, payloadPath }) => {
+      expect(request.kind).toBe('dml');
+      seen.push(payloadPath);
+    });
+    await invokeCapability(deps, 'dml_propose', {
+      connection: 'deploy-org',
+      operation: 'update',
+      object: 'Account',
+      records: [{ Id: '001000000000001AAA', Name: 'Observed Name' }],
+    });
+    const code = presenter.views.at(-1)!.code;
+    await invokeCapability(deps, 'dml_execute', {
+      connection: 'deploy-org',
+      confirmation_code: code,
+    });
+    expect(seen).toEqual([null]);
+  });
+});

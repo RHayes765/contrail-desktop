@@ -174,6 +174,36 @@ export interface AgentSessionRecord {
   costUsd: number;
   createdAt: string;
   endedAt: string | null;
+  /** S28: the session runs in Ultracode mode (mandatory pre-propose adversarial review). */
+  ultracode: boolean;
+}
+
+/**
+ * One project-manifest row (v15): what a project's sessions changed through
+ * the ritual. Metadata rows are per COMPONENT of an executed deploy (with
+ * before/after content when captured at execution time); data rows are one
+ * per apex/dml/bulk request, label only.
+ */
+export interface ManifestEntryRecord {
+  id: string;
+  projectId: string;
+  sessionId: string;
+  requestId: string;
+  connectionId: string;
+  kind: DeployRequestKind;
+  entryKind: 'metadata' | 'data';
+  type: string | null;
+  apiName: string | null;
+  change: 'add' | 'modify' | 'unchanged_content' | 'delete' | null;
+  label: string | null;
+  detailJson: string | null;
+  beforeContent: string | null;
+  afterContent: string | null;
+  contentTruncated: boolean;
+  executedAt: string;
+  summary: string | null;
+  summaryModel: string | null;
+  summaryCreatedAt: string | null;
 }
 
 /** Extra transport config for a custom MCP server, stored as config_json. */

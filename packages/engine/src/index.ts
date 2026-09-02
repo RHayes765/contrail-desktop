@@ -73,6 +73,7 @@ export type {
   ProjectFolderRecord,
   ProjectNoteRecord,
   AgentSessionRecord,
+  ManifestEntryRecord,
   CustomMcpServerRecord,
   CustomMcpServerExtras,
   ServerToggleRecord,
@@ -153,12 +154,18 @@ export {
 } from './metadata/flowgraph.js';
 
 // Deploy
-export { DeployEngine } from './deploy/engine.js';
+export { DeployEngine, type ExecutionObserver } from './deploy/engine.js';
 export {
   ApprovalPageServer,
   type ApprovalPresenter,
   type ApprovalPresentation,
   type ApprovalRequestView,
 } from './deploy/approval.js';
-export { buildDeployZip, analyzeChanges, flowDeactivationXml } from './deploy/package.js';
+export {
+  buildDeployZip,
+  analyzeChanges,
+  flowDeactivationXml,
+  fileSafeName,
+  deployZipEntryPath,
+} from './deploy/package.js';
 export { generateConfirmationCode } from './deploy/codes.js';

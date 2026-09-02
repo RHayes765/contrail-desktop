@@ -131,7 +131,7 @@ describe('a real v5 database upgrades to v12', () => {
 
     const db = new ContrailDb(dbPath);
     try {
-      expect(db.schemaVersion()).toBe(14);
+      expect(db.schemaVersion()).toBe(15);
 
       // The connection is readable by alias (COLLATE NOCASE survives).
       const conn = db.resolveConnection('LEGACY-DEV');
@@ -203,6 +203,8 @@ describe('a real v5 database upgrades to v12', () => {
     expect(tables).toContain('skill_toggles');
     // v14 additions
     expect(tables).toContain('project_folders');
+    // v15 additions
+    expect(tables).toContain('manifest_entries');
     // v5 tables still present
     for (const t of ['connections', 'artifacts', 'dependency_edges', 'deploy_requests', 'audit_events']) {
       expect(tables, `${t} must survive`).toContain(t);
@@ -240,7 +242,7 @@ describe('a real v5 database upgrades to v12', () => {
     writeV5Fixture(dbPath);
     new ContrailDb(dbPath).close();
     const again = new ContrailDb(dbPath);
-    expect(again.schemaVersion()).toBe(14);
+    expect(again.schemaVersion()).toBe(15);
     // Data still there after a second open.
     expect(again.resolveConnection('legacy-dev')?.id).toBe('conn-v5');
     again.close();
