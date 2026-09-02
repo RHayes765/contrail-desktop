@@ -1461,3 +1461,36 @@ describe('execution observer (S28 manifest capture seam)', () => {
     expect(seen).toEqual([null]);
   });
 });
+describe('test level: unspecified means OMITTED, never defaulted (prod NoTestRun trap)', () => {
+  it('an omitted test_level sends NO <met:testLevel> element, at validate AND execute', async () => {
+    const res = await validate();
+    expect(textOf(res)).toContain('"test_level": null');
+    expect(lastDeployBody).not.toContain('<met:testLevel>');
+
+    const code = presenter.views[0]!.code;
+    await invokeCapability(deps, 'execute_deploy', {
+      connection: 'deploy-org',
+      confirmation_code: code,
+    });
+    // The execute replayed the same unspecified level — still no element.
+    expect(lastDeployBody).not.toContain('<met:testLevel>');
+    expect(deployCounter.realDeploys).toBe(1);
+  });
+
+  it('an explicit test_level still travels verbatim', async () => {
+    const res = await validate({ test_level: 'RunLocalTests' });
+    expect(res.isError ?? false).toBe(false);
+    expect(lastDeployBody).toContain('<met:testLevel>RunLocalTests</met:testLevel>');
+    expect(textOf(res)).toContain('"test_level": "RunLocalTests"');
+  });
+
+  it('deactivate_flow omits the level too — an explicit NoTestRun would brick prod deactivation', async () => {
+    const res = await invokeCapability(deps, 'deactivate_flow', {
+      connection: 'deploy-org',
+      flow: 'Old_Flow',
+    });
+    expect(res.isError ?? false).toBe(false);
+    expect(lastDeployBody).not.toContain('<met:testLevel>');
+    expect(lastDeployBody).toContain('<met:checkOnly>true</met:checkOnly>');
+  });
+});

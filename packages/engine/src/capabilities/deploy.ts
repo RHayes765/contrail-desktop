@@ -124,7 +124,9 @@ export const deployCapabilities: Capability[] = [
       'Build a deploy package and validate it against the org with checkOnly=true — ' +
       'nothing is committed. Returns the change summary (destructive changes flagged), ' +
       'validation/test results, and blast radius; puts a confirmation code on the ' +
-      'human-only approval page. For production targets prefer test_level RunLocalTests. ' +
+      'human-only approval page. Normally OMIT test_level — the org then applies its ' +
+      'own default (production runs local tests for Apex packages automatically and ' +
+      'refuses an explicit NoTestRun). ' +
       'An in-progress result means call validate_deploy again to check on it.',
     grant: 'metadata_write',
     writeClass: true,
@@ -177,7 +179,13 @@ export const deployCapabilities: Capability[] = [
       test_level: z
         .enum(['NoTestRun', 'RunLocalTests', 'RunSpecifiedTests', 'RunAllTestsInOrg'])
         .optional()
-        .describe('Default NoTestRun. Production deploys of Apex require tests.'),
+        .describe(
+          "OMIT unless you have a reason: the org then applies its own default — " +
+            'sandboxes run no tests; production runs local tests when the package ' +
+            'carries Apex and none otherwise. Production REFUSES an explicit ' +
+            'NoTestRun, so never send it there (a no-Apex prod deploy just omits ' +
+            'this). RunSpecifiedTests needs run_tests.',
+        ),
       run_tests: z
         .array(z.string())
         .max(50)
@@ -238,7 +246,10 @@ export const deployCapabilities: Capability[] = [
         const outcome = await deps.deploys.validateDeploy(conn, {
           components,
           destructive,
-          testLevel: args.test_level ?? 'NoTestRun',
+          // Unspecified stays unspecified all the way to the SOAP call — the
+          // org's default behavior is the only choice production accepts for
+          // a no-Apex package (it rejects an explicit NoTestRun).
+          testLevel: args.test_level,
           runTests: args.run_tests ?? [],
         });
         switch (outcome.status) {
@@ -288,7 +299,9 @@ export const deployCapabilities: Capability[] = [
             { type: 'FlowDefinition', api_name: args.flow, content: flowDeactivationXml() },
           ],
           destructive: [],
-          testLevel: 'NoTestRun',
+          // No test level: an explicit NoTestRun would make production refuse
+          // to deactivate a flow at all; omitted, the org waves a no-Apex
+          // package through everywhere.
           runTests: [],
         });
         switch (outcome.status) {
