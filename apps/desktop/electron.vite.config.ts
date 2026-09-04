@@ -19,7 +19,15 @@ export default defineConfig({
         // Workspace packages stay external so the engine runs from its own
         // built dist with its own node_modules — that's where the native
         // addons resolve from. Bundling it would re-break that resolution.
-        external: ['electron', '@contrail/engine', '@contrail/shared'],
+        //
+        // ONLY this list is effective: externalizeDepsPlugin does not
+        // actually externalize here (electron-updater proves it — it sits
+        // bundled in a lazy chunk despite being a dependency). Bundled CJS
+        // deps happen to work via interop, but fflate's ESM entry declares a
+        // top-level `var require` that collides with the CJS-shim banner when
+        // inlined into the entry chunk — the v0.21.1 startup SyntaxError.
+        // Any new npm import in main-process code must be added here.
+        external: ['electron', 'fflate', '@contrail/engine', '@contrail/shared'],
       },
     },
   },

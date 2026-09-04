@@ -26,6 +26,17 @@ jobs:
       - run: pnpm build
       - run: pnpm --filter @contrail/engine test
       - run: pnpm --filter @contrail/apex-ls test
+      # Boot gate: a full headless main-process boot of the built bundle.
+      # v0.21.1 shipped a bundle that died with a SyntaxError before its
+      # first log line — tests never execute the bundled output, so only an
+      # actual boot catches that class. A load-time crash pops Electron's
+      # error dialog and hangs, hence the hard timeout = loud failure.
+      - name: Smoke-boot the built app
+        timeout-minutes: 5
+        working-directory: apps/desktop
+        env:
+          CONTRAIL_DATA_DIR: ${{ runner.temp }}\contrail-smoke
+        run: pnpm smoke
       - name: Build and publish installer
         working-directory: apps/desktop
         env:
