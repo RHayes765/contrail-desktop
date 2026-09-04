@@ -1,8 +1,8 @@
-﻿{
+{
   "name": "contrail",
   "version": "0.21.2",
   "private": true,
-  "description": "Contrail â€” the Salesforce AI harness. Desktop app monorepo.",
+  "description": "Contrail — the Salesforce AI harness. Desktop app monorepo.",
   "license": "UNLICENSED",
   "type": "module",
   "engines": {
