@@ -955,11 +955,31 @@ app.whenReady().then(async () => {
       try {
         const { autoUpdater } = await import('electron-updater');
         autoUpdater.on('update-available', (info) =>
-          log('info', 'update available', { version: info.version }),
+          log('info', 'update available — downloading in the background (quitting cancels it)', {
+            version: info.version,
+          }),
         );
+        // The 0.18.2→0.21.x lesson: a multi-version jump downloads for
+        // minutes, installs only on a quit AFTER 'downloaded', and used to do
+        // all of it in total silence — so quick open/close cycles killed the
+        // download every time and the app looked stuck. Progress now lands in
+        // the log at quarter steps so "is it updating?" has an answer.
+        let lastQuarter = -1;
+        autoUpdater.on('download-progress', (p) => {
+          const quarter = Math.floor(p.percent / 25);
+          if (quarter > lastQuarter) {
+            lastQuarter = quarter;
+            log('info', 'update download progress', {
+              percent: Math.round(p.percent),
+              transferredMb: Math.round(p.transferred / 1_048_576),
+              totalMb: Math.round(p.total / 1_048_576),
+            });
+          }
+        });
         autoUpdater.on('update-downloaded', (info) =>
           log('info', 'update downloaded — installs on quit', { version: info.version }),
         );
+        autoUpdater.on('update-not-available', () => log('info', 'app is up to date'));
         autoUpdater.on('error', (err) => log('warn', 'auto-update failed', { err: String(err) }));
         await autoUpdater.checkForUpdatesAndNotify();
       } catch (err) {
