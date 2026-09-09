@@ -49,6 +49,14 @@ const TYPE_DIRS: Record<string, string> = {
   ManagedEventSubscription: 'managedEventSubscriptions',
   Layout: 'layouts',
   CustomMetadata: 'customMetadata',
+  // S29: the first shared-dir case — content and folder types own ONE
+  // directory. Sound only because the engine's normalizeRefreshTypes couples
+  // them into every refresh/staleness check (a lone 'Report' request would
+  // otherwise clear the folder files while leaving ReportFolder index rows).
+  Report: 'reports',
+  ReportFolder: 'reports',
+  Dashboard: 'dashboards',
+  DashboardFolder: 'dashboards',
 };
 
 /** The refreshed types' own directories — null if any requested type has no known mapping. */

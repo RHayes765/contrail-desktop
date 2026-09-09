@@ -3,7 +3,12 @@ import type { AuditLog } from '../core/audit.js';
 import type { ContrailConfig } from '../core/config.js';
 import type { ConnectionRecord } from '../core/types.js';
 import type { AccessTokenManager } from '../salesforce/tokens.js';
-import { MetadataSoapClient, type FileProperties } from '../salesforce/metadataSoap.js';
+import {
+  FOLDERED_TYPES,
+  FOLDER_TYPES,
+  MetadataSoapClient,
+  type FileProperties,
+} from '../salesforce/metadataSoap.js';
 import { RestClient } from '../salesforce/rest.js';
 import { SnapshotStore } from './store.js';
 import { buildKnownArtifacts } from '../deps/extract.js';
@@ -65,6 +70,27 @@ export interface RefreshOptions {
 }
 
 const SNAPSHOT_LOCK_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * S29: content and folder types share a snapshot directory, so refreshing one
+ * without the other would clear the other's files while leaving its index
+ * rows — they always refresh (and staleness-check) together.
+ */
+const COUPLED_TYPES: Record<string, string> = {
+  Report: 'ReportFolder',
+  ReportFolder: 'Report',
+  Dashboard: 'DashboardFolder',
+  DashboardFolder: 'Dashboard',
+};
+
+function normalizeRefreshTypes(types: string[]): string[] {
+  const all = new Set(types);
+  for (const t of types) {
+    const coupled = COUPLED_TYPES[t];
+    if (coupled) all.add(coupled);
+  }
+  return [...all];
+}
 
 export class SnapshotEngine {
   private readonly jobs = new Map<string, RefreshJob>();
@@ -132,7 +158,7 @@ export class SnapshotEngine {
       if (!this.db.acquireAppLock(lockName, this.lockHolder, SNAPSHOT_LOCK_TTL_MS)) {
         return { status: 'locked', holder: 'another Contrail process' };
       }
-      job = this.startJob(conn, types ?? this.config.snapshot.types);
+      job = this.startJob(conn, normalizeRefreshTypes(types ?? this.config.snapshot.types));
       this.jobs.set(conn.id, job);
     }
 
@@ -205,7 +231,16 @@ export class SnapshotEngine {
     }
 
     job.progress = 'starting retrieve';
-    const retrieveId = await soap.retrieve(buildRetrieveMembers(types, listedProps, warnings));
+    const retrieveMembers = buildRetrieveMembers(types, listedProps, warnings);
+    if (Object.keys(retrieveMembers).length === 0) {
+      // Loud, never a silent dir wipe: foldered types with no listable
+      // inventory leave nothing to retrieve.
+      throw new ContrailError(
+        `nothing retrievable for the requested types (${types.join(', ')}): ${warnings.join(' ')}`,
+        'retrieve_failed',
+      );
+    }
+    const retrieveId = await soap.retrieve(retrieveMembers);
 
     const deadline = Date.now() + this.config.snapshot.retrieveTimeoutMs;
     let status = await soap.checkRetrieveStatus(retrieveId, true);
@@ -311,7 +346,7 @@ export class SnapshotEngine {
     missing_from_index: number;
     note: string;
   }> {
-    const checkTypes = types ?? this.config.snapshot.types;
+    const checkTypes = normalizeRefreshTypes(types ?? this.config.snapshot.types);
     const soap = new MetadataSoapClient(this.tokenMgr, conn, this.config.salesforce.apiVersion);
     const props = await soap.listMetadata(checkTypes);
     const stale: Array<{
@@ -367,8 +402,14 @@ function buildRetrieveMembers(
   listedProps: FileProperties[],
   warnings: string[],
 ): Record<string, string[]> {
-  const members: Record<string, string[]> = Object.fromEntries(types.map((t) => [t, ['*']]));
-  if (types.includes('CustomObject')) {
+  const members: Record<string, string[]> = {};
+  for (const t of types) {
+    // Folder types fold into their content type's members below — package.xml
+    // addresses folders as members of the CONTENT type.
+    if (Object.hasOwn(FOLDER_TYPES, t)) continue;
+    members[t] = ['*'];
+  }
+  if ('CustomObject' in members) {
     const objectNames = listedProps
       .filter((p) => p.type === 'CustomObject' && !isManaged(p))
       .map((p) => p.fullName);
@@ -382,6 +423,30 @@ function buildRetrieveMembers(
     } else {
       warnings.push(
         'listMetadata returned no CustomObject inventory; falling back to the * wildcard, which misses standard objects.',
+      );
+    }
+  }
+  // S29: foldered types NEVER use the wildcard (unsupported for folder-based
+  // types) — members are the folder names (their -meta.xml definitions) plus
+  // every folder-qualified content path from the per-folder listing.
+  for (const [content, cfg] of Object.entries(FOLDERED_TYPES)) {
+    if (!(content in members)) continue;
+    const named = (type: string) =>
+      listedProps.filter((p) => p.type === type && !isManaged(p)).map((p) => p.fullName);
+    const folders = named(cfg.folderType);
+    const items = named(content);
+    if (folders.length + items.length > 0) {
+      members[content] = [...folders, ...items];
+      if (items.length > 2000) {
+        warnings.push(
+          `${content} inventory is large (${items.length}); the retrieve may be slow or hit platform size limits.`,
+        );
+      }
+    } else {
+      delete members[content];
+      warnings.push(
+        `listMetadata returned no ${content} inventory; ${content} skipped in this retrieve ` +
+          `(wildcard retrieval is unsupported for folder-based types).`,
       );
     }
   }

@@ -12,7 +12,7 @@ every write.
 >
 > **📖 The full tool & feature reference lives in the engine repo:
 > [contrail-plugin/TOOLS.md](https://github.com/RHayes765/contrail-plugin/blob/main/TOOLS.md)**
-> — same 34 capabilities in both surfaces, desktop differences noted there.
+> — same 35 capabilities in both surfaces, desktop differences noted there.
 
 ## Why it exists
 

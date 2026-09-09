@@ -233,6 +233,46 @@ describe('capture (the execution observer body)', () => {
     expect(pushes).toEqual([{ channel: 'manifest:changed', payload: { projectId } }]);
   });
 
+  it('S29: captures folder-qualified reports and folder components from the frozen zip', () => {
+    // Seed the pre-deploy snapshot with the nested report (the BEFORE side).
+    store.writeCurrent(
+      connId,
+      new Map([['reports/Ops/Weekly.report', strToU8('<Report>old</Report>')]]),
+    );
+    db.replaceArtifactsForTypes(connId, ['Report'], [
+      row('Report', 'Ops/Weekly', 'reports/Ops/Weekly.report'),
+    ]);
+    const summary = JSON.stringify({
+      changes: [
+        { type: 'Report', api_name: 'Ops/Weekly', change: 'modify', warnings: [] },
+        { type: 'ReportFolder', api_name: 'Ops', change: 'add', warnings: [] },
+      ],
+      destructive: [],
+      blast: [],
+    });
+    const zipPath = path.join(tmp, 'frozen-report.zip');
+    fs.writeFileSync(
+      zipPath,
+      zipSync({
+        'reports/Ops/Weekly.report': strToU8('<Report>new</Report>'),
+        'reports/Ops-meta.xml': strToU8('<ReportFolder><name>Ops</name></ReportFolder>'),
+        'package.xml': strToU8('<Package/>'),
+      }),
+    );
+    const request = makeRequest({ kind: 'deploy', summaryJson: summary });
+    service.capture({ request, payload: { deployed: true }, payloadPath: zipPath });
+
+    const entries = db.listManifestEntries(projectId);
+    const byName = new Map(entries.map((e) => [`${e.type}:${e.apiName}`, e]));
+    const report = byName.get('Report:Ops/Weekly')!;
+    // Before from the nested snapshot path, after from the '/'-preserving zip
+    // entry — the pre-S29 failure mode was BOTH sides silently null.
+    expect(report.beforeContent).toBe('<Report>old</Report>');
+    expect(report.afterContent).toBe('<Report>new</Report>');
+    const folder = byName.get('ReportFolder:Ops')!;
+    expect(folder.afterContent).toContain('<name>Ops</name>');
+  });
+
   it('captures anonymous Apex as a data row carrying the script', () => {
     const request = makeRequest({
       kind: 'apex',

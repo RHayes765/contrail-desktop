@@ -22,7 +22,14 @@ import { ok, fail, guarded } from './result.js';
  * target connection and passes the layer-2 grant gate before touching anything.
  */
 
-const NAME_RE = /^[A-Za-z0-9_.\- ]+$/;
+// Aligned with deploy/package.ts naming: parens/apostrophe/ampersand are
+// legal in layout names, '$' exists for unfiled$public, and foldered types
+// (Report/Dashboard) carry at most ONE '/' ('Folder/Name'). Path safety:
+// snapshot reads resolve + prefix-check containment, and '..'/'\' are
+// rejected outright at each gate.
+const NAME_RE = /^[A-Za-z0-9_.\- ()'&$]+(\/[A-Za-z0-9_.\- ()'&$]+)?$/;
+const nameOk = (name: string): boolean =>
+  NAME_RE.test(name) && !name.includes('..') && !name.includes('\\');
 const TYPE_RE = /^[A-Za-z]+$/;
 
 /**
@@ -226,7 +233,7 @@ export const metadataCapabilities: Capability[] = [
         let budgetLeft = CALL_CONTENT_BUDGET;
         const results: Array<Record<string, unknown>> = [];
         for (const name of args.names) {
-          if (!NAME_RE.test(name)) {
+          if (!nameOk(name)) {
             results.push({ api_name: name, error: 'invalid artifact name' });
             continue;
           }
