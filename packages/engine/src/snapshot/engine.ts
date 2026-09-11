@@ -224,14 +224,29 @@ export class SnapshotEngine {
 
     job.progress = 'listing metadata';
     let listedProps: FileProperties[] = [];
+    let unsupportedTypes: string[] = [];
     try {
-      listedProps = await soap.listMetadata(types);
+      const detailed = await soap.listMetadataDetailed(types);
+      listedProps = detailed.props;
+      unsupportedTypes = detailed.unsupportedTypes;
     } catch (err) {
       warnings.push(`listMetadata failed (${String(err instanceof Error ? err.message : err)}); staleness data will be limited`);
     }
+    // S30: a type this org/API version does not know (older version, or an
+    // unlicensed feature like the Agentforce types) drops out per-type with
+    // an honest warning — it never sinks the healthy types' refresh.
+    let retrieveTypes = types;
+    if (unsupportedTypes.length > 0) {
+      const unsupported = new Set(unsupportedTypes);
+      retrieveTypes = types.filter((t) => !unsupported.has(t));
+      warnings.push(
+        `${unsupportedTypes.join(', ')} not supported by this org/API version — skipped ` +
+          `(feature not licensed, or salesforce.apiVersion too old).`,
+      );
+    }
 
     job.progress = 'starting retrieve';
-    const retrieveMembers = buildRetrieveMembers(types, listedProps, warnings);
+    const retrieveMembers = buildRetrieveMembers(retrieveTypes, listedProps, warnings);
     if (Object.keys(retrieveMembers).length === 0) {
       // Loud, never a silent dir wipe: foldered types with no listable
       // inventory leave nothing to retrieve.
@@ -276,8 +291,10 @@ export class SnapshotEngine {
     job.progress = 'extracting snapshot';
     const retrievedAt = new Date().toISOString();
     this.store.saveZip(conn.id, status.zipFile, retrievedAt);
-    const affectedTypes = withChildTypes(types);
-    const fullManifest = this.config.snapshot.types.every((t) => types.includes(t));
+    // Downstream authority is scoped to what was actually RETRIEVED — an
+    // unsupported type that was skipped must keep its snapshot/index state.
+    const affectedTypes = withChildTypes(retrieveTypes);
+    const fullManifest = this.config.snapshot.types.every((t) => retrieveTypes.includes(t));
 
     job.progress = 'indexing artifacts';
     const fileProps = mergeProps(status.fileProperties, listedProps);
@@ -286,7 +303,7 @@ export class SnapshotEngine {
     const { artifacts } = await this.work.extractAndIndex({
       connectionId: conn.id,
       zip: status.zipFile,
-      types,
+      types: retrieveTypes,
       fullManifest,
       fileProps,
       retrievedAt,
@@ -309,9 +326,9 @@ export class SnapshotEngine {
     this.db.replaceEdges(conn.id, 'extractor', affectedTypes, extractorEdges);
 
     job.progress = 'querying org dependency data';
-    const orgDeps = await fetchOrgDependencyEdges(rest, conn.id, types);
+    const orgDeps = await fetchOrgDependencyEdges(rest, conn.id, retrieveTypes);
     warnings.push(...orgDeps.warnings);
-    this.db.replaceEdges(conn.id, 'org', types, orgDeps.edges);
+    this.db.replaceEdges(conn.id, 'org', retrieveTypes, orgDeps.edges);
 
     const summary: RefreshSummary = {
       connection: conn.alias,
@@ -348,7 +365,7 @@ export class SnapshotEngine {
   }> {
     const checkTypes = normalizeRefreshTypes(types ?? this.config.snapshot.types);
     const soap = new MetadataSoapClient(this.tokenMgr, conn, this.config.salesforce.apiVersion);
-    const props = await soap.listMetadata(checkTypes);
+    const { props, unsupportedTypes } = await soap.listMetadataDetailed(checkTypes);
     const stale: Array<{
       type: string;
       api_name: string;
@@ -379,14 +396,18 @@ export class SnapshotEngine {
         });
       }
     }
+    const unsupportedNote =
+      unsupportedTypes.length > 0
+        ? ` ${unsupportedTypes.join(', ')} not supported by this org/API version — not checked.`
+        : '';
     return {
       checked_types: checkTypes,
       stale: stale.slice(0, 100),
       missing_from_index: missing,
       note:
-        stale.length || missing
+        (stale.length || missing
           ? 'Run refresh_snapshot to bring the local snapshot up to date.'
-          : 'Snapshot is current for the checked types.',
+          : 'Snapshot is current for the checked types.') + unsupportedNote,
     };
   }
 }

@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import type { EngineDeps } from '../core/deps.js';
 import type { ConnectionRecord } from '../core/types.js';
 import { ContrailError } from '../core/errors.js';
@@ -32,7 +33,17 @@ export const CHILD_SPEC: Record<string, { parentType: string; tag: string }> = {
   CustomLabel: { parentType: 'CustomLabels', tag: 'labels' },
   ListView: { parentType: 'CustomObject', tag: 'listViews' },
   RecordType: { parentType: 'CustomObject', tag: 'recordTypes' },
+  // S30: bot versions live inline in the Bot document (dotted MyBot.v1).
+  BotVersion: { parentType: 'Bot', tag: 'botVersions' },
 };
+
+/**
+ * S30: bundle types — ONE component is a DIRECTORY of files; the index row's
+ * filePath points at the main file, and retrieve returns it plus a
+ * bundle_files listing of every sibling (path + size + snapshot_path) so
+ * callers with file tools read the rest directly.
+ */
+const BUNDLE_TYPES = new Set(['GenAiFunction', 'GenAiPlannerBundle', 'AiAuthoringBundle']);
 
 type ReadDeps = Pick<EngineDeps, 'db' | 'store' | 'tokenMgr' | 'config'>;
 
@@ -40,6 +51,7 @@ export interface ArtifactContent {
   body: string;
   source: string;
   note?: string;
+  bundle_files?: Array<{ path: string; bytes: number; snapshot_path: string | null }>;
 }
 
 export async function fetchArtifactContent(
@@ -49,6 +61,51 @@ export async function fetchArtifactContent(
   name: string,
 ): Promise<ArtifactContent> {
   const { db, store, tokenMgr, config } = deps;
+
+  if (BUNDLE_TYPES.has(type)) {
+    const artifact = db.getArtifact(conn.id, type, name);
+    if (!artifact?.filePath) {
+      throw new ContrailError(
+        `${type} ${name} is not in the local snapshot — run refresh_snapshot with ` +
+          `types:["${type}"] (bundle types are explicit-refresh-only).`,
+        'artifact_not_found',
+      );
+    }
+    const body = store.readCurrentFile(conn.id, artifact.filePath);
+    if (body === null) {
+      throw new ContrailError(
+        `${type} ${name} index row exists but its snapshot file is missing — run refresh_snapshot.`,
+        'artifact_not_found',
+      );
+    }
+    // dir/<BundleName>/ is the component's directory.
+    const dirPrefix = artifact.filePath.split('/').slice(0, 2).join('/');
+    const bundleFiles = store
+      .listCurrentFiles(conn.id, dirPrefix)
+      .filter((rel) => rel !== artifact.filePath)
+      .map((rel) => {
+        const abs = store.currentFilePath(conn.id, rel);
+        let bytes = 0;
+        try {
+          bytes = abs ? fs.statSync(abs).size : 0;
+        } catch {
+          // Size is a courtesy; the listing stands without it.
+        }
+        return { path: rel, bytes, snapshot_path: abs };
+      });
+    return {
+      body,
+      source: 'snapshot',
+      ...(bundleFiles.length > 0
+        ? {
+            bundle_files: bundleFiles,
+            note:
+              `Bundle component: the main file is shown; ${bundleFiles.length} sibling ` +
+              `file(s) listed in bundle_files with snapshot_path for direct reading.`,
+          }
+        : {}),
+    };
+  }
 
   if (type === 'ApexClass' || type === 'ApexTrigger') {
     const rest = new RestClient(tokenMgr, conn, config.salesforce.apiVersion);

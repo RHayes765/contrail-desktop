@@ -44,6 +44,9 @@ const ORG_CHANGES_CHILD_TYPES = new Set([
   'CustomLabels',
   'ListView',
   'RecordType',
+  // S30: bot versions never enumerate via flat listMetadata (live-probed) —
+  // drift for them rides the Bot document.
+  'BotVersion',
 ]);
 
 export function requireConnection(
@@ -262,6 +265,7 @@ export const metadataCapabilities: Capability[] = [
               if (onDisk) entry.snapshot_path = onDisk;
             }
             if (content.note) entry.note = content.note;
+            if (content.bundle_files) entry.bundle_files = content.bundle_files;
             if (includeDeps) {
               entry.uses = db
                 .edgesFrom(conn.id, args.type, name)

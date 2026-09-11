@@ -19,6 +19,8 @@ import { extractAllEdges, type KnownArtifacts } from '../deps/extract.js';
 export const CHILD_TYPES: Record<string, string[]> = {
   CustomObject: ['CustomField', 'ValidationRule', 'ListView', 'RecordType'],
   CustomLabels: ['CustomLabel'],
+  // S30: Bot versions live inline in the Bot document (metadata format).
+  Bot: ['BotVersion'],
 };
 
 export function withChildTypes(types: string[]): string[] {
@@ -57,6 +59,18 @@ const TYPE_DIRS: Record<string, string> = {
   ReportFolder: 'reports',
   Dashboard: 'dashboards',
   DashboardFolder: 'dashboards',
+  // S30: Agentforce types (v66+; explicit-refresh-only, like the analytics
+  // and integration families).
+  Bot: 'bots',
+  GenAiPlugin: 'genAiPlugins',
+  GenAiFunction: 'genAiFunctions',
+  GenAiPlannerBundle: 'genAiPlannerBundles',
+  AiAuthoringBundle: 'aiAuthoringBundles',
+  GenAiPromptTemplate: 'genAiPromptTemplates',
+  GenAiPromptTemplateActv: 'genAiPromptTemplateActivations',
+  AiEvaluationDefinition: 'aiEvaluationDefinitions',
+  BotTemplate: 'botTemplates',
+  BotBlock: 'botBlocks',
 };
 
 /** The refreshed types' own directories — null if any requested type has no known mapping. */

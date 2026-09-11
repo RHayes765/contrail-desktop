@@ -49,6 +49,14 @@ export class RestClient {
     ).records;
   }
 
+  /** S30: tooling flavor of queryWithCount (the agent-graph sObjects are Tooling-only). */
+  async toolingQueryWithCount<T = Record<string, unknown>>(
+    soql: string,
+    maxRows = 2000,
+  ): Promise<{ records: T[]; totalSize: number | null }> {
+    return this.runQuery<T>(`/services/data/${this.apiVersion}/tooling/query`, soql, maxRows);
+  }
+
   /**
    * Org limits (GET /limits) — the numbers a consultant actually watches
    * before pointing an agent at an org: daily API requests above all, plus

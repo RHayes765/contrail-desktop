@@ -374,6 +374,26 @@ describe('soql_query', () => {
     expect(String(parsed.note)).toContain('Aggregate');
   });
 
+  it('S30: tooling=true is metadata-class — refused without metadata_read, audited', async () => {
+    const result = await invokeCapability(deps, 'soql_query', {
+      connection: 'data-only',
+      query: 'SELECT DeveloperName FROM GenAiPluginDefinition',
+      tooling: true,
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('metadata_read');
+    expect(
+      db
+        .queryAuditEvents({})
+        .some(
+          (e) =>
+            e.eventType === 'grant.refused' &&
+            e.tool === 'soql_query' &&
+            (e.detail as Record<string, unknown>)?.reason === 'tooling_query',
+        ),
+    ).toBe(true);
+  });
+
   it('refuses without data_read and audits the refusal', async () => {
     const result = await invokeCapability(deps, 'soql_query', {
       connection: 'locked',
