@@ -273,6 +273,53 @@ describe('capture (the execution observer body)', () => {
     expect(folder.afterContent).toContain('<name>Ops</name>');
   });
 
+  it('S30: captures bundle components as framed multi-file text, both sides', () => {
+    // Pre-deploy snapshot: the bundle with an OLD output schema.
+    store.writeCurrent(
+      connId,
+      new Map([
+        [
+          'genAiFunctions/Dog_Facts/Dog_Facts.genAiFunction-meta.xml',
+          strToU8('<GenAiFunction>old</GenAiFunction>'),
+        ],
+        ['genAiFunctions/Dog_Facts/output/schema.json', strToU8('{"old":true}')],
+      ]),
+    );
+    db.replaceArtifactsForTypes(connId, ['GenAiFunction'], [
+      row('GenAiFunction', 'Dog_Facts', 'genAiFunctions/Dog_Facts/Dog_Facts.genAiFunction-meta.xml'),
+    ]);
+    const summary = JSON.stringify({
+      changes: [{ type: 'GenAiFunction', api_name: 'Dog_Facts', change: 'modify', warnings: [] }],
+      destructive: [],
+      blast: [],
+    });
+    const zipPath = path.join(tmp, 'frozen-bundle.zip');
+    fs.writeFileSync(
+      zipPath,
+      zipSync({
+        'genAiFunctions/Dog_Facts/Dog_Facts.genAiFunction-meta.xml': strToU8(
+          '<GenAiFunction>new</GenAiFunction>',
+        ),
+        'genAiFunctions/Dog_Facts/output/schema.json': strToU8('{"new":true}'),
+        'package.xml': strToU8('<Package/>'),
+      }),
+    );
+    const request = makeRequest({ kind: 'deploy', summaryJson: summary });
+    service.capture({ request, payload: { deployed: true }, payloadPath: zipPath });
+
+    const entries = db.listManifestEntries(projectId);
+    const fn = entries.find((e) => e.apiName === 'Dog_Facts')!;
+    // Both sides carry EVERY bundle file under contrail:file framing — a
+    // sibling-only schema change is visible, never silently dropped.
+    expect(fn.beforeContent).toContain('<GenAiFunction>old</GenAiFunction>');
+    expect(fn.beforeContent).toContain('{"old":true}');
+    expect(fn.afterContent).toContain('<GenAiFunction>new</GenAiFunction>');
+    expect(fn.afterContent).toContain('{"new":true}');
+    expect(fn.afterContent).toContain(
+      'contrail:file genAiFunctions/Dog_Facts/output/schema.json',
+    );
+  });
+
   it('captures anonymous Apex as a data row carrying the script', () => {
     const request = makeRequest({
       kind: 'apex',

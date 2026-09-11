@@ -286,6 +286,53 @@ export class ManifestService {
       return doc;
     };
 
+    // S30 bundle components: one logical change is a DIRECTORY of files —
+    // capture both sides as the concatenated multi-file text (the same
+    // contrail:file framing the snapshot index uses) so the diff shows
+    // sibling-file changes instead of silently comparing only the main XML.
+    if (entry && !entry.child && entry.bundleDir) {
+      const frame = (files: Array<[string, string]>): string | null =>
+        files.length === 0
+          ? null
+          : files
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([rel, text]) => `<!-- contrail:file ${rel} -->\n${text}`)
+              .join('\n');
+
+      let after: string | null = null;
+      if (c.change !== 'delete' && zip) {
+        const dec = new TextDecoder();
+        after = frame(
+          Object.entries(zip)
+            .filter(([rel]) => rel.startsWith(entry.bundleDir!))
+            .map(([rel, bytes]) => [rel, dec.decode(bytes)]),
+        );
+      }
+      let before: string | null = null;
+      if (c.change !== 'add') {
+        try {
+          before = frame(
+            this.deps.store
+              .listCurrentFiles(connectionId, entry.bundleDir)
+              .map((rel): [string, string | null] => [
+                rel,
+                this.deps.store.readCurrentFile(connectionId, rel),
+              ])
+              .filter((pair): pair is [string, string] => pair[1] !== null),
+          );
+        } catch {
+          before = null;
+        }
+      }
+      const b2 = before ? cap(before) : null;
+      const a2 = after ? cap(after) : null;
+      return {
+        before: b2?.content ?? null,
+        after: a2?.content ?? null,
+        truncated: (b2?.truncated ?? false) || (a2?.truncated ?? false),
+      };
+    }
+
     let after: string | null = null;
     if (c.change !== 'delete' && zip && entry) {
       const bytes = zip[entry.path];
