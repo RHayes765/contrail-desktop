@@ -179,13 +179,20 @@ export const deployCapabilities: Capability[] = [
               .string()
               .optional()
               .describe(
+                // NOTE: deliberately no ${stagingDir()} interpolation here — this
+                // object is built at module import, and calling stagingDir() then
+                // would mkdir the real data dir before tests set CONTRAIL_DATA_DIR.
+                // The refusal message prints the concrete path at runtime.
                 'Absolute path to a file holding the source, read byte-exactly instead of ' +
                   'content. PREFER THIS for large components — retyping tens of KB of XML ' +
                   'risks a silent one-character corruption. The file must sit under ' +
-                  "Contrail's staging directory (the error message prints the exact path), " +
-                  'under its snapshots directory, or under a directory the human listed in ' +
-                  'deploy.allowedSourceRoots. Read at validation time and frozen into the ' +
-                  'approved package, so editing it afterwards cannot change what deploys.',
+                  "Contrail's staging directory, under its snapshots directory " +
+                  '(retrieve_metadata results carry snapshot_path — the way to deploy one ' +
+                  "org's copy into another), or under a directory the human listed in " +
+                  'deploy.allowedSourceRoots. Anywhere else is refused — never ask the ' +
+                  'human to change that config for a one-off. Read at validation time and ' +
+                  'frozen into the approved package, so editing it afterwards cannot ' +
+                  'change what deploys.',
               ),
           }),
         )
@@ -240,9 +247,13 @@ export const deployCapabilities: Capability[] = [
             );
           }
           if (!hasInline && !c.content_file) {
+            // Sealed-runtime honesty: desktop agents have no file tools, so the
+            // actionable remedies are inline content or an existing on-disk path
+            // (a snapshot_path, or a file the human staged themselves).
             throw new Error(
-              `${c.type} ${c.api_name}: needs content or content_file. For large ` +
-                `components write the source under ${stagingDir()} and pass content_file.`,
+              `${c.type} ${c.api_name}: needs content or content_file. Pass the source ` +
+                'inline as content, or as content_file an existing path — a snapshot_path ' +
+                `from retrieve_metadata, or a file the human staged under ${stagingDir()}.`,
             );
           }
           if (c.content_file) {

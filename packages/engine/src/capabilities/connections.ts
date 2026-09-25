@@ -5,8 +5,11 @@ import type { Capability } from './types.js';
 import { ok, fail, guarded } from './result.js';
 
 /**
- * Connection lifecycle + audit capabilities, ported verbatim from the Phase 0
- * tool layer (tools/register.ts). Descriptions are prompt assets — unchanged.
+ * Connection lifecycle + audit capabilities, ported from the Phase 0 tool
+ * layer (tools/register.ts). Descriptions are prompt assets. One deliberate
+ * divergence: the plugin's list_connections returns (and describes) a
+ * staging_dir field so file-authoring agents learn where deploy bytes live;
+ * the desktop's sealed runtime has no file tools, so this port omits it.
  */
 
 const PERMISSION_NOTES = [
