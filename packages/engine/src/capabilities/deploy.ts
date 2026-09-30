@@ -160,15 +160,17 @@ export const deployCapabilities: Capability[] = [
                   'AiEvaluationDefinition (Testing Center test definitions), BotTemplate, ' +
                   'BotBlock, or child types CustomField / ValidationRule / ' +
                   'CustomLabel / ListView / RecordType / BotVersion (dotted MyBot.v1). ' +
-                  'Bundle types GenAiFunction / GenAiPlannerBundle (one component = a ' +
-                  'directory of files) take a Contrail bundle ENVELOPE as content: JSON ' +
-                  '{"contrail_bundle":1, "files": {"<relative path>": "<body>", ...}} — ' +
-                  'the file set retrieve_metadata\'s bundle_files listing shows, main ' +
-                  'file included (e.g. "My_Fn.genAiFunction-meta.xml"). ' +
-                  'NOT deployable (read/diff only): AiAuthoringBundle — a Metadata API ' +
-                  'deploy of Agent Script silently skips reasoning actions; and agent ' +
-                  'publish/activate/deactivate are org-side human steps Contrail ' +
-                  'cannot perform.',
+                  'Bundle types GenAiFunction / GenAiPlannerBundle / AiAuthoringBundle ' +
+                  '(one component = a directory of files) take a Contrail bundle ' +
+                  'ENVELOPE as content: JSON {"contrail_bundle":1, "files": ' +
+                  '{"<relative path>": "<body>", ...}} — the file set retrieve_metadata\'s ' +
+                  'bundle_files listing shows, main file included (e.g. ' +
+                  '"My_Fn.genAiFunction-meta.xml"). AiAuthoringBundle deploys as a DRAFT ' +
+                  'STAGE: exactly <Name>.agent (plaintext Agent Script) + ' +
+                  '<Name>.bundle-meta.xml; nothing compiles and the running agent is ' +
+                  'unchanged until a human publishes the draft. Agent publish/preview/' +
+                  'eval runs stay human; activate/deactivate goes through ' +
+                  'agent_activation_propose/execute (its own ritual).',
               ),
             api_name: z.string().describe('Full API name; children dotted (Account.MyField__c).'),
             content: z
@@ -582,6 +584,88 @@ export const deployCapabilities: Capability[] = [
           );
         }
         const result = await deps.deploys.executeDml(conn, args.confirmation_code);
+        return ok(result);
+      }),
+  },
+  {
+    name: 'agent_activation_propose',
+    title: 'Propose an agent activation change (two-step)',
+    description:
+      'Stage activating or deactivating a PUBLISHED Agentforce agent version behind ' +
+      'the approval ritual. This changes LIVE behavior immediately on execute — no ' +
+      'draft in between — so nothing happens until the human approves in Deploy ' +
+      'Review (or reads the approval-page code). The BotVersion is resolved and its ' +
+      'current status frozen at propose; a version already in the requested state is ' +
+      'refused without burning an approval. Only published versions can flip (the ' +
+      'org refuses drafts, verbatim in messages[]). Publishing/compiling Agent ' +
+      'Script is NOT this tool — that stays human.',
+    grant: 'metadata_write',
+    writeClass: true,
+    inputSchema: {
+      connection: z
+        .string()
+        .describe('Target connection alias (or id) — name it unmissably to the human.'),
+      agent: z
+        .string()
+        .describe("The agent's Bot DeveloperName (soql_query BotDefinition to enumerate)."),
+      version: z.string().describe("The BotVersion DeveloperName, e.g. 'v2'."),
+      status: z.enum(['Active', 'Inactive']).describe('The state to put the version in.'),
+    },
+    handler: (deps, rawArgs) =>
+      guarded(async () => {
+        const args = rawArgs as {
+          connection: string;
+          agent: string;
+          version: string;
+          status: 'Active' | 'Inactive';
+        };
+        const conn = requireConnection(deps, args.connection, 'agent_activation_propose');
+        const preview = await deps.deploys.proposeActivation(conn, {
+          agent: args.agent,
+          version: args.version,
+          status: args.status,
+        });
+        if (preview.proposed !== true) return ok(preview);
+        return ok(
+          preview,
+          `Proposed — nothing changed yet. TARGET: ${conn.alias} (${conn.orgType}). ${APPROVAL_INSTRUCTIONS}`,
+        );
+      }),
+  },
+  {
+    name: 'agent_activation_execute',
+    title: 'Execute a proposed agent activation change',
+    description:
+      'Apply the proposed agent activation change — one documented Connect REST call, ' +
+      'then a re-read so the result reports what the org CONFIRMS. In the desktop app, ' +
+      'call WITHOUT a confirmation code — the user approves in Deploy Review and this ' +
+      'call waits for their decision. With the localhost approval page, pass the code ' +
+      'the human read from the page. Single-use, ~1h expiry, invalidated by a new ' +
+      'agent_activation_propose on the same connection. Changes live agent behavior ' +
+      'immediately on success.',
+    grant: 'metadata_write',
+    writeClass: true,
+    inputSchema: {
+      connection: z.string().describe('Target connection alias (or id).'),
+      confirmation_code: z
+        .string()
+        .optional()
+        .describe(
+          'Only when the human read a code from the approval page (format XXXX-XXXX). ' +
+            'Omit in the desktop app — approval is native.',
+        ),
+    },
+    handler: (deps, rawArgs) =>
+      guarded(async () => {
+        const args = rawArgs as { connection: string; confirmation_code?: string };
+        const conn = requireConnection(deps, args.connection, 'agent_activation_execute');
+        if (!args.confirmation_code) {
+          return fail(
+            'No confirmation code and no pending native approval. Propose first; then in the ' +
+              'desktop app call again without a code, or with the approval page pass its code.',
+          );
+        }
+        const result = await deps.deploys.executeActivation(conn, args.confirmation_code);
         return ok(result);
       }),
   },

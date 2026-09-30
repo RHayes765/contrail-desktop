@@ -18,9 +18,10 @@ import { ProjectService } from '../main/services/projects.js';
 
 let tmp: string;
 let db: ContrailDb;
-let executed: Array<{ connId: string; code: string; kind: 'deploy' | 'dml' | 'apex' | 'bulk' }>;
+let executed: Array<{ connId: string; code: string; kind: 'deploy' | 'dml' | 'apex' | 'bulk' | 'activation' }>;
 let bulkProposals: Array<{ stopOnFailure: boolean; steps: Array<Record<string, unknown>> }>;
 let bulkExecutedOk: boolean;
+let activationExecutedOk: boolean;
 let deps: EngineDeps;
 let service: DeployService;
 
@@ -54,7 +55,7 @@ function seedRequest(
   connId: string,
   over: {
     code?: string;
-    kind?: 'deploy' | 'dml' | 'apex' | 'bulk';
+    kind?: 'deploy' | 'dml' | 'apex' | 'bulk' | 'activation';
     expiresAt?: string;
     sessionId?: string;
     destructive?: boolean;
@@ -94,6 +95,7 @@ beforeEach(() => {
   executed = [];
   bulkProposals = [];
   bulkExecutedOk = true;
+  activationExecutedOk = true;
   // Faithful engine stub (see deploy-approval.test.ts for why faithfulness
   // matters): claims the row and writes the terminal state like the real one.
   const finish = (code: string, payload: Record<string, unknown>) => {
@@ -119,6 +121,14 @@ beforeEach(() => {
     executeApex: async (conn: { id: string }, code: string) => {
       executed.push({ connId: conn.id, code, kind: 'apex' });
       const result = { executed: true, status: 'executed' };
+      finish(code, result);
+      return result;
+    },
+    executeActivation: async (conn: { id: string }, code: string) => {
+      executed.push({ connId: conn.id, code, kind: 'activation' });
+      const result = activationExecutedOk
+        ? { executed: true, confirmed_status: 'Inactive' }
+        : { executed: false, confirmed_status: 'Active', messages: ['refused'] };
       finish(code, result);
       return result;
     },
@@ -598,5 +608,47 @@ describe('anonymous Apex at the native seam (S22)', () => {
     const result = await held!;
     expect(result.isError).not.toBe(true);
     expect(executed).toEqual([{ connId, code: 'APEX-CODE', kind: 'apex' }]);
+  });
+});
+
+// ── S34: agent activation through the same seam ──────────────────────────
+
+describe('agent activation through the native approval seam', () => {
+  it('approve executes the flip with the row code — and metadata_write is the grant that matters', async () => {
+    // data_write revoked: the S34 blocker-class bug checked data_write here.
+    const connId = seedConnection('developer', 'dev', { data_write: false });
+    const id = seedRequest(connId, { kind: 'activation', code: 'ACTV-0001', sessionId: 's-act' });
+    const held = service.interceptAgentExecute('s-act', 'activation', connId);
+    expect(held).not.toBeNull();
+
+    await service.approve(id, 'ok');
+    expect(executed).toEqual([{ connId, code: 'ACTV-0001', kind: 'activation' }]);
+    const result = await held!;
+    expect(result.isError).not.toBe(true);
+    expect(result.content[0]!.text).toContain('"approved": true');
+  });
+
+  it('revoking metadata_write stops a pending activation from executing (grants are live law)', async () => {
+    const connId = seedConnection('developer', 'dev', { metadata_write: false });
+    const id = seedRequest(connId, { kind: 'activation', code: 'ACTV-0002' });
+    await expect(service.approve(id, 'ok')).rejects.toThrow(/metadata_write/);
+    expect(executed).toEqual([]);
+  });
+
+  it('an unconfirmed flip reads back as a failure, never a success', async () => {
+    activationExecutedOk = false;
+    const connId = seedConnection('developer', 'dev');
+    const id = seedRequest(connId, { kind: 'activation', code: 'ACTV-0003', sessionId: 's-act2' });
+    const held = service.interceptAgentExecute('s-act2', 'activation', connId);
+    await service.approve(id, 'try it');
+    const result = await held!;
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('execution failed');
+  });
+
+  it('a deploy hold is NOT satisfied by an activation decision (kind is identity)', () => {
+    const connId = seedConnection('developer', 'dev');
+    seedRequest(connId, { kind: 'activation', code: 'ACTV-0004', sessionId: 's-z' });
+    expect(service.interceptAgentExecute('s-z', 'deploy', connId)).toBeNull();
   });
 });

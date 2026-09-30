@@ -33,7 +33,8 @@ export type ReviewSubject =
       /** Steps AFTER path resolution — absPath is the host-resolved file. */
       steps: Array<{ absPath: string; object: string; operation: string; externalIdField?: string }>;
     }
-  | { kind: 'flow_deactivation'; apiName: string };
+  | { kind: 'flow_deactivation'; apiName: string }
+  | { kind: 'activation'; agent: string; version: string; status: string };
 
 export function canonicalReviewHash(subject: ReviewSubject): string {
   return sha256(stableStringify(canonicalForm(subject)));
@@ -60,6 +61,13 @@ function canonicalForm(subject: ReviewSubject): unknown {
     }
     case 'flow_deactivation':
       return { kind: 'flow_deactivation', api_name: subject.apiName };
+    case 'activation':
+      return {
+        kind: 'activation',
+        agent: subject.agent,
+        version: subject.version,
+        status: subject.status,
+      };
   }
 }
 

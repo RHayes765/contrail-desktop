@@ -83,7 +83,7 @@ const GRANT_LABELS: Array<[keyof ConnectionView['grants'], string]> = [
 
 const GRANT_FULL_LABELS: Array<[keyof GrantSetView, string]> = [
   ['metadata_read', 'Metadata read'],
-  ['metadata_write', 'Metadata write (deploys)'],
+  ['metadata_write', 'Metadata write (deploys, agent activation)'],
   ['diagnostics_read', 'Diagnostics read (logs, Apex test runs)'],
   ['data_read', 'Data read (SOQL)'],
   ['data_write', 'Data write (DML)'],

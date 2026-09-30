@@ -105,7 +105,9 @@ export const DEFAULT_CONFIG: ContrailConfig = {
     // exists only at v64+, AiAuthoringBundle only at v66+; the legacy
     // GenAiPlanner type died at v64 — probed live). A config.json that pins
     // an older version keeps it until the human edits it.
-    apiVersion: 'v66.0',
+    // S34: default raised to v67 (Summer '26) — probed healthy for the whole
+    // old-model agent family 2026-09-30; Winter '27's v68 lands later.
+    apiVersion: 'v67.0',
     scopes: ['refresh_token', 'api', 'web'],
   },
   oauth: {

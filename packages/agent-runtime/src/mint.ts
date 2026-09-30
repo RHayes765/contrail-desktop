@@ -172,7 +172,8 @@ export const ULTRACODE_TOOLS: ProjectToolDef[] = [
       'shape, mirroring the propose call you will make: components/deletions for ' +
       'validate_deploy, script for apex_propose, dml for dml_propose (the same ' +
       'arguments object), bulk_steps for bulk_load_propose, flow_deactivation for ' +
-      'deactivate_flow. Returns a verdict (pass | concerns | fail) with findings; the ' +
+      'deactivate_flow, activation for agent_activation_propose. Returns a verdict ' +
+      '(pass | concerns | fail) with findings; the ' +
       'human sees the review verbatim on the approval card. A fail does not block the ' +
       'propose — fix the findings (then re-review the new content), or state your ' +
       'justification in notes and let the human decide.',
@@ -222,6 +223,14 @@ export const ULTRACODE_TOOLS: ProjectToolDef[] = [
             .object({ api_name: z.string() })
             .optional()
             .describe('deactivate_flow: the flow to deactivate.'),
+          activation: z
+            .object({
+              agent: z.string(),
+              version: z.string(),
+              status: z.enum(['Active', 'Inactive']),
+            })
+            .optional()
+            .describe('agent_activation_propose: the exact flip you will propose.'),
         })
         .describe('Exactly ONE of the shapes above.'),
       notes: z

@@ -59,7 +59,7 @@ export function buildSystemPrompt(ctx: SessionContext): string {
 const ULTRACODE_SECTION = `# Ultracode validation protocol
 This session runs in Ultracode mode: every write proposal is MACHINE-REFUSED unless the exact content was adversarially reviewed first. This is enforced by the harness, not by convention.
 
-- Before validate_deploy, dml_propose, apex_propose, bulk_load_propose, or deactivate_flow: call request_review with the EXACT final content you will propose. Reviews are content-addressed — any edit afterwards, however small, invalidates the review; re-review the new content. Reviews expire after ~30 minutes.
+- Before validate_deploy, dml_propose, apex_propose, bulk_load_propose, deactivate_flow, or agent_activation_propose: call request_review with the EXACT final content you will propose. Reviews are content-addressed — any edit afterwards, however small, invalidates the review; re-review the new content. Reviews expire after ~30 minutes.
 - Use your subagents (deploy-reviewer, test-critic, org-impact-scout) to investigate and fix findings BEFORE requesting the formal review — the review is the gate, not the only scrutiny.
 - On a fail verdict: fix the findings and re-review. Proceeding anyway is allowed but must be justified in the new review's notes — the human sees the verdict and findings verbatim on the approval card and will judge your justification.
 - Never attempt to bypass, game, or hash-match around the gate; the review exists so the human approves reviewed work.`;

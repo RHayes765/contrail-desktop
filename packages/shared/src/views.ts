@@ -334,7 +334,7 @@ export interface ManifestEntryView {
   connectionId: string;
   /** Resolved alias; '(removed connection)' when the org was disconnected. */
   alias: string;
-  kind: 'deploy' | 'dml' | 'apex' | 'bulk';
+  kind: 'deploy' | 'dml' | 'apex' | 'bulk' | 'activation';
   entryKind: 'metadata' | 'data';
   type: string | null;
   apiName: string | null;
@@ -453,7 +453,7 @@ export type ChatEvent =
   | {
       type: 'approval_required';
       requestId: string;
-      kind: 'deploy' | 'dml' | 'apex' | 'bulk';
+      kind: 'deploy' | 'dml' | 'apex' | 'bulk' | 'activation';
       connection: string;
       orgType: string;
     }
@@ -665,7 +665,7 @@ export interface DeployChangeView {
  */
 export interface DeployRequestView {
   id: string;
-  kind: 'deploy' | 'dml' | 'apex' | 'bulk';
+  kind: 'deploy' | 'dml' | 'apex' | 'bulk' | 'activation';
   connectionId: string;
   alias: string;
   orgName: string | null;

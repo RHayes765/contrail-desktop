@@ -58,7 +58,7 @@ interface ChatState {
   /** A write awaits the human's decision — Chat renders the approval banner. */
   pendingApproval: {
     requestId: string;
-    kind: 'deploy' | 'dml' | 'apex' | 'bulk';
+    kind: 'deploy' | 'dml' | 'apex' | 'bulk' | 'activation';
     connection: string;
     orgType: string;
   } | null;

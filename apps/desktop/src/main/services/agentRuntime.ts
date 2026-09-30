@@ -99,6 +99,7 @@ const APPROVAL_PRESENTING = new Set([
   'deactivate_flow',
   'apex_propose',
   'bulk_load_propose',
+  'agent_activation_propose',
 ]);
 
 /** Ultracode (S28): write proposals gated on a content-addressed review. */
@@ -108,6 +109,7 @@ const ULTRACODE_GATED = new Set([
   'apex_propose',
   'bulk_load_propose',
   'deactivate_flow',
+  'agent_activation_propose',
 ]);
 /** A review addresses one moment's content — 30 minutes, then re-review. */
 const REVIEW_FRESH_MS = 30 * 60_000;
@@ -155,6 +157,13 @@ function gateSubjectFor(name: string, a: Record<string, unknown>): ReviewSubject
     }
     case 'deactivate_flow':
       return { kind: 'flow_deactivation', apiName: String(a.flow ?? '') };
+    case 'agent_activation_propose':
+      return {
+        kind: 'activation',
+        agent: String(a.agent ?? ''),
+        version: String(a.version ?? ''),
+        status: String(a.status ?? ''),
+      };
     default:
       return null;
   }
@@ -260,7 +269,12 @@ export function extractConfirmationCode(text: string): string | null {
 }
 
 /** Write-execute capabilities whose confirmation_code main fills from the vault. */
-const CODE_BEARING_CAPABILITIES = new Set(['execute_deploy', 'dml_execute', 'apex_execute']);
+const CODE_BEARING_CAPABILITIES = new Set([
+  'execute_deploy',
+  'dml_execute',
+  'apex_execute',
+  'agent_activation_execute',
+]);
 
 /**
  * Substitute the vaulted code into a write-execute call. The agent passes
@@ -529,7 +543,8 @@ export class AgentSessionRun {
       (name === 'execute_deploy' ||
         name === 'dml_execute' ||
         name === 'apex_execute' ||
-        name === 'bulk_load_execute') &&
+        name === 'bulk_load_execute' ||
+        name === 'agent_activation_execute') &&
       !realCode &&
       typeof a.connection === 'string'
     ) {
@@ -541,7 +556,9 @@ export class AgentSessionRun {
             ? 'apex'
             : name === 'bulk_load_execute'
               ? 'bulk'
-              : 'dml',
+              : name === 'agent_activation_execute'
+                ? 'activation'
+                : 'dml',
         a.connection,
       );
       if (held) {

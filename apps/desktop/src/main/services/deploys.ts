@@ -286,7 +286,9 @@ export class DeployService {
     // Grants are LIVE law here too: revoking metadata_write/data_write must
     // stop a pending request from executing, exactly as it stops the agent's
     // classic path (this screen bypasses the capability layer's assertGrant).
-    const needed = rec.kind === 'deploy' ? 'metadata_write' : 'data_write';
+    // S34: activation is org configuration — metadata_write, like deploys.
+    const needed =
+      rec.kind === 'deploy' || rec.kind === 'activation' ? 'metadata_write' : 'data_write';
     if (!conn.grants[needed]) {
       this.deps.audit.record('grant.refused', {
         connectionId: conn.id,
@@ -352,6 +354,11 @@ export class DeployService {
         }
       } else if (rec.kind === 'apex') {
         const result = await this.deps.deploys.executeApex(conn, code);
+        failed = outcomeFailed(result);
+        detail = result;
+      } else if (rec.kind === 'activation') {
+        // Synchronous like apex: one Connect POST + a confirming re-GET.
+        const result = await this.deps.deploys.executeActivation(conn, code);
         failed = outcomeFailed(result);
         detail = result;
       } else {
@@ -602,7 +609,7 @@ export class DeployService {
         | Array<{ label?: string; warnings?: string[]; detail?: string; destructive?: boolean }>
         | undefined;
       if (
-        (rec.kind === 'dml' || rec.kind === 'bulk') &&
+        (rec.kind === 'dml' || rec.kind === 'bulk' || rec.kind === 'activation') &&
         Array.isArray(planRows) &&
         planRows.some((r) => r?.label)
       ) {

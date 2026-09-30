@@ -1356,7 +1356,9 @@ ${logFilePath()}`,
               ? 'metadata deploy'
               : info.kind === 'bulk'
                 ? 'bulk data load'
-                : 'data change'
+                : info.kind === 'activation'
+                  ? 'agent activation change'
+                  : 'data change'
           } is waiting in Deploy Review.`,
         });
         n.on('click', () => {

@@ -66,6 +66,8 @@ export const SUBAGENT_BANNED_TOOLS: readonly string[] = [
   'apex_execute',
   'bulk_load_propose',
   'bulk_load_execute',
+  'agent_activation_propose',
+  'agent_activation_execute',
   'refresh_snapshot',
   'set_trace_flag',
   'add_project_note',

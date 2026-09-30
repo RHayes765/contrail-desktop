@@ -240,7 +240,9 @@ export function ChatScreen({ projectId }: { projectId: string }) {
                 ? 'run an anonymous Apex script on'
                 : pendingApproval.kind === 'bulk'
                   ? 'bulk-load data into'
-                  : 'change data on'}{' '}
+                  : pendingApproval.kind === 'activation'
+                    ? 'change agent activation on'
+                    : 'change data on'}{' '}
             <strong>{pendingApproval.connection}</strong> ({pendingApproval.orgType}). Nothing runs
             until you decide.
           </span>

@@ -143,7 +143,7 @@ function row(type: string, apiName: string, filePath: string) {
 }
 
 function makeRequest(over: {
-  kind: 'deploy' | 'dml' | 'apex' | 'bulk';
+  kind: 'deploy' | 'dml' | 'apex' | 'bulk' | 'activation';
   summaryJson: string;
   payloadJson?: string;
   withSession?: boolean;
@@ -318,6 +318,29 @@ describe('capture (the execution observer body)', () => {
     expect(fn.afterContent).toContain(
       'contrail:file genAiFunctions/Dog_Facts/output/schema.json',
     );
+  });
+
+  it('captures an agent activation flip as a labeled data row with the from→to detail', () => {
+    const request = makeRequest({
+      kind: 'activation',
+      summaryJson: JSON.stringify({ rows: [{ label: 'DEACTIVATE Support_Agent v2', warnings: [] }] }),
+      payloadJson: JSON.stringify({
+        activation: true,
+        bot_developer_name: 'Support_Agent',
+        bot_version_developer_name: 'v2',
+        bot_version_id: '0X9000000000002AAA',
+        from_status: 'Active',
+        to_status: 'Inactive',
+      }),
+    });
+    service.capture({ request, payload: { executed: true }, payloadPath: null });
+    const [entry] = db.listManifestEntries(projectId);
+    // A data-kind entry, so the Manifest tab renders label + detail — a
+    // 'metadata' entry with null content would show as bogus "no capture".
+    expect(entry!.entryKind).toBe('data');
+    expect(entry!.label).toBe('Deactivated agent Support_Agent v2');
+    expect(JSON.parse(entry!.detailJson ?? '{}')).toMatchObject({ from: 'Active', to: 'Inactive' });
+    expect(entry!.afterContent).toBeNull();
   });
 
   it('captures anonymous Apex as a data row carrying the script', () => {

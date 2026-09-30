@@ -72,6 +72,7 @@ export interface ReviewSubjectInput {
     external_id_field?: string;
   }>;
   flow_deactivation?: { api_name: string };
+  activation?: { agent: string; version: string; status: string };
 }
 
 export type FolderDataResolver = (
@@ -132,11 +133,12 @@ export class ReviewService {
       raw.dml !== undefined ? 'dml' : null,
       raw.bulk_steps !== undefined ? 'bulk' : null,
       raw.flow_deactivation !== undefined ? 'flow_deactivation' : null,
+      raw.activation !== undefined ? 'activation' : null,
     ].filter(Boolean);
     if (shapes.length !== 1) {
       throw new Error(
         `subject must carry exactly ONE shape (components/deletions, script, dml, ` +
-          `bulk_steps, or flow_deactivation) — got ${shapes.length}.`,
+          `bulk_steps, flow_deactivation, or activation) — got ${shapes.length}.`,
       );
     }
 
@@ -210,6 +212,21 @@ export class ReviewService {
             )
             .join('\n');
         return { subject: { kind: 'bulk', steps }, body };
+      }
+      case 'activation': {
+        const act = raw.activation!;
+        return {
+          subject: {
+            kind: 'activation',
+            agent: act.agent,
+            version: act.version,
+            status: act.status,
+          },
+          body:
+            `${act.status === 'Active' ? 'Activating' : 'Deactivating'} Agentforce agent ` +
+            `"${act.agent}" version ${act.version} — changes LIVE user-facing behavior ` +
+            `immediately (no draft in between).`,
+        };
       }
       default:
         return {

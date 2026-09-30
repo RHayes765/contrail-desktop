@@ -189,7 +189,7 @@ export function renderSuccessPage(opts: {
 }
 
 export interface ApprovalPageOptions {
-  kind: 'deploy' | 'dml' | 'apex' | 'bulk';
+  kind: 'deploy' | 'dml' | 'apex' | 'bulk' | 'activation';
   code: string;
   expiresAt: string;
   org: { alias: string; orgName: string | null; orgType: string; instanceUrl: string };
@@ -224,7 +224,9 @@ export function renderApprovalPage(opts: ApprovalPageOptions): string {
         ? 'Approve this anonymous Apex script'
         : opts.kind === 'bulk'
           ? 'Approve this bulk data load'
-          : 'Approve this data change';
+          : opts.kind === 'activation'
+            ? 'Approve this agent activation change'
+            : 'Approve this data change';
 
   const row = (c: { label: string; warnings: string[]; detail?: string }, danger: boolean) => `
     <div class="chg${danger ? ' danger' : ''}">

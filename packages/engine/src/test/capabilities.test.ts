@@ -65,6 +65,8 @@ describe('capability surface', () => {
     const caps = allCapabilities();
     const names = caps.map((c) => c.name).sort();
     expect(names).toEqual([
+      'agent_activation_execute',
+      'agent_activation_propose',
       'apex_execute',
       'apex_propose',
       'bulk_load_execute',
@@ -117,6 +119,8 @@ describe('capability surface', () => {
       .map((c) => c.name)
       .sort();
     expect(writes).toEqual([
+      'agent_activation_execute',
+      'agent_activation_propose',
       'apex_execute',
       'apex_propose',
       'bulk_load_execute',

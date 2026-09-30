@@ -66,6 +66,8 @@ describe('tool manifest (THE isolation snapshot)', () => {
   it('full grants mint exactly the expected capability set — no more, no less', () => {
     const names = mintableCapabilities([FULL]).map((c) => c.name).sort();
     expect(names).toEqual([
+      'agent_activation_execute',
+      'agent_activation_propose',
       'apex_execute',
       'apex_propose',
       'bulk_load_execute',
@@ -292,6 +294,8 @@ describe('tool manifest (THE isolation snapshot)', () => {
       'apex_execute',
       'bulk_load_propose',
       'bulk_load_execute',
+      'agent_activation_propose',
+      'agent_activation_execute',
     ]) {
       expect(allowed).not.toContain(`mcp__contrail__${writeTool}`);
     }

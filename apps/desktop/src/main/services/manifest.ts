@@ -176,6 +176,39 @@ export class ManifestService {
       });
     }
 
+    // S34: an activation flip is a live-state change with no document — it
+    // rides the DATA entry shape (labeled row + detailJson), which the
+    // Manifest tab renders in full; a 'metadata' entry with null content
+    // would show as a bogus "no capture (historic)" row instead.
+    if (request.kind === 'activation') {
+      const p = payload as {
+        bot_developer_name?: string;
+        bot_version_developer_name?: string;
+        from_status?: string;
+        to_status?: string;
+      } | null;
+      const verb = p?.to_status === 'Active' ? 'Activated' : 'Deactivated';
+      return [
+        {
+          ...base,
+          entryKind: 'data' as const,
+          type: null,
+          apiName: null,
+          change: null,
+          label: `${verb} agent ${p?.bot_developer_name ?? '?'} ${p?.bot_version_developer_name ?? ''}`.trim(),
+          detailJson: JSON.stringify({
+            bot: p?.bot_developer_name ?? null,
+            version: p?.bot_version_developer_name ?? null,
+            from: p?.from_status ?? null,
+            to: p?.to_status ?? null,
+          }),
+          beforeContent: null,
+          afterContent: null,
+          contentTruncated: false,
+        },
+      ];
+    }
+
     // Data kinds: one labeled row per request.
     if (request.kind === 'apex') {
       const lines = typeof summary?.lines === 'number' ? summary.lines : null;

@@ -72,7 +72,7 @@ export const STANDARD_CATALOG: CatalogEntry[] = [
     key: 'deploy',
     label: 'Deploy',
     description: 'Metadata deploy validation and execution, flow deactivation.',
-    capabilities: ['validate_deploy', 'deactivate_flow', 'execute_deploy'],
+    capabilities: ['validate_deploy', 'deactivate_flow', 'execute_deploy', 'agent_activation_propose', 'agent_activation_execute'],
   },
 ];
 
