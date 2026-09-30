@@ -84,9 +84,9 @@ const GRANT_LABELS: Array<[keyof ConnectionView['grants'], string]> = [
 const GRANT_FULL_LABELS: Array<[keyof GrantSetView, string]> = [
   ['metadata_read', 'Metadata read'],
   ['metadata_write', 'Metadata write (deploys, agent activation)'],
-  ['diagnostics_read', 'Diagnostics read (logs, Apex test runs)'],
+  ['diagnostics_read', 'Diagnostics read (logs, Apex tests, eval results)'],
   ['data_read', 'Data read (SOQL)'],
-  ['data_write', 'Data write (DML)'],
+  ['data_write', 'Data write (DML, agent eval starts)'],
 ];
 
 /** write → its required read (mirrors the engine's GRANT_DEPENDENCIES). */

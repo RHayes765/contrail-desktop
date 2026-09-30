@@ -65,8 +65,15 @@ export const STANDARD_CATALOG: CatalogEntry[] = [
     key: 'debug-logs',
     label: 'Debug logs',
     description:
-      'Apex debug logs, flow error investigation, standalone Apex test runs, and trace flags.',
-    capabilities: ['get_debug_logs', 'get_flow_errors', 'run_apex_tests', 'set_trace_flag'],
+      'Apex debug logs, flow error investigation, standalone Apex test runs, agent ' +
+      'evaluation runs, and trace flags.',
+    capabilities: [
+      'get_debug_logs',
+      'get_flow_errors',
+      'run_apex_tests',
+      'run_agent_eval',
+      'set_trace_flag',
+    ],
   },
   {
     key: 'deploy',

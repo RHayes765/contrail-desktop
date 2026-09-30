@@ -68,6 +68,9 @@ export const SUBAGENT_BANNED_TOOLS: readonly string[] = [
   'bulk_load_execute',
   'agent_activation_propose',
   'agent_activation_execute',
+  // S35: eval runs execute the agent's REAL actions (no rollback) — never a
+  // subagent's call. test-critic keeps run_apex_tests ONLY (those roll back).
+  'run_agent_eval',
   'refresh_snapshot',
   'set_trace_flag',
   'add_project_note',

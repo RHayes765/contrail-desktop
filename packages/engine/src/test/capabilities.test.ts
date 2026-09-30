@@ -97,6 +97,7 @@ describe('capability surface', () => {
       'manage_connection',
       'refresh_snapshot',
       'retrieve_metadata',
+      'run_agent_eval',
       'run_apex_tests',
       'search_metadata',
       'set_trace_flag',

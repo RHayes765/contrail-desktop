@@ -3,7 +3,8 @@
 An AI harness built for Salesforce work: a local-first desktop app where an
 embedded Claude agent operates against your orgs through a first-party
 Salesforce engine — with grants, project isolation, and human approval for
-every write.
+every write (one disclosed carve-out: starting an agent evaluation run,
+whose only input is a test definition the human already approved).
 
 > **Status: released and self-updating.** Installers ship on
 > [GitHub Releases](https://github.com/RHayes765/contrail-desktop/releases)
@@ -12,7 +13,7 @@ every write.
 >
 > **📖 The full tool & feature reference lives in the engine repo:
 > [contrail-plugin/TOOLS.md](https://github.com/RHayes765/contrail-plugin/blob/main/TOOLS.md)**
-> — same 37 capabilities in both surfaces, desktop differences noted there.
+> — same 38 capabilities in both surfaces, desktop differences noted there.
 
 ## Why it exists
 

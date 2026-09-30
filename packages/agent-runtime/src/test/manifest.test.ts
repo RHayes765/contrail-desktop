@@ -95,6 +95,7 @@ describe('tool manifest (THE isolation snapshot)', () => {
       'list_metadata',
       'refresh_snapshot',
       'retrieve_metadata',
+      'run_agent_eval',
       'run_apex_tests',
       'search_metadata',
       'set_trace_flag',
@@ -185,9 +186,12 @@ describe('tool manifest (THE isolation snapshot)', () => {
       'validate_deploy',
       'execute_deploy',
       'deactivate_flow',
+      'agent_activation_propose',
+      'agent_activation_execute',
       'get_debug_logs',
       'get_flow_errors',
       'run_apex_tests',
+      'run_agent_eval',
       'set_trace_flag',
     ]) {
       expect(names).not.toContain(gone);
