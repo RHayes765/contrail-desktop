@@ -1,0 +1,28 @@
+Copyright (c) 2026 Ryley Hayes. All rights reserved.
+
+This repository's source code is made publicly viewable, but no license is
+granted to use, copy, modify, or redistribute it, in whole or in part, except
+as stated below or with the copyright holder's prior written permission.
+
+LIMITED USE GRANT. Permission is granted to download, install, and run
+unmodified release builds of Contrail Desktop (as published on this
+repository's Releases page) for personal or internal business use. This grant
+does not include the right to modify, redistribute, sublicense, sell, or
+offer Contrail Desktop as a service.
+
+THIRD-PARTY MATERIALS. Portions of this repository are adapted from or vendor
+third-party projects and remain under their own licenses, which continue to
+apply to those portions only:
+
+- Skills under packages/skills/skills/ adapted from the Salesforce Skills
+  Library (forcedotcom/sf-skills), (c) Salesforce, Inc. — Apache License 2.0
+  (see packages/skills/LICENSE-APACHE-2.0 and packages/skills/NOTICE).
+- Prebuilt language-server bundles under packages/apex-ls/vendor/ — Apache
+  License 2.0, (c) Salesforce, Inc. (see packages/apex-ls/LICENSE-APACHE-2.0
+  and packages/apex-ls/NOTICE).
+- Embedded libraries identified in packages/apex-ls/NOTICE — MIT
+  (see packages/apex-ls/LICENSE-MIT) and BSD-3-Clause
+  (see packages/apex-ls/LICENSE-BSD-3-CLAUSE).
+
+Nothing in this file limits the rights granted by those third-party licenses
+for the portions they cover.
