@@ -11,7 +11,7 @@ import { bundledSkillsDir, listBundledSkills, parseSkillFrontmatter } from '../i
  */
 
 const BANNED: Array<{ re: RegExp; why: string }> = [
-  { re: /\bsf\s+(org|apex|project|data|config|code-analyzer|api|force)\b/i, why: 'sf CLI command' },
+  { re: /\bsf\s+(org|apex|project|data|config|code-analyzer|api|force|lightning)\b/i, why: 'sf CLI command' },
   { re: /\bsfdx\b/i, why: 'sfdx reference' },
   { re: /force-app/i, why: 'SFDX project layout' },
   { re: /sfdx-project\.json/i, why: 'SFDX project file' },

@@ -74,6 +74,12 @@ const TYPE_DIRS: Record<string, string> = {
   AiEvaluationDefinition: 'aiEvaluationDefinitions',
   BotTemplate: 'botTemplates',
   BotBlock: 'botBlocks',
+  // S36: permissions & UI-action types (default-manifest members).
+  CustomPermission: 'customPermissions',
+  PermissionSetGroup: 'permissionsetgroups',
+  MutingPermissionSet: 'mutingpermissionsets',
+  QuickAction: 'quickActions',
+  LightningComponentBundle: 'lwc',
 };
 
 /** The refreshed types' own directories — null if any requested type has no known mapping. */

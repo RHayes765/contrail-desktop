@@ -195,7 +195,11 @@ export const metadataCapabilities: Capability[] = [
         .string()
         .describe(
           'Metadata type: ApexClass, ApexTrigger, Flow, CustomObject, CustomField, ' +
-            'ValidationRule, CustomLabel, PermissionSet.',
+            'ValidationRule, CustomLabel, PermissionSet, CustomPermission, ' +
+            'PermissionSetGroup, QuickAction (dotted Account.New_X for object actions), ' +
+            'and any other indexed type. Bundle types (LightningComponentBundle, ' +
+            'GenAiFunction, …) return the main file plus a bundle_files listing of ' +
+            'every sibling with snapshot paths for direct reading.',
         ),
       names: z
         .array(z.string())
