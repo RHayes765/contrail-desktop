@@ -113,6 +113,21 @@ beforeEach(() => {
       proposed.push({ kind: 'dml', content: JSON.stringify(input) });
       return { request_id: 'req-2' };
     },
+    validateDeploy: async (_conn: unknown, input: { dryRun?: boolean }) => {
+      // This fake only models the DRY path — a real validate reaching it
+      // would mean the gate failed, and a null-request fake would mislabel
+      // that as a dry run. Fail loudly instead.
+      if (input.dryRun !== true) throw new Error('fake validateDeploy: only dryRun modeled');
+      proposed.push({ kind: 'deploy', content: JSON.stringify({ dryRun: true }) });
+      return {
+        status: 'complete',
+        result: {
+          summary: { request_id: null, expires_at: null },
+          validation_passed: true,
+          approval: null,
+        },
+      };
+    },
   };
   deps = { db, audit: { record: () => undefined }, deploys: engine } as unknown as EngineDeps;
   service = new DeployService(deps, () => undefined);
@@ -148,6 +163,29 @@ describe('the mandatory gate', () => {
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain('no adversarial review');
     expect(proposed).toHaveLength(0);
+  });
+
+  it('S38: a dry-run validate skips the gate — it proposes nothing reviewable', async () => {
+    const run = makeRun(true, fakeReviewer());
+    // The real propose stays gated…
+    const gated = await run.executeCapability('validate_deploy', {
+      connection: 'uc-org',
+      components: [{ type: 'ApexClass', api_name: 'Foo', content: 'public class Foo {}' }],
+    });
+    expect(gated.isError).toBe(true);
+    expect(gated.content[0]!.text).toContain('no adversarial review');
+    expect(proposed).toHaveLength(0);
+
+    // …while the dry run (no request, no code, nothing approvable) passes
+    // straight through to the engine, flagged as a dry run.
+    const dry = await run.executeCapability('validate_deploy', {
+      connection: 'uc-org',
+      components: [{ type: 'ApexClass', api_name: 'Foo', content: 'public class Foo {}' }],
+      dry_run: true,
+    });
+    expect(dry.isError).toBeFalsy();
+    expect(dry.content[0]!.text).toContain('DRY RUN passed');
+    expect(proposed).toEqual([{ kind: 'deploy', content: JSON.stringify({ dryRun: true }) }]);
   });
 
   it('review → identical propose passes; ONE changed byte is refused again', async () => {

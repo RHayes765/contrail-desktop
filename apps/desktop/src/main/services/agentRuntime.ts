@@ -511,7 +511,11 @@ export class AgentSessionRun {
     // is the guarantee. Note the ordering: this runs AFTER the bulk abs_path
     // injection, so bulk hashes cover the resolved files' bytes.
     let matchedReview: StoredReview | null = null;
-    if (this.spec.ultracode && ULTRACODE_GATED.has(name)) {
+    // S38: a dry-run validate proposes nothing — no request, no code, nothing
+    // approvable — so the content-addressed review gate (which exists to
+    // front-run PROPOSALS) does not apply. Mid-build checks stay cheap.
+    const isDryRunValidate = name === 'validate_deploy' && a.dry_run === true;
+    if (this.spec.ultracode && ULTRACODE_GATED.has(name) && !isDryRunValidate) {
       const subject = gateSubjectFor(name, a);
       const hash = subject ? canonicalReviewHash(subject) : null;
       const review = hash ? this.reviews.get(hash) : undefined;
@@ -572,7 +576,11 @@ export class AgentSessionRun {
     // the approval card lands in the right chat. A matched Ultracode review
     // rides along — onPresented persists it into the request's review_json,
     // which is what Deploy Review shows the human.
-    const presents = APPROVAL_PRESENTING.has(name);
+    // S38: a dry-run validate presents nothing — setting (and then clearing)
+    // an expectation here would clobber a pending REAL validate's
+    // attribution and Ultracode review while its presentation is still in
+    // flight.
+    const presents = APPROVAL_PRESENTING.has(name) && !isDryRunValidate;
     if (presents && typeof a.connection === 'string') {
       this.deploysRef()?.expectPresentation(this.sessionId, a.connection, matchedReview);
     }
