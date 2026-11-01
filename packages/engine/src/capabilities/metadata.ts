@@ -1,9 +1,10 @@
 import { z } from 'zod';
 import type { EngineDeps } from '../core/deps.js';
 import type { ConnectionRecord } from '../core/types.js';
-import { ConnectionNotFoundError } from '../core/errors.js';
+import { ConnectionNotFoundError, ContrailError } from '../core/errors.js';
 import { assertGrant } from '../core/gate.js';
 import { RestClient } from '../salesforce/rest.js';
+import { flowMetadataJsonToXml } from '../salesforce/flowversion.js';
 import { MetadataSoapClient } from '../salesforce/metadataSoap.js';
 import { queryDependencies } from '../deps/graph.js';
 import {
@@ -222,6 +223,19 @@ export const metadataCapabilities: Capability[] = [
             'Whenever content is cut, the result says so and gives bytes_total plus ' +
             'snapshot_path, so you can read the file directly instead of guessing.',
         ),
+      flow_version: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe(
+          'Flow only, one name only: retrieve a HISTORICAL version by number via the ' +
+            'Tooling API, converted from its JSON to flow XML — faithful for reading ' +
+            'and diffing (two converted versions diff cleanly); element order is ' +
+            'alphabetical, so it is not deploy-ready byte-for-byte. Discover version ' +
+            'numbers with soql_query tooling:true — SELECT VersionNumber, Status FROM ' +
+            "Flow WHERE Definition.DeveloperName = '<name>' ORDER BY VersionNumber.",
+        ),
     },
     handler: (deps, rawArgs) =>
       guarded(async () => {
@@ -231,10 +245,15 @@ export const metadataCapabilities: Capability[] = [
           names: string[];
           include_dependencies?: boolean;
           max_bytes?: number;
+          flow_version?: number;
         };
         const { db } = deps;
         const conn = requireConnection(deps, args.connection, 'retrieve_metadata');
         if (!TYPE_RE.test(args.type)) return fail('invalid metadata type');
+        if (args.flow_version !== undefined) {
+          if (args.type !== 'Flow') return fail('flow_version applies only to type Flow.');
+          if (args.names.length !== 1) return fail('flow_version takes exactly one name.');
+        }
         const includeDeps = args.include_dependencies !== false;
         const perArtifact = Math.min(args.max_bytes ?? DEFAULT_CONTENT_BYTES, MAX_CONTENT_BYTES);
         let budgetLeft = CALL_CONTENT_BUDGET;
@@ -245,7 +264,10 @@ export const metadataCapabilities: Capability[] = [
             continue;
           }
           try {
-            const content = await fetchArtifactContent(deps, conn, args.type, name);
+            const content =
+              args.flow_version !== undefined
+                ? await fetchFlowVersionContent(deps, conn, name, args.flow_version)
+                : await fetchArtifactContent(deps, conn, args.type, name);
             const allowed = Math.max(0, Math.min(perArtifact, budgetLeft));
             const cut = clampContent(content.body, allowed);
             budgetLeft -= cut.body.length;
@@ -260,13 +282,22 @@ export const metadataCapabilities: Capability[] = [
             };
             if (cut.truncated) {
               entry.truncated_reason = allowed < perArtifact ? 'call_budget' : 'max_bytes';
-              // Point at the file so the caller can finish the job itself
-              // rather than re-reading in blind slices.
-              const rec = db.getArtifact(conn.id, args.type, name);
-              const onDisk = rec?.filePath
-                ? deps.store.currentFilePath(conn.id, rec.filePath)
-                : null;
-              if (onDisk) entry.snapshot_path = onDisk;
+              if (args.flow_version !== undefined) {
+                // S40: NEVER point at the snapshot here — it holds only the
+                // LATEST version, so following it would splice this version's
+                // head onto a different version's tail. No file on disk holds
+                // the converted historical version.
+                entry.truncated_note =
+                  'No file on disk holds this historical version — retry with a larger max_bytes.';
+              } else {
+                // Point at the file so the caller can finish the job itself
+                // rather than re-reading in blind slices.
+                const rec = db.getArtifact(conn.id, args.type, name);
+                const onDisk = rec?.filePath
+                  ? deps.store.currentFilePath(conn.id, rec.filePath)
+                  : null;
+                if (onDisk) entry.snapshot_path = onDisk;
+              }
             }
             if (content.note) entry.note = content.note;
             if (content.bundle_files) entry.bundle_files = content.bundle_files;
@@ -741,3 +772,67 @@ export const metadataCapabilities: Capability[] = [
       }),
   },
 ];
+
+/**
+ * S40: a HISTORICAL flow version via the Tooling API. The Metadata API and
+ * the snapshot hold only the latest version; older ones exist solely as
+ * Tooling Flow records whose Metadata field is JSON — fetched whole by REST
+ * GET (never through soql_query, whose budget caps would truncate it) and
+ * converted to flow XML by flowMetadataJsonToXml, fidelity contract there.
+ */
+async function fetchFlowVersionContent(
+  deps: EngineDeps,
+  conn: ConnectionRecord,
+  name: string,
+  version: number,
+): Promise<{
+  body: string;
+  source: string;
+  note?: string;
+  bundle_files?: Array<{ path: string; bytes: number; snapshot_path: string | null }>;
+}> {
+  const { tokenMgr, config } = deps;
+  const rest = new RestClient(tokenMgr, conn, config.salesforce.apiVersion);
+  // Two-step escape, backslash first (house idiom) — nameOk upstream already
+  // rejects backslashes, but this helper must not depend on a distant gate.
+  const esc = name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  const rows = await rest.toolingQuery<{ Id: string; Status: string | null }>(
+    `SELECT Id, Status FROM Flow WHERE Definition.DeveloperName = '${esc}' ` +
+      `AND VersionNumber = ${version} LIMIT 1`,
+    1,
+  );
+  if (rows.length === 0) {
+    const versions = await rest.toolingQuery<{ VersionNumber: number; Status: string | null }>(
+      `SELECT VersionNumber, Status FROM Flow WHERE Definition.DeveloperName = '${esc}' ` +
+        `ORDER BY VersionNumber DESC LIMIT 50`,
+      50,
+    );
+    throw new ContrailError(
+      versions.length > 0
+        ? `Flow ${name} has no version ${version} on "${conn.alias}" — available: ` +
+          versions.map((v) => `${v.VersionNumber} (${v.Status ?? '?'})`).join(', ') + '.'
+        : `No flow named ${name} is visible to the Tooling API on "${conn.alias}".`,
+      'artifact_not_found',
+    );
+  }
+  const res = await rest.request(
+    `/services/data/${config.salesforce.apiVersion}/tooling/sobjects/Flow/${rows[0]!.Id}` +
+      `?fields=Metadata,VersionNumber,Status`,
+  );
+  const record = (await res.json()) as { Metadata?: Record<string, unknown>; Status?: string };
+  if (!record.Metadata || typeof record.Metadata !== 'object') {
+    throw new ContrailError(
+      `Tooling returned no Metadata for ${name} version ${version}.`,
+      'artifact_not_found',
+    );
+  }
+  return {
+    body: flowMetadataJsonToXml(record.Metadata),
+    source: `tooling (version ${version}, ${record.Status ?? 'status unknown'})`,
+    note:
+      "Converted from the Tooling API's JSON. Faithful for reading and diffing — two " +
+      'converted versions diff cleanly against each other — but element order is ' +
+      'alphabetical, so comparing against a Metadata API retrieve may show ' +
+      'ordering-only noise, and the output is NOT guaranteed deploy-ready.',
+  };
+}

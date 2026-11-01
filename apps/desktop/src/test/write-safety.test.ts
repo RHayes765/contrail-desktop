@@ -562,7 +562,8 @@ describe('bulk_load_propose path resolution (S27 silo)', () => {
     expect(escape.content[0]!.text).toMatch(/without "\.\."|outside the linked folder/);
     expect(bulkProposals).toHaveLength(1);
 
-    // Non-CSV files are not bulk sources, even inside the folder.
+    // Non-data files are not bulk sources, even inside the folder
+    // (S40: .tsv joined .csv; anything else stays out).
     const wrongType = await run.executeCapability('bulk_load_propose', {
       connection: 'dev',
       steps: [
@@ -570,7 +571,7 @@ describe('bulk_load_propose path resolution (S27 silo)', () => {
       ],
     });
     expect(wrongType.isError).toBe(true);
-    expect(wrongType.content[0]!.text).toContain('.csv files only');
+    expect(wrongType.content[0]!.text).toContain('.csv (comma) or .tsv (TAB) files only');
     expect(bulkProposals).toHaveLength(1);
   });
 });

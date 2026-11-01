@@ -796,8 +796,9 @@ export const deployCapabilities: Capability[] = [
     title: 'Propose a bulk data load from CSV files (two-step)',
     description:
       'Stage a multi-file Bulk API 2.0 data load behind the approval ritual. Rows go ' +
-      'FILE → ORG and never through this conversation: prepare UTF-8, comma-delimited ' +
-      'CSVs in a linked project folder (API-name headers; cross-object references as ' +
+      'FILE → ORG and never through this conversation: prepare UTF-8 CSVs (or .tsv — ' +
+      'a .tsv extension means TAB-delimited, scanned and loaded as such) in a linked ' +
+      'project folder (API-name headers; cross-object references as ' +
       'relationship-by-external-ID columns like "Account.External_Id__c", resolved ' +
       'org-side), then name one file per step by its {folder, path} coordinates from ' +
       'list_project_files. Steps execute SEQUENTIALLY in the order given — parents ' +
@@ -820,7 +821,10 @@ export const deployCapabilities: Capability[] = [
               .describe('Linked project folder name (as listed by list_project_files).'),
             path: z
               .string()
-              .describe("The CSV's path relative to that folder (forward slashes)."),
+              .describe(
+                "The file's path relative to that folder (forward slashes); " +
+                  '.csv or .tsv (TAB-delimited).',
+              ),
             object: z.string().describe('SObject API name, e.g. Account or Invoice__c.'),
             operation: z.enum(['insert', 'upsert', 'delete']),
             external_id_field: z
@@ -903,8 +907,9 @@ export const deployCapabilities: Capability[] = [
       'confirmation code — the user approves in Deploy Review and this call waits for ' +
       'their decision. With the localhost approval page, pass the code the human read ' +
       'from the page. Large jobs take minutes: an in-progress result means call again ' +
-      'the same way to check on it. Failed and unprocessed rows come back as CSV file ' +
-      'paths (never row data); rows loaded by completed steps are never rolled back.',
+      'the same way to check on it. Successful, failed, and unprocessed rows come back ' +
+      'as file paths (never row data) — step-N-success carries the created/updated/' +
+      'deleted record ids; rows loaded by completed steps are never rolled back.',
     grant: 'data_write',
     writeClass: true,
     inputSchema: {

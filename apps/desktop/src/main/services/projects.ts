@@ -581,12 +581,12 @@ export class ProjectService {
   }
 
   /**
-   * Resolve a linked-folder CSV to its absolute path for a bulk load — the
-   * same guard chain as readFolderFile, but returning the PATH (the engine
-   * freezes the bytes itself) with no text-read truncation. CSV only: this
-   * hands a file to an org-bound pipeline, so the allowlist is exactly the
-   * format that pipeline speaks. Size is capped by the engine's
-   * bulkLoad.maxFileBytes when it stats the file again at freeze time.
+   * Resolve a linked-folder data file to its absolute path for a bulk load —
+   * the same guard chain as readFolderFile, but returning the PATH (the
+   * engine freezes the bytes itself) with no text-read truncation. .csv and
+   * .tsv only (S40): this hands a file to an org-bound pipeline, so the
+   * allowlist is exactly the formats that pipeline speaks. Size is capped by
+   * the engine's bulkLoad.maxFileBytes when it stats the file at freeze time.
    */
   resolveFolderDataFile(
     projectId: string,
@@ -596,10 +596,14 @@ export class ProjectService {
     const resolved = this.resolveFolderPath(projectId, folderName, relPath);
     if (!resolved.ok) return resolved;
     const ext = path.extname(resolved.real).toLowerCase();
-    if (ext !== '.csv') {
+    // S40: .tsv joined .csv — the extension declares the delimiter, and the
+    // engine's scanner/ingest jobs follow it.
+    if (ext !== '.csv' && ext !== '.tsv') {
       return {
         ok: false,
-        message: `"${relPath}" is ${ext || 'not a .csv file'} — bulk loads take .csv files only.`,
+        message:
+          `"${relPath}" is ${ext || 'not a .csv/.tsv file'} — bulk loads take ` +
+          `.csv (comma) or .tsv (TAB) files only.`,
       };
     }
     return { ok: true, absPath: resolved.real, size: resolved.stat.size };
