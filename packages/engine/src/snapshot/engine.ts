@@ -9,6 +9,7 @@ import {
   MetadataSoapClient,
   type FileProperties,
 } from '../salesforce/metadataSoap.js';
+import crypto from 'node:crypto';
 import { RestClient } from '../salesforce/rest.js';
 import { SnapshotStore } from './store.js';
 import { buildKnownArtifacts } from '../deps/extract.js';
@@ -46,6 +47,25 @@ export interface RefreshJobState {
 
 interface RefreshJob extends RefreshJobState {
   promise: Promise<RefreshSummary>;
+  finishedAt?: number;
+}
+
+/** Finished-but-never-collected jobs are swept after this long. */
+const STALE_JOB_MS = 30 * 60_000;
+
+/**
+ * S41 (§3.1): a refresh job's MAP KEY is its requested type set, never the
+ * connection alone — a caller can only ever collect the result of the
+ * refresh it asked for, and two surfaces' refreshes cannot cross-deliver.
+ * job.jobId stays run-unique on top of this: UI observers name an exact RUN
+ * (observeJobId), which an input-derived id cannot do across re-runs.
+ */
+function refreshInputKey(normalizedTypes: string[]): string {
+  const digest = crypto
+    .createHash('sha256')
+    .update(JSON.stringify([...normalizedTypes].sort()))
+    .digest('hex');
+  return `refresh-${digest.slice(0, 12)}`;
 }
 
 export interface RefreshOptions {
@@ -93,7 +113,15 @@ function normalizeRefreshTypes(types: string[]): string[] {
 }
 
 export class SnapshotEngine {
+  /** Keyed `${conn.id}:${refreshInputKey(types)}` — see refreshInputKey (S41 §3.1). */
   private readonly jobs = new Map<string, RefreshJob>();
+  /**
+   * Per-connection tail of the refresh EXECUTION chain. Results are keyed
+   * by request, but runs stay serialised per connection: each refresh
+   * rewrites snapshot dirs and index rows wholesale. The app_locks lease
+   * still guards ACROSS processes; this chain queues within one.
+   */
+  private readonly chains = new Map<string, Promise<unknown>>();
   private readonly work: SnapshotWorkUnits;
   private readonly lockHolder = `engine:${process.pid}`;
 
@@ -131,35 +159,56 @@ export class SnapshotEngine {
     | { status: 'gone' }
   > {
     const waitMs = options?.waitMs ?? this.config.snapshot.toolWaitMs;
-    let job = this.jobs.get(conn.id);
+    this.sweepStaleJobs();
+    let key: string;
+    let job: RefreshJob | undefined;
 
     if (options?.observeJobId) {
-      if (!job || job.jobId !== options.observeJobId) {
+      // Observers name an exact RUN; the map is keyed by input (S41 §3.1),
+      // so find the run wherever it lives under this connection.
+      const hit = [...this.jobs.entries()].find(
+        ([k, j]) => k.startsWith(`${conn.id}:`) && j.jobId === options.observeJobId,
+      );
+      if (!hit) {
         // The observed run was collected by someone else (or never existed);
         // an observer must never accidentally start a duplicate retrieve.
         return { status: 'gone' };
       }
-    } else if (job?.done) {
-      if (options?.fresh) {
-        // A leftover finished job is stale history to a fresh sync — discard.
-        this.jobs.delete(conn.id);
-        job = undefined;
-      } else {
-        this.jobs.delete(conn.id);
-        // A finished job whose result was never collected is delivered now.
-        if (job.result) return { status: 'complete', summary: job.result };
-        if (job.error) return { status: 'failed', error: job.error };
-        job = undefined;
+      [key, job] = hit;
+    } else {
+      const normalized = normalizeRefreshTypes(types ?? this.config.snapshot.types);
+      key = `${conn.id}:${refreshInputKey(normalized)}`;
+      job = this.jobs.get(key);
+      if (job?.done) {
+        this.jobs.delete(key);
+        if (options?.fresh) {
+          // A leftover finished job is stale history to a fresh sync — discard.
+          job = undefined;
+        } else {
+          // A finished job whose result was never collected is delivered now
+          // — only ever to the input that asked for it (same key).
+          // `!== undefined`, never truthiness: an empty error string must
+          // still deliver as FAILED, not fall through and restart work.
+          if (job.result !== undefined) return { status: 'complete', summary: job.result };
+          if (job.error !== undefined) return { status: 'failed', error: job.error };
+          job = undefined;
+        }
       }
-    }
-
-    if (!job) {
-      const lockName = `snapshot:${conn.id}`;
-      if (!this.db.acquireAppLock(lockName, this.lockHolder, SNAPSHOT_LOCK_TTL_MS)) {
-        return { status: 'locked', holder: 'another Contrail process' };
+      if (!job) {
+        const lockName = `snapshot:${conn.id}`;
+        // The cross-process lease is probed at submit only when no refresh
+        // of OURS is active; otherwise the new run queues on the chain and
+        // acquires the lease when its turn comes.
+        let lockPreAcquired = false;
+        if (!this.chains.has(conn.id)) {
+          if (!this.db.acquireAppLock(lockName, this.lockHolder, SNAPSHOT_LOCK_TTL_MS)) {
+            return { status: 'locked', holder: 'another Contrail process' };
+          }
+          lockPreAcquired = true;
+        }
+        job = this.startJob(conn, normalized, lockPreAcquired);
+        this.jobs.set(key, job);
       }
-      job = this.startJob(conn, normalizeRefreshTypes(types ?? this.config.snapshot.types));
-      this.jobs.set(conn.id, job);
     }
 
     const winner = await Promise.race([
@@ -171,13 +220,26 @@ export class SnapshotEngine {
     ]);
     if (winner) {
       // Deliver exactly once: only the observer that wins removes the job.
-      if (this.jobs.get(conn.id)?.jobId === job.jobId) this.jobs.delete(conn.id);
+      if (this.jobs.get(key)?.jobId === job.jobId) this.jobs.delete(key);
       return winner;
     }
     return { status: 'in_progress', state: publicState(job) };
   }
 
-  private startJob(conn: ConnectionRecord, types: string[]): RefreshJob {
+  private sweepStaleJobs(): void {
+    const cutoff = Date.now() - STALE_JOB_MS;
+    for (const [key, job] of this.jobs) {
+      if (job.done && job.finishedAt !== undefined && job.finishedAt < cutoff) {
+        this.jobs.delete(key);
+      }
+    }
+  }
+
+  private startJob(
+    conn: ConnectionRecord,
+    types: string[],
+    lockPreAcquired: boolean,
+  ): RefreshJob {
     const job: RefreshJob = {
       jobId: `${conn.id}:${Date.now()}:${Math.floor(Math.random() * 1e6)}`,
       types,
@@ -187,14 +249,43 @@ export class SnapshotEngine {
       promise: undefined as unknown as Promise<RefreshSummary>,
     };
     const lockName = `snapshot:${conn.id}`;
-    job.promise = this.runRefresh(conn, types, job)
+    // Serialise RUNS per connection: a second refresh queues behind the
+    // running one and starts only after it settles (success or failure).
+    const prev = this.chains.get(conn.id);
+    if (prev) job.progress = 'queued behind an earlier refresh on this connection';
+    const run = (prev ?? Promise.resolve())
+      .catch(() => {})
+      .then(async () => {
+        if (
+          !lockPreAcquired &&
+          !this.db.acquireAppLock(lockName, this.lockHolder, SNAPSHOT_LOCK_TTL_MS)
+        ) {
+          throw new ContrailError(
+            'another Contrail process is refreshing this connection — try again once its sync finishes',
+            'snapshot_locked',
+          );
+        }
+        try {
+          return await this.runRefresh(conn, types, job);
+        } finally {
+          this.db.releaseAppLock(lockName, this.lockHolder);
+        }
+      });
+    const tail = run.catch(() => {});
+    this.chains.set(conn.id, tail);
+    void tail.then(() => {
+      if (this.chains.get(conn.id) === tail) this.chains.delete(conn.id);
+    });
+    job.promise = run
       .then((summary) => {
         job.done = true;
+        job.finishedAt = Date.now();
         job.result = summary;
         return summary;
       })
       .catch((err) => {
         job.done = true;
+        job.finishedAt = Date.now();
         job.error = String(err instanceof Error ? err.message : err);
         this.audit.record('snapshot.refresh_failed', {
           connectionId: conn.id,
@@ -203,9 +294,6 @@ export class SnapshotEngine {
           detail: { error: job.error },
         });
         throw err;
-      })
-      .finally(() => {
-        this.db.releaseAppLock(lockName, this.lockHolder);
       });
     // Prevent unhandled rejection when nobody is awaiting after soft-return.
     job.promise.catch(() => {});
@@ -444,6 +532,29 @@ function buildRetrieveMembers(
     } else {
       warnings.push(
         'listMetadata returned no CustomObject inventory; falling back to the * wildcard, which misses standard objects.',
+      );
+    }
+  }
+  // S41: Aura wildcard retrieves exclude namespace-free installedEditable
+  // bundles (live-confirmed 2026-11-04: a wildcard returned 3 of an org's 6
+  // namespace-free bundles, dropping the installedEditable trio) — expand to
+  // NAMED members from the inventory, keeping the namespace-keyed isManaged
+  // test so those bundles stay retrievable (by-name retrieves DO return
+  // namespace-free installed components; the S36 LWC note below).
+  if ('AuraDefinitionBundle' in members) {
+    const bundleNames = listedProps
+      .filter((p) => p.type === 'AuraDefinitionBundle' && !isManaged(p))
+      .map((p) => p.fullName);
+    if (bundleNames.length > 0) {
+      members.AuraDefinitionBundle = bundleNames;
+      if (bundleNames.length > 2000) {
+        warnings.push(
+          `AuraDefinitionBundle inventory is large (${bundleNames.length}); the retrieve may be slow or hit platform size limits.`,
+        );
+      }
+    } else {
+      warnings.push(
+        'listMetadata returned no AuraDefinitionBundle inventory; falling back to the * wildcard, which misses installed-package bundles.',
       );
     }
   }

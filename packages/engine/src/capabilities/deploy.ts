@@ -1,9 +1,10 @@
 import { z } from 'zod';
 import { flowDeactivationXml } from '../deploy/package.js';
-import type { DmlPlanStep } from '../deploy/engine.js';
+import type { DeployEngine, DmlPlanStep } from '../deploy/engine.js';
 import { resolveSourceFile } from '../deploy/sources.js';
 import { stagingDir } from '../core/paths.js';
 import type { TestLevel } from '../salesforce/metadataSoap.js';
+import type { ConnectionRecord } from '../core/types.js';
 import type { Capability } from './types.js';
 import { ok, fail, guarded } from './result.js';
 import { requireConnection } from './metadata.js';
@@ -26,6 +27,52 @@ const APPROVAL_INSTRUCTIONS =
 
 const REF_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
 const REF_TOKEN_RE = /^@\{([A-Za-z][A-Za-z0-9_]*)\.id\}$/;
+
+/**
+ * One rendering for submitted AND polled validations (S41 §3.1). Every label
+ * derives from the RESULT (request_id) or the job id's own dry/real prefix,
+ * never from the caller's arguments — a poll carries no arguments at all.
+ */
+function renderValidateOutcome(
+  outcome: Awaited<ReturnType<DeployEngine['validateDeploy']>>,
+  conn: ConnectionRecord,
+) {
+  const isDry = outcome.job_id.startsWith('vdry-');
+  switch (outcome.status) {
+    case 'in_progress':
+      return ok(
+        { job_id: outcome.job_id, progress: outcome.progress, started_at: outcome.started_at },
+        `Validation is still running — poll with {connection, job_id: "${outcome.job_id}"} ` +
+          '(or re-send the same full arguments, which attaches to this same job).',
+      );
+    case 'failed':
+      return fail(`Validation errored (job ${outcome.job_id}): ${outcome.error}`);
+    case 'complete': {
+      const r = outcome.result;
+      if (!r.validation_passed) {
+        return ok(
+          { ...(r.failure ?? {}), job_id: outcome.job_id },
+          isDry ? 'Dry run: validation FAILED.' : 'Validation FAILED — no confirmation code was issued.',
+        );
+      }
+      // Label from the RESULT, not the caller's args: a dry run is
+      // whatever the engine actually produced (request_id null), so a
+      // mislabel is impossible even if job attachment ever regresses.
+      if (r.summary?.request_id === null) {
+        return ok(
+          { ...r.summary, dry_run: true, job_id: outcome.job_id },
+          'DRY RUN passed — no approval request or code exists, and nothing can be ' +
+            'executed from this through Contrail. When the package is final, ' +
+            'validate again without dry_run to propose it for approval.',
+        );
+      }
+      return ok(
+        { ...r.summary, job_id: outcome.job_id, approval_page: r.approval },
+        `Validation passed. TARGET: ${conn.alias} (${conn.orgType}). ${APPROVAL_INSTRUCTIONS}`,
+      );
+    }
+  }
+}
 
 /**
  * Grammar/shape validation for a multi-step plan. Semantics (FLS, required
@@ -173,16 +220,23 @@ export const deployCapabilities: Capability[] = [
                   'ValidationRule / CustomLabel / ListView / RecordType / BotVersion ' +
                   '(dotted MyBot.v1). ' +
                   'Bundle types GenAiFunction / GenAiPlannerBundle / AiAuthoringBundle / ' +
-                  'LightningComponentBundle (one component = a directory of files) take a ' +
+                  'LightningComponentBundle / AuraDefinitionBundle (one component = a ' +
+                  'directory of files) take a ' +
                   'Contrail bundle ENVELOPE as content: JSON {"contrail_bundle":1, ' +
                   '"files": {"<relative path>": "<body>", ...}} — the file set ' +
                   "retrieve_metadata's bundle_files listing shows, main file included " +
                   '(e.g. "My_Fn.genAiFunction-meta.xml"). LightningComponentBundle (LWC) ' +
                   'requires <Name>.js + <Name>.js-meta.xml; .html/.css/.svg and ' +
                   'subdirectories (e.g. secondary templates) are normal, __tests__ and ' +
-                  'dot-files never deploy, and the org compiles on deploy. Refresh the ' +
+                  'dot-files never deploy, and the org compiles on deploy. ' +
+                  'AuraDefinitionBundle is FLAT (no subfolders), every file ' +
+                  '<Name>-prefixed, exactly ONE primary (<Name>.cmp|.app|.evt|.intf|' +
+                  '.tokens) plus its required <Name>.<kind>-meta.xml (pins apiVersion); ' +
+                  'secondaries are <Name>Controller/Helper/Renderer.js, .css, .design ' +
+                  '(.cmp only), .svg, .auradoc; namespace-free names only. Refresh the ' +
                   'snapshot before modifying an org-existing bundle — the whole directory ' +
-                  'is replaced. AiAuthoringBundle deploys as a DRAFT ' +
+                  'is replaced (files the envelope omits are DELETED org-side). ' +
+                  'AiAuthoringBundle deploys as a DRAFT ' +
                   'STAGE: exactly <Name>.agent (plaintext Agent Script) + ' +
                   '<Name>.bundle-meta.xml; nothing compiles and the running agent is ' +
                   'unchanged until a human publishes the draft. Agent publish/preview ' +
@@ -228,6 +282,15 @@ export const deployCapabilities: Capability[] = [
         .max(50)
         .optional()
         .describe('Components to DELETE. Deletions are destructive and flagged prominently.'),
+      allow_unregistered_delete: z
+        .boolean()
+        .optional()
+        .describe(
+          'Required true to delete a component of a type Contrail cannot read — such a ' +
+            'delete is BLIND (no content, no dependent listing) and the approval page ' +
+            'says so. Translation types are refused regardless (Setup / per-entry ' +
+            'Tooling are their routes).',
+        ),
       test_level: z
         .enum(['NoTestRun', 'RunLocalTests', 'RunSpecifiedTests', 'RunAllTestsInOrg'])
         .optional()
@@ -254,6 +317,16 @@ export const deployCapabilities: Capability[] = [
             'supersedes it). Use freely while iterating; the FINAL validate omits it ' +
             'so the human sees exactly one meaningful approval.',
         ),
+      job_id: z
+        .string()
+        .optional()
+        .describe(
+          'Poll a RUNNING validation by the job_id an earlier call returned — pass ' +
+            '{connection, job_id} ALONE; nothing is re-sent and no content_file is ' +
+            're-read. Jobs are keyed by their input, so a poll only ever returns the ' +
+            'result of the exact validation it names (re-sending identical full ' +
+            'arguments attaches to the same job too).',
+        ),
     },
     handler: (deps, rawArgs) =>
       guarded(async () => {
@@ -269,8 +342,38 @@ export const deployCapabilities: Capability[] = [
           test_level?: TestLevel;
           run_tests?: string[];
           dry_run?: boolean;
+          job_id?: string;
+          allow_unregistered_delete?: boolean;
         };
         const conn = requireConnection(deps, args.connection, 'validate_deploy');
+        if (args.job_id !== undefined) {
+          // STRICT: any other argument beside job_id is refused, not ignored —
+          // a silently dropped test_level/dry_run would let the caller believe
+          // an option applied to a job whose identity already fixed it.
+          if (
+            args.components?.length ||
+            args.destructive?.length ||
+            args.test_level !== undefined ||
+            args.run_tests !== undefined ||
+            args.dry_run !== undefined ||
+            args.allow_unregistered_delete !== undefined
+          ) {
+            return fail(
+              'Pass job_id ALONE to poll a running validation — or the full arguments ' +
+                '(without job_id) to start one. A poll cannot change the job\'s options: ' +
+                'they are part of its identity.',
+            );
+          }
+          const polled = await deps.deploys.pollValidate(conn, args.job_id);
+          if (!polled) {
+            return fail(
+              `No running or uncollected validation job "${args.job_id}" on "${conn.alias}" — ` +
+                'its result may already have been collected. Re-send the full arguments ' +
+                'to validate again.',
+            );
+          }
+          return renderValidateOutcome(polled, conn);
+        }
         // Resolve file-backed components to bytes BEFORE anything else: the
         // package is built and frozen from what we read here, so this is the
         // single point where "what will be deployed" is decided.
@@ -311,6 +414,15 @@ export const deployCapabilities: Capability[] = [
         if (args.test_level === 'RunSpecifiedTests' && !(args.run_tests?.length)) {
           return fail('RunSpecifiedTests requires run_tests.');
         }
+        // S41 (§3.14): production refuses an explicit NoTestRun org-side —
+        // refuse it HERE, with no org round trip and no supersede.
+        if (args.test_level === 'NoTestRun' && conn.orgType === 'production') {
+          return fail(
+            `test_level NoTestRun is refused locally on "${conn.alias}" (production): the ` +
+              'org rejects it org-side anyway. OMIT test_level — production then runs ' +
+              'local tests for Apex packages and no tests otherwise.',
+          );
+        }
         const outcome = await deps.deploys.validateDeploy(conn, {
           components,
           destructive,
@@ -320,43 +432,9 @@ export const deployCapabilities: Capability[] = [
           testLevel: args.test_level,
           runTests: args.run_tests ?? [],
           dryRun: args.dry_run === true,
+          allowUnregisteredDelete: args.allow_unregistered_delete === true,
         });
-        switch (outcome.status) {
-          case 'in_progress':
-            return ok(
-              { progress: outcome.progress, started_at: outcome.started_at },
-              'Validation is still running — call validate_deploy again with the same ' +
-                'connection AND the same arguments (including dry_run) to check on it.',
-            );
-          case 'failed':
-            return fail(`Validation errored: ${outcome.error}`);
-          case 'complete': {
-            const r = outcome.result;
-            if (!r.validation_passed) {
-              return ok(
-                r.failure ?? {},
-                args.dry_run === true
-                  ? 'Dry run: validation FAILED.'
-                  : 'Validation FAILED — no confirmation code was issued.',
-              );
-            }
-            // Label from the RESULT, not the caller's args: a dry run is
-            // whatever the engine actually produced (request_id null), so a
-            // mislabel is impossible even if job attachment ever regresses.
-            if (r.summary?.request_id === null) {
-              return ok(
-                { ...r.summary, dry_run: true },
-                'DRY RUN passed — no approval request or code exists, and nothing can be ' +
-                  'executed from this through Contrail. When the package is final, ' +
-                  'validate again without dry_run to propose it for approval.',
-              );
-            }
-            return ok(
-              { ...r.summary, approval_page: r.approval },
-              `Validation passed. TARGET: ${conn.alias} (${conn.orgType}). ${APPROVAL_INSTRUCTIONS}`,
-            );
-          }
-        }
+        return renderValidateOutcome(outcome, conn);
       }),
   },
   {
@@ -393,7 +471,7 @@ export const deployCapabilities: Capability[] = [
         switch (outcome.status) {
           case 'in_progress':
             return ok(
-              { progress: outcome.progress, started_at: outcome.started_at },
+              { job_id: outcome.job_id, progress: outcome.progress, started_at: outcome.started_at },
               'Still validating — call deactivate_flow again with the same flow to check on it.',
             );
           case 'failed':

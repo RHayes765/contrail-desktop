@@ -21,6 +21,7 @@ let db: ContrailDb;
 let deps: EngineDeps;
 let service: DeployService;
 let proposed: Array<{ kind: string; content: string }>;
+let polls: string[];
 let reviewRequests: number;
 /** The fake reviewer: verdict fixed, hash computed by the REAL module. */
 let nextVerdict: ReviewResult['verdict'];
@@ -86,6 +87,7 @@ beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'contrail-uc-'));
   db = new ContrailDb(path.join(tmp, 'test.db'));
   proposed = [];
+  polls = [];
   reviewRequests = 0;
   nextVerdict = 'concerns';
 
@@ -121,11 +123,24 @@ beforeEach(() => {
       proposed.push({ kind: 'deploy', content: JSON.stringify({ dryRun: true }) });
       return {
         status: 'complete',
+        // S41 (§3.1): the engine stamps every outcome with its input-keyed
+        // job id; the capability's rendering reads the dry/real prefix.
+        job_id: 'vdry-fake00000000',
         result: {
           summary: { request_id: null, expires_at: null },
           validation_passed: true,
           approval: null,
         },
+      };
+    },
+    pollValidate: async (_conn: unknown, jobId: string) => {
+      polls.push(jobId);
+      if (jobId !== 'val-known0000000') return null;
+      return {
+        status: 'in_progress',
+        job_id: jobId,
+        progress: 'validating with Salesforce (checkOnly)',
+        started_at: '2026-11-04T00:00:00.000Z',
       };
     },
   };
@@ -186,6 +201,31 @@ describe('the mandatory gate', () => {
     expect(dry.isError).toBeFalsy();
     expect(dry.content[0]!.text).toContain('DRY RUN passed');
     expect(proposed).toEqual([{ kind: 'deploy', content: JSON.stringify({ dryRun: true }) }]);
+  });
+
+  it('S41: a job_id-only poll passes the gate and sets no presentation expectation', async () => {
+    const run = makeRun(true, fakeReviewer());
+    // The poll re-sends no content: gating it would hash an empty component
+    // list and refuse every poll of a validation that already passed the
+    // gate when it started.
+    let expectations = 0;
+    const orig = service.expectPresentation.bind(service);
+    service.expectPresentation = ((...args: Parameters<DeployService['expectPresentation']>) => {
+      expectations += 1;
+      return orig(...args);
+    }) as DeployService['expectPresentation'];
+
+    const polled = await run.executeCapability('validate_deploy', {
+      connection: 'uc-org',
+      job_id: 'val-known0000000',
+    });
+    expect(polled.isError).toBeFalsy();
+    expect(polled.content[0]!.text).toContain('still running');
+    expect(polls).toEqual(['val-known0000000']);
+    // No new expectation: clobbering here would strip a pending REAL
+    // validate's session attribution and Ultracode review mid-flight.
+    expect(expectations).toBe(0);
+    expect(proposed).toHaveLength(0);
   });
 
   it('review → identical propose passes; ONE changed byte is refused again', async () => {

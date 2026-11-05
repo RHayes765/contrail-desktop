@@ -515,7 +515,18 @@ export class AgentSessionRun {
     // approvable — so the content-addressed review gate (which exists to
     // front-run PROPOSALS) does not apply. Mid-build checks stay cheap.
     const isDryRunValidate = name === 'validate_deploy' && a.dry_run === true;
-    if (this.spec.ultracode && ULTRACODE_GATED.has(name) && !isDryRunValidate) {
+    // S41: a job_id-only poll re-sends NO content — it collects a validation
+    // whose content already passed this gate when it was started. Gating it
+    // would hash an empty component list and refuse every poll; presenting
+    // it would clobber a real validate's pending attribution (below).
+    const isValidatePoll =
+      name === 'validate_deploy' && typeof a.job_id === 'string' && !Array.isArray(a.components);
+    if (
+      this.spec.ultracode &&
+      ULTRACODE_GATED.has(name) &&
+      !isDryRunValidate &&
+      !isValidatePoll
+    ) {
       const subject = gateSubjectFor(name, a);
       const hash = subject ? canonicalReviewHash(subject) : null;
       const review = hash ? this.reviews.get(hash) : undefined;
@@ -580,7 +591,9 @@ export class AgentSessionRun {
     // an expectation here would clobber a pending REAL validate's
     // attribution and Ultracode review while its presentation is still in
     // flight.
-    const presents = APPROVAL_PRESENTING.has(name) && !isDryRunValidate;
+    // S41: a job_id-only poll likewise presents nothing new — the started
+    // validation's own call set the expectation when it began.
+    const presents = APPROVAL_PRESENTING.has(name) && !isDryRunValidate && !isValidatePoll;
     if (presents && typeof a.connection === 'string') {
       this.deploysRef()?.expectPresentation(this.sessionId, a.connection, matchedReview);
     }

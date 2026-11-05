@@ -4,6 +4,7 @@ import type { ConnectionRecord } from '../core/types.js';
 import { ContrailError } from '../core/errors.js';
 import { RestClient, stripAttributes } from '../salesforce/rest.js';
 import { findChildBlock } from '../snapshot/indexer.js';
+import { AURA_DEFTYPE_FILES } from '../deploy/package.js';
 
 /**
  * Artifact content resolution — extracted verbatim from the Phase 0 MCP tool
@@ -49,7 +50,92 @@ const BUNDLE_TYPES = new Set([
   'AiAuthoringBundle',
   // S36
   'LightningComponentBundle',
+  // S41
+  'AuraDefinitionBundle',
 ]);
+
+/**
+ * S41: live Aura bundle read via the Tooling API — the Apex-bodies pattern.
+ * Serves bundles the snapshot lacks: installed-package bundles (wildcard
+ * retrieves exclude them, live-confirmed) and ns__Name managed members the
+ * deploy path refuses. Reads per-definition AuraDefinition.Source rows —
+ * NEVER AuraDefinitionBundle.Metadata, which returned a controller cut at
+ * 255 bytes (live-confirmed on OpenURL).
+ */
+async function fetchAuraLiveContent(
+  deps: ReadDeps,
+  conn: ConnectionRecord,
+  name: string,
+): Promise<ArtifactContent> {
+  const { tokenMgr, config } = deps;
+  const rest = new RestClient(tokenMgr, conn, config.salesforce.apiVersion);
+  // ns__Name = a namespaced (installed) bundle; local names cannot carry
+  // '__' (platform rule, enforced on deploy). Split at the FIRST '__' —
+  // namespace prefixes may contain single underscores (S17 lesson).
+  const m = /^(.+?)__(.+)$/.exec(name);
+  const dev = (m ? m[2]! : name).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  const nsFilter = m
+    ? `= '${m[1]!.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
+    : '= null';
+  const defs = await rest.toolingQuery<{ DefType: string; Source: string | null }>(
+    `SELECT DefType, Source FROM AuraDefinition WHERE ` +
+      `AuraDefinitionBundle.DeveloperName = '${dev}' AND ` +
+      `AuraDefinitionBundle.NamespacePrefix ${nsFilter}`,
+    50,
+  );
+  if (defs.length === 0) {
+    throw new ContrailError(
+      `AuraDefinitionBundle ${name} is in neither the local snapshot nor the org's ` +
+        `Tooling AuraDefinition rows on "${conn.alias}".`,
+      'artifact_not_found',
+    );
+  }
+  const bundles = await rest.toolingQuery<{ ApiVersion: number | null; Description: string | null }>(
+    `SELECT ApiVersion, Description FROM AuraDefinitionBundle WHERE DeveloperName = '${dev}' ` +
+      `AND NamespacePrefix ${nsFilter} LIMIT 1`,
+    1,
+  );
+  const files: Array<[string, string]> = defs.map((d) => [
+    `${name}${AURA_DEFTYPE_FILES[d.DefType] ?? `.${d.DefType.toLowerCase()}`}`,
+    d.Source ?? '',
+  ]);
+  const meta = bundles[0];
+  if (meta?.ApiVersion != null) {
+    const primary = files.find(([f]) => /\.(cmp|app|evt|intf|tokens)$/.test(f))?.[0];
+    if (primary) {
+      files.push([
+        `${primary}-meta.xml`,
+        `<?xml version="1.0" encoding="UTF-8"?>\n` +
+          `<AuraDefinitionBundle xmlns="http://soap.sforce.com/2006/04/metadata">\n` +
+          // Metadata-format metas read "59.0"; the Tooling JSON number prints
+          // "59" — format it, or every snapshot comparison grows a phantom
+          // apiVersion delta.
+          `    <apiVersion>${Number(meta.ApiVersion).toFixed(1)}</apiVersion>\n` +
+          (meta.Description
+            ? `    <description>${meta.Description.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</description>\n`
+            : '') +
+          `</AuraDefinitionBundle>\n`,
+      ]);
+    }
+  }
+  const hidden = files.some(([, body]) => body === '(hidden)');
+  const framed = files
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([rel, text]) => `<!-- contrail:file aura/${name}/${rel} -->\n${text}`)
+    .join('\n');
+  return {
+    body: framed,
+    source: 'tooling (live)',
+    note:
+      `Bundle read live from Tooling AuraDefinition rows (not in the local snapshot) — ` +
+      `every file concatenated under contrail:file headers, the snapshot index's own ` +
+      `framing, for side-by-side comparison against a snapshot copy. diff_artifact ` +
+      `itself is SNAPSHOT-ONLY and will not see this bundle until a refresh indexes ` +
+      `it. The meta file is REBUILT from the bundle's ApiVersion/Description ` +
+      `(AuraDefinition has no meta DefType).` +
+      (hidden ? ' Some sources returned "(hidden)" — a managed package conceals them.' : ''),
+  };
+}
 
 type ReadDeps = Pick<EngineDeps, 'db' | 'store' | 'tokenMgr' | 'config'>;
 
@@ -71,6 +157,11 @@ export async function fetchArtifactContent(
   if (BUNDLE_TYPES.has(type)) {
     const artifact = db.getArtifact(conn.id, type, name);
     if (!artifact?.filePath) {
+      // S41: Aura bundles the snapshot lacks (installed-package or ns__Name
+      // managed members) read live from Tooling — the Apex-bodies pattern.
+      if (type === 'AuraDefinitionBundle') {
+        return fetchAuraLiveContent(deps, conn, name);
+      }
       throw new ContrailError(
         `${type} ${name} is not in the local snapshot — run refresh_snapshot with ` +
           `types:["${type}"].`,

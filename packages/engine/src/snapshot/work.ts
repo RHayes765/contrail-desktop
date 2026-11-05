@@ -80,6 +80,8 @@ const TYPE_DIRS: Record<string, string> = {
   MutingPermissionSet: 'mutingpermissionsets',
   QuickAction: 'quickActions',
   LightningComponentBundle: 'lwc',
+  // S41: Aura component bundles.
+  AuraDefinitionBundle: 'aura',
 };
 
 /** The refreshed types' own directories — null if any requested type has no known mapping. */

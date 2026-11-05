@@ -199,8 +199,10 @@ export const metadataCapabilities: Capability[] = [
             'ValidationRule, CustomLabel, PermissionSet, CustomPermission, ' +
             'PermissionSetGroup, QuickAction (dotted Account.New_X for object actions), ' +
             'and any other indexed type. Bundle types (LightningComponentBundle, ' +
-            'GenAiFunction, …) return the main file plus a bundle_files listing of ' +
-            'every sibling with snapshot paths for direct reading.',
+            'AuraDefinitionBundle, GenAiFunction, …) return the main file plus a ' +
+            'bundle_files listing of every sibling with snapshot paths for direct ' +
+            'reading; an Aura bundle absent from the snapshot (installed-package or ' +
+            'ns__Name managed) reads LIVE from Tooling AuraDefinition rows instead.',
         ),
       names: z
         .array(z.string())
@@ -491,17 +493,38 @@ export const metadataCapabilities: Capability[] = [
         .boolean()
         .optional()
         .describe('Only compare org lastModifiedDate against the index; retrieve nothing.'),
+      job_id: z
+        .string()
+        .optional()
+        .describe(
+          'Poll a RUNNING refresh by the job_id an earlier call returned — pass ' +
+            '{connection, job_id} ALONE. Jobs are keyed by their requested type set, ' +
+            'so a poll only ever returns the refresh it names (re-sending the same ' +
+            'types attaches to the same job too).',
+        ),
     },
     handler: (deps, rawArgs) =>
       guarded(async () => {
-        const args = rawArgs as { connection: string; types?: string[]; check_only?: boolean };
+        const args = rawArgs as {
+          connection: string;
+          types?: string[];
+          check_only?: boolean;
+          job_id?: string;
+        };
         const conn = requireConnection(deps, args.connection, 'refresh_snapshot');
+        if (args.job_id !== undefined && (args.types !== undefined || args.check_only)) {
+          return fail('Pass job_id ALONE to poll a running refresh.');
+        }
         if (args.types?.some((t) => !TYPE_RE.test(t))) return fail('invalid metadata type');
         if (args.check_only) {
           const report = await deps.engine.checkStaleness(conn, args.types);
           return ok({ connection: conn.alias, ...report });
         }
-        const outcome = await deps.engine.refresh(conn, args.types);
+        const outcome = await deps.engine.refresh(
+          conn,
+          args.types,
+          args.job_id !== undefined ? { observeJobId: args.job_id } : undefined,
+        );
         switch (outcome.status) {
           case 'complete':
             return ok(outcome.summary, 'Snapshot refreshed.');
@@ -509,9 +532,10 @@ export const metadataCapabilities: Capability[] = [
             return fail(`Snapshot refresh failed: ${outcome.error}`);
           case 'in_progress':
             return ok(
-              outcome.state,
-              'Refresh is still running. Call refresh_snapshot again with the same ' +
-                'connection to check progress or collect the result.',
+              { job_id: outcome.state.jobId, ...outcome.state },
+              `Refresh is still running — poll with {connection, job_id: ` +
+                `"${outcome.state.jobId}"}, or re-send the same types (which attaches ` +
+                'to this same job).',
             );
           case 'locked':
             return fail(
@@ -519,8 +543,11 @@ export const metadataCapabilities: Capability[] = [
                 'Wait for it to finish and try again.',
             );
           case 'gone':
-            // Unreachable without observeJobId, but the switch stays total.
-            return fail('The refresh being observed has already been collected.');
+            return fail(
+              `No running or uncollected refresh job "${args.job_id ?? ''}" on ` +
+                `"${conn.alias}" — its result may already have been collected. ` +
+                'Re-send types to start a new refresh.',
+            );
         }
       }),
   },
