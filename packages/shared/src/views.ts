@@ -738,6 +738,26 @@ export interface ApiKeyValidationView {
   message: string;
 }
 
+/**
+ * S42: phone notifications for approvals. Keys are write-only across IPC —
+ * presence and a masked tail only, exactly like the API key.
+ */
+export interface NotificationSettingsView {
+  method: 'none' | 'pushover';
+  summary: 'minimal' | 'full';
+  /** Both Pushover keys are stored (does not prove they are valid — test does). */
+  configured: boolean;
+  userKeyHint: string | null;
+  appTokenHint: string | null;
+  storeError: string | null;
+}
+
+/** Outcome of the Settings "Send test notification" button; never contains a key. */
+export interface NotificationTestView {
+  ok: boolean;
+  message: string;
+}
+
 /** Rolling-window AI spend against the user's daily cap. */
 export interface BudgetStatusView {
   capUsd: number;

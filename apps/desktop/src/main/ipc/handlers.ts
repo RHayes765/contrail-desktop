@@ -13,6 +13,7 @@ import { DeployService } from '../services/deploys.js';
 import { ManifestService } from '../services/manifest.js';
 import { SettingsService } from '../services/settings.js';
 import { BudgetService } from '../services/budget.js';
+import { NotificationSettingsService } from '../services/notifications.js';
 
 /**
  * The complete handler map for the typed IPC registry. Handlers are thin:
@@ -34,12 +35,13 @@ export interface MainServices {
   manifest: ManifestService;
   settings: SettingsService;
   budget: BudgetService;
+  notifications: NotificationSettingsService;
   /** The window whose native dialogs (file picker) we parent. */
   getWindow: () => BrowserWindow | null;
 }
 
 export function makeHandlers(health: HealthView, services: MainServices) {
-  const { connections, projects, sessions, snapshots, metadata, diff, summaries, mcp, skills, deploys, manifest, settings, budget } =
+  const { connections, projects, sessions, snapshots, metadata, diff, summaries, mcp, skills, deploys, manifest, settings, budget, notifications } =
     services;
   return {
     'app:health': (deps: EngineDeps): HealthView => ({
@@ -266,5 +268,17 @@ export function makeHandlers(health: HealthView, services: MainServices) {
     'settings:budget': () => budget.status(),
     'settings:setBudgetCap': (_deps: EngineDeps, req: { capUsd: number }) =>
       budget.setDailyCapUsd(req.capUsd),
+    'settings:notifications': () => notifications.status(),
+    'settings:setNotifications': (
+      _deps: EngineDeps,
+      req: {
+        method: 'none' | 'pushover';
+        summary: 'minimal' | 'full';
+        pushoverUser?: string;
+        pushoverToken?: string;
+      },
+    ) => notifications.set(req),
+    'settings:clearNotifications': () => notifications.clear(),
+    'settings:testNotifications': () => notifications.test(),
   };
 }

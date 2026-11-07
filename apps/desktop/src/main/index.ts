@@ -18,6 +18,7 @@ import { DeployService, type DeployAlert } from './services/deploys.js';
 import { ManifestService } from './services/manifest.js';
 import { ReviewService } from './services/reviews.js';
 import { SettingsService } from './services/settings.js';
+import { NotificationSettingsService } from './services/notifications.js';
 import { BudgetService } from './services/budget.js';
 
 /**
@@ -1415,6 +1416,7 @@ ${logFilePath()}`,
     deploys: deployService,
     manifest: manifestService,
     settings: new SettingsService(boot.deps),
+    notifications: new NotificationSettingsService(boot.deps),
     budget,
     mcp: new McpConfigService(boot.deps, async (serverId, scopedProjectId) => {
       // External tools can't be gated per call — revocation ends the

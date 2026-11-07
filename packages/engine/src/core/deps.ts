@@ -1,7 +1,7 @@
 import { ContrailDb } from './db.js';
 import { KeychainTokenStore, type TokenStore } from './keychain.js';
 import { AuditLog } from './audit.js';
-import { loadConfig, type ContrailConfig } from './config.js';
+import { loadConfig, readConfigSection, type ContrailConfig } from './config.js';
 import { deploysDir } from './paths.js';
 import { ConnectFlowManager, type FlowOps } from '../connect/flow.js';
 import { AccessTokenManager } from '../salesforce/tokens.js';
@@ -12,6 +12,7 @@ import { DeployEngine } from '../deploy/engine.js';
 import type { ApprovalPresenter } from '../deploy/approval.js';
 import { createLocalDiagRunner } from '../localdiag/runner.js';
 import type { LocalDiagRunner } from '../localdiag/types.js';
+import { PushoverNotifier, type ApprovalNotifier } from './notify.js';
 import { dataDir } from './paths.js';
 import path from 'node:path';
 
@@ -40,6 +41,12 @@ export interface EngineDeps {
    * vendorDir() (plain node).
    */
   localDiag: LocalDiagRunner;
+  /**
+   * S42: phone delivery of approval codes. ONE instance shared by the deploy
+   * engine (which fires it at mint time) and the host's Settings surface
+   * (which reads its status, tests it, and resets its circuit breaker).
+   */
+  notifier: ApprovalNotifier;
 }
 
 /** Injection seams. Every field optional; defaults reproduce production wiring. */
@@ -54,6 +61,8 @@ export interface EngineOverrides {
   /** CPU-work seam for the snapshot pipeline (desktop: worker process). */
   snapshotWork?: SnapshotWorkUnits;
   localDiag?: LocalDiagRunner;
+  /** S42: tests inject a fake; the default is the real Pushover client. */
+  notifier?: ApprovalNotifier;
 }
 
 export function createEngineDeps(overrides?: EngineOverrides): EngineDeps {
@@ -68,6 +77,14 @@ export function createEngineDeps(overrides?: EngineOverrides): EngineDeps {
   const deploys = new DeployEngine(db, store, tokenMgr, config, audit, overrides?.approvals, {
     deploysDir: overrides?.deploysDir ?? deploysDir(),
   });
+  // An injected config object is authoritative (tests); the loaded one is
+  // re-synced from disk per send so a change saved on the plugin's page lands.
+  const notifier =
+    overrides?.notifier ??
+    new PushoverNotifier(config, tokens, fetch, () =>
+      overrides?.config ? null : readConfigSection('notifications'),
+    );
+  deploys.setApprovalNotifier(notifier);
   const localDiag =
     overrides?.localDiag ??
     createLocalDiagRunner({
@@ -76,5 +93,5 @@ export function createEngineDeps(overrides?: EngineOverrides): EngineDeps {
       timeoutMs: config.localDiagnostics.timeoutMs,
       workspaceRoot: path.join(dataDir(), 'localdiag-workspace'),
     });
-  return { db, tokens, audit, config, flows, tokenMgr, store, engine, deploys, localDiag };
+  return { db, tokens, audit, config, flows, tokenMgr, store, engine, deploys, localDiag, notifier };
 }

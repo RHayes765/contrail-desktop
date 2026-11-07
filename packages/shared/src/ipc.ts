@@ -19,6 +19,8 @@ import type {
   GrantSetView,
   HealthView,
   MetadataTypeCountView,
+  NotificationSettingsView,
+  NotificationTestView,
   OrgLimitsView,
   PingResultView,
   ProjectDocView,
@@ -223,6 +225,16 @@ export const REQUEST_SCHEMAS = {
   'settings:clearKey': z.object({}),
   'settings:budget': z.object({}),
   'settings:setBudgetCap': z.object({ capUsd: z.number().min(0).max(1000) }),
+  // S42: phone notifications. Keys travel renderer→main ONLY; blank = keep.
+  'settings:notifications': z.object({}),
+  'settings:setNotifications': z.object({
+    method: z.enum(['none', 'pushover']),
+    summary: z.enum(['minimal', 'full']),
+    pushoverUser: z.string().max(64).optional(),
+    pushoverToken: z.string().max(64).optional(),
+  }),
+  'settings:clearNotifications': z.object({}),
+  'settings:testNotifications': z.object({}),
 } as const;
 
 export type Channel = keyof typeof REQUEST_SCHEMAS;
@@ -406,6 +418,18 @@ export interface Contracts {
   'settings:clearKey': { req: Record<string, never>; res: ApiKeyStatusView };
   'settings:budget': { req: Record<string, never>; res: BudgetStatusView };
   'settings:setBudgetCap': { req: { capUsd: number }; res: BudgetStatusView };
+  'settings:notifications': { req: Record<string, never>; res: NotificationSettingsView };
+  'settings:setNotifications': {
+    req: {
+      method: 'none' | 'pushover';
+      summary: 'minimal' | 'full';
+      pushoverUser?: string;
+      pushoverToken?: string;
+    };
+    res: NotificationSettingsView;
+  };
+  'settings:clearNotifications': { req: Record<string, never>; res: NotificationSettingsView };
+  'settings:testNotifications': { req: Record<string, never>; res: NotificationTestView };
 }
 
 // Compile-time check: every contract has a schema and vice versa.

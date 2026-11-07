@@ -33,8 +33,30 @@ export {
 export { ContrailDb } from './core/db.js';
 export { KeychainTokenStore, MemoryTokenStore, type TokenStore } from './core/keychain.js';
 export { AuditLog } from './core/audit.js';
-export { loadConfig, type ContrailConfig } from './core/config.js';
+export {
+  DEFAULT_CONFIG,
+  loadConfig,
+  saveConfigSection,
+  readConfigSection,
+  type ContrailConfig,
+} from './core/config.js';
 export { getUpdateNotice, refreshUpdateCache, isNewerVersion, type UpdateNotice } from './core/updateCheck.js';
+export {
+  NOTIFY_ACCOUNTS,
+  PUSHOVER_KEY_RE,
+  PushoverNotifier,
+  NullNotifier,
+  composePushover,
+  describePhoneOutcome,
+  type ApprovalNotifier,
+  type NotifierStatus,
+  type NotifyOutcome,
+  type NotifyFailure,
+  type NotifyMethod,
+  type NotifySummary,
+  type NotificationsConfig,
+  type PhoneNotification,
+} from './core/notify.js';
 export { dataDir, dbPath, configPath, deploysDir } from './core/paths.js';
 export { ContrailError, ConnectionNotFoundError } from './core/errors.js';
 export {

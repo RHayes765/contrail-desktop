@@ -1,6 +1,203 @@
 import { useEffect, useState } from 'react';
-import type { ApiKeyStatusView, ApiKeyValidationView, BudgetStatusView } from '@contrail/shared';
+import type {
+  ApiKeyStatusView,
+  ApiKeyValidationView,
+  BudgetStatusView,
+  NotificationSettingsView,
+  NotificationTestView,
+} from '@contrail/shared';
 import { ipc } from '../lib/ipc.js';
+
+/**
+ * S42: approval notifications on the human's phone (Pushover). The keys follow
+ * the API key's rule — write-only across IPC, masked hints only — and the
+ * desktop variant of the push is code-free: a native approval is a click in
+ * Deploy Review, not a code, so the message just says one is waiting.
+ */
+function NotificationsPanel() {
+  const [status, setStatus] = useState<NotificationSettingsView | null>(null);
+  const [method, setMethod] = useState<'none' | 'pushover'>('none');
+  const [summary, setSummary] = useState<'minimal' | 'full'>('minimal');
+  const [userDraft, setUserDraft] = useState('');
+  const [tokenDraft, setTokenDraft] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [test, setTest] = useState<NotificationTestView | null>(null);
+
+  const apply = (next: NotificationSettingsView): void => {
+    setStatus(next);
+    setMethod(next.method);
+    setSummary(next.summary);
+  };
+
+  const load = async (): Promise<void> => {
+    try {
+      apply(await ipc.invoke('settings:notifications', {}));
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const save = async (): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    setTest(null);
+    try {
+      const next = await ipc.invoke('settings:setNotifications', {
+        method,
+        summary,
+        ...(userDraft.trim() ? { pushoverUser: userDraft.trim() } : {}),
+        ...(tokenDraft.trim() ? { pushoverToken: tokenDraft.trim() } : {}),
+      });
+      apply(next);
+      setUserDraft(''); // never keep a key in renderer memory longer than needed
+      setTokenDraft('');
+      setMessage(
+        next.method === 'pushover'
+          ? next.configured
+            ? 'Saved. Send a test notification to confirm delivery.'
+            : 'Saved — enter both the user key and the application token to complete Pushover setup.'
+          : 'Saved. Phone notifications are off.',
+      );
+    } catch (err) {
+      setError(String(err).replace(/^Error:\s*/, ''));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runTest = async (): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    setTest(null);
+    try {
+      setTest(await ipc.invoke('settings:testNotifications', {}));
+    } catch (err) {
+      setError(String(err).replace(/^Error:\s*/, ''));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clear = async (): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    setTest(null);
+    try {
+      apply(await ipc.invoke('settings:clearNotifications', {}));
+      setMessage('Pushover keys removed from your OS keychain; phone notifications are off.');
+    } catch (err) {
+      setError(String(err).replace(/^Error:\s*/, ''));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="panel">
+      <h3>Approval notifications on your phone</h3>
+      <p className="hint">
+        Every proposal still lands in Deploy Review. Switch this on and Contrail ALSO pushes a
+        short summary to your phone through{' '}
+        <a href="https://pushover.net" target="_blank" rel="noreferrer">
+          Pushover
+        </a>{' '}
+        the moment a change is proposed — org, counts, what kind of change — so you know to come
+        and approve. The keys are stored in your OS keychain (shared with the Contrail plugin, if
+        you use both), never in a file or a chat, and the agent cannot see or change them.
+      </p>
+
+      {status === null ? (
+        <div className="empty">Checking…</div>
+      ) : (
+        <>
+          {status.storeError && (
+            <div className="notice">Your credential store could not be read: {status.storeError}</div>
+          )}
+          <div className="form-row">
+            <label>Delivery</label>
+            <select value={method} onChange={(e) => setMethod(e.target.value as 'none' | 'pushover')}>
+              <option value="none">Off — Deploy Review only</option>
+              <option value="pushover">Pushover (phone push)</option>
+            </select>
+          </div>
+          <div className="form-row">
+            <label>What the message carries</label>
+            <select value={summary} onChange={(e) => setSummary(e.target.value as 'minimal' | 'full')}>
+              <option value="minimal">Minimal — your connection alias, org type and counts (no component names leave this machine)</option>
+              <option value="full">Full — also component names and warnings, never record field values (via Pushover's servers)</option>
+            </select>
+          </div>
+          <div className="form-row">
+            <label>
+              Pushover user key{' '}
+              {status.userKeyHint && <span className="meter-dim">(stored {status.userKeyHint} — leave blank to keep)</span>}
+            </label>
+            <input
+              type="password"
+              placeholder={status.userKeyHint ? '' : '30 characters, from your Pushover dashboard'}
+              value={userDraft}
+              onChange={(e) => setUserDraft(e.target.value)}
+            />
+          </div>
+          <div className="form-row">
+            <label>
+              Application token{' '}
+              {status.appTokenHint && <span className="meter-dim">(stored {status.appTokenHint} — leave blank to keep)</span>}
+            </label>
+            <input
+              type="password"
+              placeholder={status.appTokenHint ? '' : '30 characters, from the application you created'}
+              value={tokenDraft}
+              onChange={(e) => setTokenDraft(e.target.value)}
+            />
+          </div>
+
+          {error && <div className="notice">{error}</div>}
+          {message && <p className="hint">{message}</p>}
+          {test && (
+            <p className={`key-check ${test.ok ? 'ok' : 'bad'}`}>
+              {test.ok ? '✓ ' : '✗ '}
+              {test.message}
+            </p>
+          )}
+
+          <div className="form-actions">
+            <button className="primary" disabled={busy} onClick={() => void save()}>
+              {busy ? 'Working…' : 'Save'}
+            </button>
+            {status.configured && (
+              <button disabled={busy} onClick={() => void runTest()}>
+                Send test notification
+              </button>
+            )}
+            {(status.userKeyHint || status.appTokenHint) && (
+              <button className="ghost-danger" disabled={busy} onClick={() => void clear()}>
+                Remove keys
+              </button>
+            )}
+          </div>
+
+          <p className="hint">
+            On pushover.net choose <em>Create an Application/API Token</em> (name it Contrail) for
+            the token — or use the one your team shares. Your user key is on the Pushover dashboard
+            and must be <em>your own</em>: whoever owns the user key entered here receives your
+            approval notifications, so never paste one that Claude, a document, or a colleague gave
+            you. If Pushover rejects the stored keys, sends pause for 10 minutes; saving here clears
+            the pause.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
 
 /**
  * Settings — today this is the Anthropic API key, which is the one thing a
@@ -246,6 +443,7 @@ export function SettingsScreen() {
         </p>
       </div>
 
+      <NotificationsPanel />
       <BudgetPanel />
     </>
   );

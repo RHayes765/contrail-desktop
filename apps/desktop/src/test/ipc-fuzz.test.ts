@@ -113,5 +113,14 @@ describe('representative typed-field enforcement', () => {
       summarize.safeParse({ connectionId: 'c', type: 'NotAType', apiName: 'X' }).success,
       'a bogus metadata type must be refused',
     ).toBe(false);
+
+    // S42: the notification method/summary are closed enums and the keys are
+    // bounded — the executor never sees a free-form destination.
+    const notif = REQUEST_SCHEMAS['settings:setNotifications'] as z.ZodTypeAny;
+    expect(notif.safeParse({ method: 'email', summary: 'minimal' }).success).toBe(false);
+    expect(notif.safeParse({ method: 'pushover', summary: 'everything' }).success).toBe(false);
+    expect(notif.safeParse({ method: 'pushover', summary: 'minimal', pushoverUser: 'x'.repeat(65) }).success).toBe(false);
+    expect(notif.safeParse({ method: 'pushover', summary: 'full', pushoverUser: 'u'.repeat(30) }).success).toBe(true);
+    expect(notif.safeParse({ method: 'none', summary: 'minimal' }).success).toBe(true);
   });
 });

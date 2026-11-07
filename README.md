@@ -13,7 +13,8 @@ whose only input is a test definition the human already approved).
 >
 > **📖 The full tool & feature reference lives in the engine repo:
 > [contrail-plugin/TOOLS.md](https://github.com/RHayes765/contrail-plugin/blob/main/TOOLS.md)**
-> — same 38 capabilities in both surfaces, desktop differences noted there.
+> — the same engine and capabilities in both surfaces (the plugin's 39th tool,
+> `open_settings`, is a native Settings screen here), desktop differences noted there.
 
 ## Why it exists
 
@@ -52,6 +53,11 @@ tools. The engine owns Salesforce; MCP is a surface, not the substrate.
   verbatim), and Bulk API 2.0 CSV data loads (files frozen at propose, rows
   never entering the conversation). The agent can validate and request; only
   a human clicking Approve in the Deploy Review screen can execute.
+- **Phone notifications (opt-in)** — Settings → Notifications pushes a short
+  code-free "waiting in Deploy Review" summary to your phone through Pushover
+  the moment a change is proposed. Keys live in the OS keychain (shared with
+  the companion plugin, whose pushes carry the code because its approval is a
+  typed code); the agent cannot see or change them.
 - **Org intelligence** — drift reports (live org vs your snapshot),
   SetupAuditTrail reading, effective-access explanations (CRUD/FLS with
   attribution), standalone Apex test runs, trace flags and debug logs, and
@@ -114,15 +120,21 @@ pnpm -C apps/desktop dev
 ```
 
 Store your API key in the OS keychain under service `Contrail Desktop`,
-account `anthropic-api-key`. Connect an org from the **SF Orgs** screen; create
-a project, bind the org, and start a session.
+account `anthropic-api-key` (Pushover keys, if you set them, go under the
+engine's service `contrail-engine`, accounts `notify:pushover:user` /
+`notify:pushover:token` — the Settings screen does this for you). Connect an
+org from the **SF Orgs** screen; create a project, bind the org, and start a
+session.
 
 Application data (SQLite database, metadata snapshots, transcripts) lives in
 `%USERPROFILE%\.contrail` on Windows and the platform equivalent elsewhere,
 shared with the companion Claude plugin (additive-only schema, so either can
 run without the other).
-Nothing is uploaded anywhere: network egress is exactly your Salesforce orgs,
-the Anthropic API, and whatever external MCP connectors you enable.
+Nothing leaves this machine except traffic to: your Salesforce orgs, the
+Anthropic API, whatever external MCP connectors you enable, GitHub Releases
+(the daily release check and the auto-update download), and — only if you
+switch it on — Pushover (one message per proposed change, plus a key check
+and a test message when you press "Send test notification").
 
 ## Tests
 
