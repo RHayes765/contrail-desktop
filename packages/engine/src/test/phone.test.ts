@@ -39,7 +39,7 @@ class RecordingNotifier implements ApprovalNotifier {
     return { ok: true, message: 'ok' };
   }
   status() {
-    return { method: 'pushover' as const, configured: true };
+    return { method: 'pushover' as const, when: 'always' as const, configured: true };
   }
   resetCircuit() {}
 }

@@ -109,8 +109,8 @@ describe('where the settings land', () => {
 
   it('method/summary → config.json on disk AND the live config object; the circuit resets', () => {
     svc.set({ method: 'pushover', summary: 'full' });
-    expect(config.notifications).toEqual({ method: 'pushover', summary: 'full' });
-    expect(loadConfig().notifications).toEqual({ method: 'pushover', summary: 'full' });
+    expect(config.notifications).toEqual({ method: 'pushover', summary: 'full', when: 'remote_control' });
+    expect(loadConfig().notifications).toEqual({ method: 'pushover', summary: 'full', when: 'remote_control' });
     expect(notifier.resets).toBe(1);
   });
 

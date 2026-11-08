@@ -57,7 +57,10 @@ tools. The engine owns Salesforce; MCP is a surface, not the substrate.
   code-free "waiting in Deploy Review" summary to your phone through Pushover
   the moment a change is proposed. Keys live in the OS keychain (shared with
   the companion plugin, whose pushes carry the code because its approval is a
-  typed code); the agent cannot see or change them.
+  typed code); the agent cannot see or change them. The plugin's
+  `notifications.when` setting (push only while a Claude Code session has
+  Remote Control on) is a Claude Code concept and does not apply here: the
+  app's push is a pager for its own Deploy Review screen.
 - **Org intelligence** — drift reports (live org vs your snapshot),
   SetupAuditTrail reading, effective-access explanations (CRUD/FLS with
   attribution), standalone Apex test runs, trace flags and debug logs, and
