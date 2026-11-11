@@ -3,7 +3,7 @@
 An AI harness built for Salesforce work: a local-first desktop app where an
 embedded Claude agent operates against your orgs through a first-party
 Salesforce engine — with grants, project isolation, and human approval for
-every write (one disclosed carve-out: starting an agent evaluation run,
+every write (one disclosed carve-out: starting an agent test run,
 whose only input is a test definition the human already approved).
 
 > **Status: released and self-updating.** Installers ship on
@@ -65,9 +65,10 @@ tools. The engine owns Salesforce; MCP is a surface, not the substrate.
   SetupAuditTrail reading, effective-access explanations (CRUD/FLS with
   attribution), standalone Apex test runs, trace flags and debug logs, and
   free offline Apex/SOQL pre-checks via vendored Salesforce language servers.
-- **Skills** — the bundled Salesforce skill pack (house rules, Apex/object/
-  field/permission-set/validation-rule authoring, data migration) plus custom
-  skill uploads, toggleable per project.
+- **Skills** — the bundled Salesforce skill pack (house rules,
+  Apex/object/field/permission-set/validation-rule authoring, data migration,
+  the Agentforce agent and agent-test family) plus custom skill uploads,
+  toggleable per project.
 - **Linked folders** — attach local folders to a project; the agent sees
   their live contents (and bulk loads read CSVs from them by name).
 

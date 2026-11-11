@@ -207,7 +207,15 @@ export const deployCapabilities: Capability[] = [
                   'ACTIVE agent needs the human to deactivate it first), ' +
                   'GenAiPromptTemplate (activeVersionIdentifier is org-generated: ' +
                   'retrieve-first, never hand-type it), GenAiPromptTemplateActv, ' +
-                  'AiEvaluationDefinition (Testing Center test definitions), BotTemplate, ' +
+                  'AiEvaluationDefinition (legacy Testing Center test definitions), ' +
+                  'AiTestingDefinition (Agentforce Studio Tests-tab suites — Salesforce marks ' +
+                  'the type and its runner BETA; a deploy stores the suite and runs nothing — ' +
+                  'run_agent_eval runs it (on the org probed a deployed suite appeared in the Tests ' +
+                  'tab only after its first run); a modify replaces the whole ' +
+                  'suite), AiAgentScorerDefinition (custom scorers; versions are APPEND-ONLY ' +
+                  'org-side — retrieve-first and carry every version forward; a ' +
+                  'GenAiPromptTemplate it engines on may ship in the same package — ' +
+                  'package.xml lists the template first), BotTemplate, ' +
                   'BotBlock, CustomPermission (pairs with a customPermissions grant on a ' +
                   'permission set — ungranted it does nothing), PermissionSetGroup ' +
                   '(members DETACH if omitted on modify; the org recalculates grants ' +
@@ -241,8 +249,8 @@ export const deployCapabilities: Capability[] = [
                   '<Name>.bundle-meta.xml; nothing compiles and the running agent is ' +
                   'unchanged until a human publishes the draft. Agent publish/preview ' +
                   'stay human; activate/deactivate goes through ' +
-                  'agent_activation_propose/execute (its own ritual), and eval runs ' +
-                  'through run_agent_eval.',
+                  'agent_activation_propose/execute (its own ritual), and agent test runs ' +
+                  '(Testing Center or Studio) through run_agent_eval.',
               ),
             api_name: z.string().describe('Full API name; children dotted (Account.MyField__c).'),
             content: z

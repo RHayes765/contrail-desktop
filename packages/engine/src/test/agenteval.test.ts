@@ -24,7 +24,47 @@ let submitPosts: Array<Record<string, unknown>>;
 let runStatus: Record<string, unknown>;
 let runResults: Record<string, unknown>;
 
+/**
+ * S44: a bare `eval` is routed by ONE live listMetadata probe across both
+ * test-definition types (needs metadata_read). This harness answers that
+ * probe with the legacy inventory — every name this suite submits lives
+ * under AiEvaluationDefinition — so each test still reaches the Testing
+ * Center POST it was written against (orgchanges.test.ts pattern).
+ */
+let orgInventory: Array<{ type: string; fullName: string }>;
+
 const RUN_ID = '4KB000000000001AAA';
+
+function soapEnvelope(inner: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+<soapenv:Body>${inner}</soapenv:Body></soapenv:Envelope>`;
+}
+
+function soapListMetadata(init?: RequestInit): Response {
+  const body = String(init?.body ?? '');
+  if (!body.includes('<met:listMetadata>')) {
+    return new Response('unexpected SOAP body', { status: 500 });
+  }
+  // Honour the per-call type queries — listMetadata chunks by 3.
+  const requested = new Set(
+    [...body.matchAll(/<met:type>([^<]+)<\/met:type>/g)].map((m) => m[1]!),
+  );
+  const items = orgInventory.filter((i) => requested.has(i.type));
+  return new Response(
+    soapEnvelope(
+      `<listMetadataResponse xmlns="http://soap.sforce.com/2006/04/metadata">
+         ${items
+           .map(
+             (i) =>
+               `<result><fullName>${i.fullName}</fullName><type>${i.type}</type>` +
+               `<fileName>x</fileName><id>1</id></result>`,
+           )
+           .join('\n')}
+       </listMetadataResponse>`,
+    ),
+  );
+}
 
 function stubSalesforce(): void {
   vi.stubGlobal('fetch', async (input: string | URL, init?: RequestInit) => {
@@ -40,6 +80,7 @@ function stubSalesforce(): void {
         }),
       );
     }
+    if (url.includes('/services/Soap/m/')) return soapListMetadata(init);
     if (url.endsWith('/einstein/ai-evaluations/runs') && method === 'POST') {
       submitPosts.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>);
       return new Response(JSON.stringify({ runId: RUN_ID, status: 'NEW' }));
@@ -68,6 +109,7 @@ beforeEach(() => {
   submitPosts = [];
   runStatus = { status: 'IN_PROGRESS' };
   runResults = {};
+  orgInventory = [{ type: 'AiEvaluationDefinition', fullName: 'Order_Agent_Smoke' }];
 
   const tokens = new MemoryTokenStore();
   const diagOnly = emptyGrantSet();
@@ -90,6 +132,8 @@ beforeEach(() => {
   full.diagnostics_read = true;
   full.data_read = true;
   full.data_write = true;
+  // S44: runner detection for a bare eval is a Metadata-API read.
+  full.metadata_read = true;
   const fullConn = db.insertConnection({
     alias: 'eval-org',
     instanceUrl: 'https://eval.stub.salesforce.com',

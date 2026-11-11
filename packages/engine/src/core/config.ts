@@ -162,7 +162,8 @@ export const DEFAULT_CONFIG: ContrailConfig = {
     // their folders) are likewise explicit-refresh-only. S30: so are the
     // Agentforce types (Bot, GenAiPlugin, GenAiFunction, GenAiPlannerBundle,
     // AiAuthoringBundle, GenAiPromptTemplate[Actv], AiEvaluationDefinition,
-    // BotTemplate, BotBlock) — licensing-gated (unlicensed orgs report them
+    // BotTemplate, BotBlock — and, S44, AiTestingDefinition and
+    // AiAgentScorerDefinition) — licensing-gated (unlicensed orgs report them
     // unsupported, degraded per-type with a warning) and need
     // salesforce.apiVersion v66+.
     types: [
