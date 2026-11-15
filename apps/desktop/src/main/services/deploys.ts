@@ -1,14 +1,38 @@
 import fs from 'node:fs';
 import {
   ContrailError,
+  hhmm,
   type ApprovalPresentation,
   type ApprovalPresenter,
   type ApprovalRequestView,
+  type ApprovalRowDiff,
+  type ComponentPreImage,
+  type DeployMovedMember,
   type DeployRequestKind,
   type DeployRequestRecord,
   type EngineDeps,
+  type LiveCheckSummary,
+  type RevertPlanComponent,
+  type RevertPlanMember,
+  type RevertPlanReason,
 } from '@contrail/engine';
-import type { ChatEvent, DeployRequestView, PushChannel, PushEvents } from '@contrail/shared';
+import type {
+  ChatEvent,
+  DeployLiveCheckView,
+  DeployPreImageView,
+  DeployRequestView,
+  DeployReviewRowView,
+  DeployRevertPackageView,
+  DeployRowDiffView,
+  DeployTargetCheckView,
+  DeployTargetMemberView,
+  DeployTargetMovedView,
+  ObjectAutomationView,
+  PushChannel,
+  PushEvents,
+  SemanticChangeView,
+  TextHunkView,
+} from '@contrail/shared';
 
 /**
  * Native deploy approval (spec §M5). The engine's claim machinery — code
@@ -70,6 +94,195 @@ function refusal(text: string): {
   return { content: [{ type: 'text', text }], isError: true };
 }
 
+type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
+
+/** The agent's text for an approved request whose execution failed. */
+function executionFailedText(kind: DeployRequestKind, detail: unknown): string {
+  return (
+    `The user approved this ${kind}, but execution failed:\n` +
+    JSON.stringify(detail, null, 2).slice(0, 3000)
+  );
+}
+
+/**
+ * S45 F2: ONE text for "approved, but the target moved". The held call
+ * (approve) and the decided-before-execute replay (interceptAgentExecute)
+ * both use it, so the two surfaces cannot drift. `engineRefusal` is the
+ * engine's verbatim refusal — member names, who and when, never a code.
+ */
+export function targetMovedRefusal(kind: DeployRequestKind, engineRefusal: string): string {
+  return (
+    `The user approved this ${kind}, but Contrail did NOT execute it — the target changed in ` +
+    `the org after validation:\n` +
+    engineRefusal
+  );
+}
+
+/**
+ * The refusal of a target-moved result (the call's own, or the one stored
+ * on the voided row) — null for anything else.
+ */
+function movedRefusalOf(result: unknown): string | null {
+  if (!result || typeof result !== 'object') return null;
+  const r = result as Record<string, unknown>;
+  if (r.target_moved !== true) return null;
+  return typeof r.refusal === 'string' && r.refusal
+    ? r.refusal
+    : 'TARGET MOVED — not executed, and this code is now void (the engine recorded no ' +
+        'further detail). Re-validate to see the current state of the org and get a fresh code.';
+}
+
+/**
+ * What the agent is told about a request the human already approved, when
+ * its codeless execute arrives after the decision. An EXPLICIT switch on
+ * the row's status, the same for every kind: only an 'executed' row whose
+ * result did not fail reports "executed" — a voided, superseded, expired or
+ * locked row did not run, whatever the desktop decision says.
+ */
+function replayApproved(kind: DeployRequestKind, status: string, result: unknown): ToolResult {
+  switch (status) {
+    case 'executed':
+      return outcomeFailed(result)
+        ? refusal(executionFailedText(kind, result))
+        : okJson({ approved: true, outcome: 'executed', detail: result });
+    case 'execution_failed':
+      return refusal(executionFailedText(kind, result));
+    case 'superseded': {
+      const moved = movedRefusalOf(result);
+      if (moved !== null) return refusal(targetMovedRefusal(kind, moved));
+      break;
+    }
+  }
+  return refusal(notExecutedText(kind, status));
+}
+
+/**
+ * An approved request that did not run and is now superseded, expired or
+ * locked. ONE text for the replay and approve()'s live held call, so the
+ * agent hears the same account of the same row from both.
+ */
+function notExecutedText(kind: DeployRequestKind, status: string): string {
+  return (
+    `The user approved this ${kind}, but it did not execute — the request is now ${status}. ` +
+    'Re-validate for a fresh code.'
+  );
+}
+
+/**
+ * The agent's text for a request this session's codeless execute cannot be
+ * held on (nothing is pending): the human's decision replayed, or — for a
+ * request nobody decided in Deploy Review — that it did not execute. null
+ * means the engine answers for itself.
+ */
+function replayRow(kind: DeployRequestKind, row: DeployRequestRecord): ToolResult | null {
+  if (row.desktopState !== 'approved' && row.desktopState !== 'rejected') {
+    // Never decided in Deploy Review. Expired or superseded: say so — it did
+    // not execute. Anything else (e.g. executed with a code the human typed
+    // elsewhere) is the engine's to answer.
+    return row.status === 'expired' || row.status === 'superseded'
+      ? refusal(neverApprovedText(kind, row.status))
+      : null;
+  }
+  if (row.desktopState === 'rejected') {
+    return refusal(
+      `The user REJECTED this ${kind}${row.approvedComment ? ` — reason: ${row.approvedComment}` : ''}. ` +
+        'Do not retry it as-is; ask the user what should change.',
+    );
+  }
+  if (row.status === 'executing') {
+    return okJson({
+      status: 'executing',
+      request_id: row.id,
+      note: 'The user approved it and execution is running. Call again shortly for the outcome.',
+    });
+  }
+  // S45 F2: an explicit status switch — a target-moved void (or any other
+  // non-executed status) must never replay as "executed".
+  const result = row.resultJson ? parseJson(row.resultJson) : null;
+  return replayApproved(kind, row.status, result);
+}
+
+/** A request the human never decided, now expired or superseded: it did not run. */
+function neverApprovedText(kind: DeployRequestKind, status: string): string {
+  return (
+    `Your latest ${kind} request was never approved in Deploy Review and did not execute — it ` +
+    `is now ${status}. ${kind === 'deploy' ? 'Validate' : 'Propose'} again for a fresh request.`
+  );
+}
+
+/**
+ * The hold timer's answer when the held request left 'validated' while the
+ * call waited (a lapse past expires_at arrives as 'expired'). A Deploy Review
+ * decision replays as usual. Undecided, it says what the row is now — never
+ * "stays valid" — and while a NEWER request of this (connection, kind) awaits
+ * the user (the validation that superseded this one, say) it points the agent
+ * there instead of "validate again", which would supersede the request the
+ * human may be reviewing.
+ */
+function lapsedHoldAnswer(
+  kind: DeployRequestKind,
+  row: DeployRequestRecord,
+  awaiting: DeployRequestRecord | null,
+): ToolResult {
+  if (row.desktopState === 'approved' || row.desktopState === 'rejected') {
+    return replayRow(kind, row) ?? refusal(notExecutedText(kind, row.status));
+  }
+  const result = row.resultJson ? parseJson(row.resultJson) : null;
+  const elsewhere = 'with a confirmation code entered outside Deploy Review';
+  if (row.status === 'executing') {
+    return okJson({
+      status: 'executing',
+      request_id: row.id,
+      note: `This ${kind} is executing ${elsewhere}, not by this call — do not execute it again.`,
+    });
+  }
+  if (row.status === 'executed' && !outcomeFailed(result)) {
+    return okJson({
+      status: 'executed',
+      request_id: row.id,
+      note: `This ${kind} was executed ${elsewhere} while this call waited — do not execute it again.`,
+      detail: result,
+    });
+  }
+  if (row.status === 'executed' || row.status === 'execution_failed') {
+    return refusal(
+      `This ${kind} was run ${elsewhere} while this call waited, but execution failed:\n` +
+        JSON.stringify(result, null, 2).slice(0, 3000),
+    );
+  }
+  const verb = kind === 'deploy' ? 'Validate' : 'Propose';
+  const moved = row.status === 'superseded' ? movedRefusalOf(result) : null;
+  const what =
+    moved !== null
+      ? `This ${kind} was never approved in Deploy Review and did not execute — a confirmation ` +
+        'code entered outside Deploy Review was refused because the target changed in the org ' +
+        `after validation:\n${moved}`
+      : row.status === 'superseded'
+        ? `A newer ${kind} validation replaced this request before the user decided in Deploy ` +
+          'Review, so it did not execute.'
+        : `This ${kind} request was never approved in Deploy Review and did not execute — it is ` +
+          `now ${row.status}${row.status === 'locked' ? ' (too many wrong confirmation codes)' : ''}.`;
+  if (awaiting) {
+    return okJson({
+      status: row.status,
+      request_id: row.id,
+      awaiting_request_id: awaiting.id,
+      note:
+        `${what}\nA newer ${kind} request on this connection is awaiting the user’s decision in ` +
+        `Deploy Review — do not ${verb.toLowerCase()} again (that would replace it); call again ` +
+        'to wait on it.',
+    });
+  }
+  if (moved !== null) return refusal(what);
+  if (row.status === 'expired') return refusal(neverApprovedText(kind, row.status));
+  return refusal(
+    row.status === 'superseded'
+      ? `${what} No ${kind} request on this connection is awaiting a decision now — ` +
+          `${verb.toLowerCase()} again only if the user still wants this change.`
+      : `${what} ${verb} again for a fresh request.`,
+  );
+}
+
 /**
  * The engine-facing presenter. Constructed at bootstrap (before services
  * exist), so the service attaches late; a present() before attachment still
@@ -102,6 +315,17 @@ interface DeploySummaryRow {
   warnings: string[];
   source_path?: string;
   source_sha256?: string;
+  /** S45 F1: the member's live pre-image summary (ComponentPreImage). */
+  pre_image?: unknown;
+}
+
+/** One review row as review_json stores it (the presenter's row, code-free). */
+interface StoredReviewRow {
+  label: string;
+  warnings: string[];
+  detail?: string;
+  /** S45 F1: the engine's ApprovalRowDiff, stored as-is. */
+  diff?: unknown;
 }
 
 export class DeployService {
@@ -118,6 +342,13 @@ export class DeployService {
   >();
   /** Held agent calls, keyed requestId → sessionId → call (never displaced silently). */
   private readonly held = new Map<string, Map<string, HeldCall>>();
+  /**
+   * Requests with an approve()/reject() in flight. Since S45 the
+   * execute-time guard's org read (up to 15 s) sits between the recorded
+   * decision and the claim while the row is still 'validated', so the row's
+   * status alone no longer stops a second decision on the same id.
+   */
+  private readonly deciding = new Set<string>();
 
   constructor(
     private readonly deps: EngineDeps,
@@ -135,6 +366,12 @@ export class DeployService {
    * claim and the finish would strand a row at 'executing' forever (eternal
    * "Executing…", no re-approve, no agent path). Sweep those at startup and
    * tell the human to check the org — we cannot know whether it committed.
+   * A stranded DEPLOY is S45's outcome-unknown case: its validate-time
+   * pre-images are finalized with outcome:'unknown' BEFORE the flip, since
+   * the engine's revert sweep removes an execution_failed row's
+   * staging/_reverts/<id> when it holds no revert-plan.json. The engine
+   * reads the execute-time target check it persisted at the claim, so the
+   * README states it and the result carries it as target_check.
    */
   reconcileStrandedExecutions(maxAgeMs = 30 * 60_000): number {
     const cutoff = Date.now() - maxAgeMs;
@@ -142,6 +379,15 @@ export class DeployService {
     for (const rec of this.deps.db.listDeployRequests({ limit: 200 })) {
       if (rec.status !== 'executing') continue;
       if (new Date(rec.createdAt).getTime() > cutoff) continue;
+      // Never throws; null (nothing written) for any other kind.
+      const revert =
+        rec.kind === 'deploy'
+          ? this.deps.deploys.finalizeStrandedRevert(
+              rec.id,
+              'Contrail closed while this deploy was executing; its outcome was not recorded',
+            )
+          : null;
+      const kept = revert?.revert_package?.dir;
       this.deps.db.finishDeployRequest(
         rec.id,
         'execution_failed',
@@ -149,8 +395,13 @@ export class DeployService {
           error: 'Contrail closed while this execution was running.',
           note:
             'The change may or may not have committed — check Setup → Deployment Status (or the ' +
-            'records) in the target org before retrying.',
+            'records) in the target org before retrying.' +
+            (typeof kept === 'string'
+              ? ` If it committed, what the org held when this package was validated is kept ` +
+                `under ${kept} (revert-plan.json, outcome "unknown").`
+              : ''),
           stranded: true,
+          ...revert,
         }),
       );
       // A stranded row never reaches finishExecution, so its frozen payload
@@ -209,16 +460,38 @@ export class DeployService {
     if (connectionId) this.expectations.delete(connectionId);
     const sessionId = expectation?.sessionId ?? null;
     // The CODE-FREE review model. view.code exists on the input — it is
-    // deliberately never copied here.
+    // deliberately never copied here, and every field below is copied by
+    // NAME (rows and automation sections included), so nothing the engine
+    // adds to the view rides into review_json unreviewed.
+    const rows = (list: ApprovalRequestView['changes']): StoredReviewRow[] =>
+      (list ?? []).map((r) => ({
+        label: r.label,
+        warnings: r.warnings ?? [],
+        ...(r.detail !== undefined ? { detail: r.detail } : {}),
+        // S45 F1: the row's diff (live org or snapshot baseline), already
+        // budgeted by the engine; list() omits it, get(id) carries it.
+        ...(r.diff ? { diff: r.diff } : {}),
+      }));
     const review = {
       kind: view.kind,
       org: view.org,
-      changeRows: view.changes,
-      destructiveRows: view.destructive,
+      changeRows: rows(view.changes),
+      destructiveRows: rows(view.destructive),
       results: view.results,
       blast: view.blast,
       warnings: view.warnings ?? [],
       expiresAt: view.expiresAt,
+      // S45 F3: the snapshot's automation card — the engine hands the full
+      // ObjectAutomation; only the lines the card renders are kept.
+      automation: (view.automation ?? []).map((a) => ({
+        object: a.object,
+        snapshot_at: a.snapshot_at,
+        summary_lines: a.summary_lines,
+        notes: a.notes,
+        not_covered: a.not_covered,
+      })),
+      // S45 D6: an Apex script naming no object still shows the card.
+      automationNotCovered: view.automationNotCovered ?? [],
       // The Ultracode adversarial review of this exact content, when one
       // gated the propose (null otherwise).
       agentReview: expectation?.agentReview ?? null,
@@ -248,17 +521,22 @@ export class DeployService {
     this.alertApproval(info);
   }
 
+  /**
+   * Every request, WITHOUT row diffs (S45 R4): the list refreshes on every
+   * deploys:changed push — the execution poll fires one every 2.5 s — and
+   * must not ship every request's diffs each time. get(id) carries them.
+   */
   list(connectionId?: string): DeployRequestView[] {
     return this.deps.db
       .listDeployRequests({ connectionId })
-      .map((rec) => this.view(rec))
+      .map((rec) => this.view(rec, { withDiff: false }))
       .filter((v): v is DeployRequestView => v !== null);
   }
 
   get(id: string): DeployRequestView {
     const rec = this.deps.db.getDeployRequest(id);
     if (!rec) throw new Error('Deploy request not found.');
-    const view = this.view(rec);
+    const view = this.view(rec, { withDiff: true });
     if (!view) throw new Error('Deploy request references a removed connection.');
     return view;
   }
@@ -269,6 +547,33 @@ export class DeployService {
    * for the terminal outcome (long deploys poll via re-invocation).
    */
   async approve(id: string, comment?: string): Promise<DeployRequestView> {
+    this.beginDeciding(id);
+    try {
+      await this.runApproval(id, comment);
+    } finally {
+      this.deciding.delete(id);
+      // The last push inside runApproval fired while the id was still
+      // deciding; a renderer that refreshed then must see it clear.
+      this.push('deploys:changed', { requestId: id });
+    }
+    return this.get(id);
+  }
+
+  /**
+   * One decision per request at a time — checked before any await or write
+   * (a reloaded renderer, or a window closed and reopened on macOS, starts
+   * with its own in-memory busy flag cleared). A refused second call changes
+   * nothing. Only an in-flight decision blocks: a decision recorded by an
+   * approval that an app quit interrupted can still be retried or rejected.
+   */
+  private beginDeciding(id: string): void {
+    if (this.deciding.has(id)) {
+      throw new Error('This request is already being decided — wait for its outcome.');
+    }
+    this.deciding.add(id);
+  }
+
+  private async runApproval(id: string, comment?: string): Promise<void> {
     const rec = this.deps.db.getDeployRequest(id);
     if (!rec) throw new Error('Deploy request not found.');
     if (rec.status !== 'validated') {
@@ -373,23 +678,62 @@ export class DeployService {
       };
     }
 
+    // S45 F2: the execute-time guard found the target changed since
+    // validation — the request is voided and NOTHING ran. Every kind returns
+    // that as its result ({executed:false, target_moved:true, refusal}); a
+    // call that lost the race to a concurrent void is refused by the claim
+    // instead, so the voided row's stored result is read back for it.
+    // A fail-open result (target_check 'unavailable' / 'not_checked') is NOT
+    // this: it executed, resolves below as executed with target_check in its
+    // detail, and the request view carries the "NOT re-checked" notice.
+    // A claim refused because the row left 'validated' during the guard's
+    // org read (expired, superseded by a newer validation, locked) did not
+    // run either: it gets the replay's own "did not execute" text, never
+    // "execution failed".
+    let moved = movedRefusalOf(detail);
+    let notRun: string | null = null;
+    if (moved === null && failed) {
+      const after = this.deps.db.getDeployRequest(id);
+      if (after?.status === 'superseded' && after.resultJson) {
+        moved = movedRefusalOf(parseJson(after.resultJson));
+      }
+      if (
+        moved === null &&
+        after &&
+        (after.status === 'superseded' || after.status === 'expired' || after.status === 'locked')
+      ) {
+        notRun = after.status;
+      }
+    }
+
     this.push('deploys:changed', { requestId: id });
     this.resolveHeld(
       id,
-      failed
-        ? refusal(
-            `The user approved this ${rec.kind}, but execution failed:\n` +
-              JSON.stringify(detail, null, 2).slice(0, 3000),
-          )
-        : okJson({ approved: true, outcome: 'executed', detail }),
-      failed ? 'execution_failed' : 'executed',
+      moved !== null
+        ? refusal(targetMovedRefusal(rec.kind, moved))
+        : notRun !== null
+          ? refusal(notExecutedText(rec.kind, notRun))
+          : failed
+            ? refusal(executionFailedText(rec.kind, detail))
+            : okJson({ approved: true, outcome: 'executed', detail }),
+      moved !== null || failed ? 'execution_failed' : 'executed',
       rec.sessionId,
     );
-    return this.get(id);
   }
 
   /** Reject: the pending code dies with the decision — nothing can execute it later. */
   async reject(id: string, comment?: string): Promise<DeployRequestView> {
+    this.beginDeciding(id);
+    try {
+      this.runRejection(id, comment);
+    } finally {
+      this.deciding.delete(id);
+      this.push('deploys:changed', { requestId: id });
+    }
+    return this.get(id);
+  }
+
+  private runRejection(id: string, comment?: string): void {
     const rec = this.deps.db.getDeployRequest(id);
     if (!rec) throw new Error('Deploy request not found.');
     if (rec.status !== 'validated') {
@@ -414,7 +758,6 @@ export class DeployService {
       'rejected',
       rec.sessionId,
     );
-    return this.get(id);
   }
 
   /**
@@ -441,39 +784,16 @@ export class DeployService {
     if (!pending) {
       // The human may have already decided — REPLAY the terminal outcome
       // instead of telling the agent to re-validate (which would deploy
-      // twice). Only this session's own request is replayed.
-      const recent = rows.find(
-        (r) =>
-          r.sessionId === sessionId &&
-          (r.desktopState === 'approved' || r.desktopState === 'rejected'),
-      );
+      // twice). Only this session's own request is replayed, and only its
+      // NEWEST one of this (connection, kind): an older decided row is never
+      // replayed past a newer one the human never decided. S45's eager
+      // expiry sweep (every real validate) moves undecided rows of every
+      // kind and connection to 'expired', so that newer row can be gone
+      // from 'validated' without anyone having looked at it.
+      const recent = rows.find((r) => r.sessionId === sessionId);
       if (!recent) return null;
-      if (recent.desktopState === 'rejected') {
-        return Promise.resolve(
-          refusal(
-            `The user REJECTED this ${kind}${recent.approvedComment ? ` — reason: ${recent.approvedComment}` : ''}. ` +
-              'Do not retry it as-is; ask the user what should change.',
-          ),
-        );
-      }
-      if (recent.status === 'executing') {
-        return Promise.resolve(
-          okJson({
-            status: 'executing',
-            request_id: recent.id,
-            note: 'The user approved it and execution is running. Call again shortly for the outcome.',
-          }),
-        );
-      }
-      const result = recent.resultJson ? parseJson(recent.resultJson) : null;
-      return Promise.resolve(
-        recent.status === 'execution_failed'
-          ? refusal(
-              `The user approved this ${kind}, but execution failed:\n` +
-                JSON.stringify(result, null, 2).slice(0, 3000),
-            )
-          : okJson({ approved: true, outcome: 'executed', detail: result }),
-      );
+      const replay = replayRow(kind, recent);
+      return replay ? Promise.resolve(replay) : null;
     }
 
     if (new Date(pending.expiresAt).getTime() < Date.now()) return null;
@@ -484,14 +804,40 @@ export class DeployService {
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.held.get(pending.id)?.delete(sessionId);
+        // The row may have changed while this call waited — expired (by
+        // S45's sweep, or lapsed past expires_at), superseded by a newer
+        // validation, locked, run with a code entered elsewhere, or approved
+        // and executing. Say what it is now, never "stays valid".
+        const now = this.deps.db.getDeployRequest(pending.id);
+        const lapsed =
+          now !== null &&
+          (now.status !== 'validated' || new Date(now.expiresAt).getTime() < Date.now());
+        const answer = !now
+          ? null
+          : lapsed
+            ? lapsedHoldAnswer(
+                kind,
+                now.status === 'validated' ? { ...now, status: 'expired' } : now,
+                this.awaitingRequest(connectionId, kind, now.id),
+              )
+            : now.desktopState === 'approved'
+              ? okJson({
+                  status: 'executing',
+                  request_id: now.id,
+                  note:
+                    'The user approved it and execution is starting. Call again shortly for ' +
+                    'the outcome.',
+                })
+              : null;
         resolve(
-          okJson({
-            status: 'awaiting_approval',
-            request_id: pending.id,
-            note:
-              'Still awaiting the user’s decision in the Deploy Review screen. ' +
-              'The request stays valid until it expires; call again after the user decides.',
-          }),
+          answer ??
+            okJson({
+              status: 'awaiting_approval',
+              request_id: pending.id,
+              note:
+                'Still awaiting the user’s decision in the Deploy Review screen. ' +
+                'The request stays valid until it expires; call again after the user decides.',
+            }),
         );
       }, HOLD_TIMEOUT_MS);
       const bySession = this.held.get(pending.id) ?? new Map<string, HeldCall>();
@@ -513,6 +859,30 @@ export class DeployService {
       this.held.set(pending.id, bySession);
       this.push('deploys:changed', { requestId: pending.id });
     });
+  }
+
+  /**
+   * The request of this (connection, kind) other than `exceptId` that still
+   * awaits a decision — at most one, since every validate supersedes the
+   * pending ones, so it is newer than any row it left behind.
+   */
+  private awaitingRequest(
+    connectionId: string,
+    kind: DeployRequestKind,
+    exceptId: string,
+  ): DeployRequestRecord | null {
+    const nowMs = Date.now();
+    return (
+      this.deps.db
+        .listDeployRequests({ connectionId, limit: 200 })
+        .find(
+          (r) =>
+            r.kind === kind &&
+            r.id !== exceptId &&
+            r.status === 'validated' &&
+            new Date(r.expiresAt).getTime() >= nowMs,
+        ) ?? null
+    );
   }
 
   /** Session teardown must never leave a held tool call unsettled. */
@@ -557,13 +927,20 @@ export class DeployService {
     }
   }
 
-  private view(rec: DeployRequestRecord): DeployRequestView | null {
+  /**
+   * The code-free review model of one row. `withDiff` false (list) omits
+   * every row's diff — a real omission: rows are rebuilt field by field,
+   * so nothing parsed from review_json rides along unnamed.
+   */
+  private view(rec: DeployRequestRecord, opts: { withDiff: boolean }): DeployRequestView | null {
     const conn = this.deps.db.resolveConnection(rec.connectionId);
     if (!conn) return null;
     const summary = parseJson(rec.summaryJson) as {
       changes?: Array<DeploySummaryRow>;
       destructive?: Array<DeploySummaryRow>;
       blast?: string[];
+      // S45 F1: the validate-time live check (deploys).
+      live_check?: unknown;
       // DML summaries are a preview object, not component lists.
       operation?: string;
       object?: string;
@@ -571,26 +948,34 @@ export class DeployService {
       rows?: unknown[];
     } | null;
     const review = parseJson(rec.reviewJson ?? '') as {
-      changeRows?: Array<{ label: string; warnings: string[]; detail?: string }>;
-      destructiveRows?: Array<{ label: string; warnings: string[]; detail?: string }>;
+      changeRows?: StoredReviewRow[];
+      destructiveRows?: StoredReviewRow[];
       results?: Array<{ label: string; value: string; bad?: boolean }>;
       blast?: string[];
       warnings?: string[];
       agentReview?: AgentReviewAttachment | null;
+      automation?: unknown;
+      automationNotCovered?: unknown;
     } | null;
     const structured = (rows?: Array<DeploySummaryRow>) =>
-      (rows ?? []).map((c) => ({
-        type: c.type,
-        apiName: c.api_name,
-        change: c.change as DeployRequestView['changes'][number]['change'],
-        warnings: c.warnings ?? [],
-        ...(c.source_path
-          ? { sourcePath: c.source_path, sourceSha256: c.source_sha256 }
-          : {}),
-      }));
+      (rows ?? []).map((c) => {
+        const preImage = preImageView(c.pre_image);
+        return {
+          type: c.type,
+          apiName: c.api_name,
+          change: c.change as DeployRequestView['changes'][number]['change'],
+          warnings: c.warnings ?? [],
+          ...(c.source_path
+            ? { sourcePath: c.source_path, sourceSha256: c.source_sha256 }
+            : {}),
+          ...(preImage ? { preImage } : {}),
+        };
+      });
     let resultSummary: string | null = null;
+    let result: Record<string, unknown> | null = null;
     if (rec.resultJson) {
-      const parsed = parseJson(rec.resultJson) as Record<string, unknown> | null;
+      const parsed = parseJson(rec.resultJson);
+      result = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
       resultSummary = parsed
         ? JSON.stringify(parsed, null, 2).slice(0, 4000)
         : rec.resultJson.slice(0, 4000);
@@ -598,8 +983,10 @@ export class DeployService {
     // A row with NO renderable content must never present an approvable
     // blank screen (plugin-era rows have no review_json; DML summaries are
     // previews). Synthesize honest rows from whatever the row does carry.
-    let changeRows = review?.changeRows ?? [];
-    let destructiveRows = review?.destructiveRows ?? [];
+    let changeRows = reviewRows(review?.changeRows, opts.withDiff);
+    let destructiveRows = reviewRows(review?.destructiveRows, opts.withDiff);
+    const hasStructured =
+      (summary?.changes?.length ?? 0) + (summary?.destructive?.length ?? 0) > 0;
     if (changeRows.length === 0 && destructiveRows.length === 0) {
       // A multi-step DML plan (S14) or a bulk load plan (S27) proposed
       // OUTSIDE this app (plugin path) has no review_json, but its summary
@@ -644,7 +1031,10 @@ export class DeployService {
           ` row(s) on ${summary.object ?? 'unknown object'}`;
         if (String(summary.operation).toLowerCase() === 'delete') destructiveRows = [{ label, warnings: [] }];
         else changeRows = [{ label, warnings: [] }];
-      } else if (rec.reviewJson === null && rec.summaryJson) {
+      } else if (rec.reviewJson === null && rec.summaryJson && !hasStructured) {
+        // A plugin-era deploy whose summary parses into structured
+        // components needs no raw row — the review rebuilds from those (it
+        // prefers changeRows, so a raw row here would hide them).
         changeRows = [
           {
             label: `(request created outside this app — raw summary below)`,
@@ -653,6 +1043,14 @@ export class DeployService {
         ];
       }
     }
+    const warnings = review?.warnings ?? [];
+    const liveCheck = liveCheckView(summary?.live_check);
+    // S45 F2: a request the execute-time guard voided — it did NOT execute.
+    const targetMoved =
+      rec.status === 'superseded' && result?.target_moved === true
+        ? targetMovedView(result)
+        : null;
+    const targetCheck = targetCheckView(result?.target_check);
     return {
       id: rec.id,
       kind: rec.kind,
@@ -670,17 +1068,412 @@ export class DeployService {
       executedAt: rec.executedAt,
       approvedAt: rec.approvedAt,
       approvedComment: rec.approvedComment,
+      deciding: this.deciding.has(rec.id),
       changes: structured(summary?.changes),
       destructive: structured(summary?.destructive),
       changeRows,
       destructiveRows,
       results: review?.results ?? [],
       blast: review?.blast ?? summary?.blast ?? [],
-      warnings: review?.warnings ?? [],
+      warnings,
+      automation: automationView(review?.automation),
+      automationNotCovered: stringList(review?.automationNotCovered),
+      liveCheck,
+      targetMoved,
+      targetCheck,
+      revertPackage: revertPackageView(result?.revert_package),
+      revertNote: typeof result?.revert_note === 'string' ? result.revert_note : null,
+      notices: reviewNotices(rec.status, liveCheck, targetCheck, warnings, {
+        kind: rec.kind,
+        outsideApp: rec.reviewJson === null,
+        memberTypes: [
+          ...new Set(
+            [...(summary?.changes ?? []), ...(summary?.destructive ?? [])].map((c) => c.type),
+          ),
+        ],
+      }),
       agentReview: review?.agentReview ?? null,
       resultSummary,
     };
   }
+}
+
+// ── S45 view parsing (review_json / summary_json / result_json → views) ──
+// Every mapper tolerates any stored shape (older rows, plugin-era rows):
+// an unexpected value yields null/[] rather than a throw, and fields are
+// copied by name only. Each parsed record is read through Loose<EngineType>
+// — every key optional and `unknown`, so the runtime stays tolerant, while
+// `pnpm typecheck` rejects a key the engine's own type no longer has (an
+// engine-side rename cannot silently blank a panel here).
+
+type Loose<T> = { [K in keyof T]?: unknown };
+
+function str(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** review_json rows → view rows; the diff only when asked for (deploys:get). */
+function reviewRows(rows: unknown, withDiff: boolean): DeployReviewRowView[] {
+  if (!Array.isArray(rows)) return [];
+  const out: DeployReviewRowView[] = [];
+  for (const raw of rows) {
+    const r = record(raw);
+    if (!r || typeof r.label !== 'string') continue;
+    const diff = withDiff ? rowDiffView(r.diff) : null;
+    out.push({
+      label: r.label,
+      warnings: stringList(r.warnings),
+      ...(typeof r.detail === 'string' ? { detail: r.detail } : {}),
+      ...(diff ? { diff } : {}),
+    });
+  }
+  return out;
+}
+
+function semanticChangeView(raw: unknown): SemanticChangeView[] {
+  const c = record(raw) as Loose<NonNullable<ApprovalRowDiff['xml_changes']>[number]> | null;
+  if (!c) return [];
+  const path = str(c.path) ?? '';
+  switch (c.kind) {
+    case 'scalar':
+      return [{ kind: 'scalar', path, a: c.a, b: c.b }];
+    case 'added':
+      return [{ kind: 'added', path, key: str(c.key) ?? '' }];
+    case 'removed':
+      return [{ kind: 'removed', path, key: str(c.key) ?? '' }];
+    default:
+      return [{ kind: 'unkeyed', path, note: str(c.note) ?? '' }];
+  }
+}
+
+function hunkView(raw: unknown): Array<TextHunkView & { file?: string }> {
+  const h = record(raw) as Loose<NonNullable<ApprovalRowDiff['text_hunks']>[number]> | null;
+  if (!h) return [];
+  return [
+    {
+      ...(typeof h.file === 'string' ? { file: h.file } : {}),
+      a_line: typeof h.a_line === 'number' ? h.a_line : 0,
+      b_line: typeof h.b_line === 'number' ? h.b_line : 0,
+      removed: stringList(h.removed),
+      added: stringList(h.added),
+      ...(h.removed_truncated === true ? { removed_truncated: true } : {}),
+      ...(h.added_truncated === true ? { added_truncated: true } : {}),
+    },
+  ];
+}
+
+/** The engine's ApprovalRowDiff (snake_case) → the renderer's row diff. */
+function rowDiffView(raw: unknown): DeployRowDiffView | null {
+  const d = record(raw) as Loose<ApprovalRowDiff> | null;
+  if (!d || typeof d.summary !== 'string') return null;
+  const counts = record(d.counts) as Loose<NonNullable<ApprovalRowDiff['counts']>> | null;
+  const num = (v: unknown) => (typeof v === 'number' ? v : undefined);
+  const list = (v: unknown) => (Array.isArray(v) ? stringList(v) : undefined);
+  return {
+    format: d.format === 'xml' || d.format === 'bundle' ? d.format : 'text',
+    identical: d.identical === true,
+    baselineLabel: str(d.baseline_label) ?? '',
+    summary: d.summary,
+    changes: Array.isArray(d.xml_changes) ? d.xml_changes.flatMap(semanticChangeView) : null,
+    hunks: Array.isArray(d.text_hunks) ? d.text_hunks.flatMap(hunkView) : null,
+    counts: counts
+      ? {
+          changes: num(counts.changes),
+          linesAdded: num(counts.lines_added),
+          linesRemoved: num(counts.lines_removed),
+          filesChanged: list(counts.files_changed),
+          filesAdded: list(counts.files_added),
+          filesRemoved: list(counts.files_removed),
+        }
+      : null,
+    truncated: d.truncated === true,
+    note: str(d.note),
+  };
+}
+
+/** summary.changes[].pre_image (ComponentPreImage) → view. */
+function preImageView(raw: unknown): DeployPreImageView | null {
+  const p = record(raw) as Loose<ComponentPreImage> | null;
+  if (!p) return null;
+  return {
+    present: typeof p.present === 'boolean' ? p.present : null,
+    source: p.source === 'list' ? 'list' : 'retrieve',
+    ...(typeof p.sha256 === 'string' ? { sha256: p.sha256 } : {}),
+    lastModifiedDate: str(p.last_modified_date),
+    lastModifiedBy: str(p.last_modified_by),
+    comparable: p.comparable === true,
+    restorable: p.restorable === true,
+  };
+}
+
+/** summary.live_check (LiveCheckSummary) → view. */
+function liveCheckView(raw: unknown): DeployLiveCheckView | null {
+  const l = record(raw) as Loose<LiveCheckSummary> | null;
+  if (!l || (l.status !== 'ok' && l.status !== 'unavailable')) return null;
+  const clock = record(l.org_clock) as Loose<
+    NonNullable<LiveCheckSummary['org_clock']>
+  > | null;
+  return {
+    status: l.status,
+    reason: str(l.reason),
+    startedAt: str(l.started_at),
+    at: str(l.at),
+    orgClock:
+      clock && typeof clock.created_date === 'string'
+        ? { createdDate: clock.created_date, completedDate: str(clock.completed_date) }
+        : null,
+    datesUnavailableTypes: stringList(l.dates_unavailable_types),
+    datesUnavailable: str(l.dates_unavailable),
+    members: typeof l.members === 'number' ? l.members : null,
+  };
+}
+
+/**
+ * One member a target check or a refusal names: a deploy member
+ * ({type, api_name}), a DML record ({object, id, field?}) — never a field
+ * value (the engine keeps those out of these lists; the refusal text is
+ * the human-facing account).
+ */
+function targetMemberView(raw: unknown, stateKey: 'state' | 'reason'): DeployTargetMemberView[] {
+  const m = record(raw);
+  if (!m) return [];
+  // A deploy member (moved, or a checked/unchecked RevertPlanMember): its
+  // keys read through the engine's type. The DML member's keys
+  // ({object, id, field}) have no exported engine type.
+  const d = m as Loose<DeployMovedMember>;
+  const label =
+    typeof d.type === 'string'
+      ? `${d.type} ${str(d.api_name) ?? ''}`.trim()
+      : typeof m.object === 'string'
+        ? [m.object, str(m.id), str(m.field)].filter(Boolean).join(' ')
+        : null;
+  if (!label) return [];
+  const by = str(d.last_modified_by);
+  const at = str(d.last_modified_date);
+  return [
+    {
+      label,
+      state: str(m[stateKey]) ?? (stateKey === 'state' ? 'changed' : null),
+      detail:
+        by || at ? `last modified${by ? ` by ${by}` : ''}${at ? ` at ${at}` : ''}` : null,
+    },
+  ];
+}
+
+function memberList(raw: unknown, stateKey: 'state' | 'reason'): DeployTargetMemberView[] {
+  return Array.isArray(raw) ? raw.flatMap((m) => targetMemberView(m, stateKey)) : [];
+}
+
+/** result_json of a voided request → the target-moved view (refusal verbatim). */
+function targetMovedView(result: Record<string, unknown>): DeployTargetMovedView {
+  const moved = memberList(result.moved, 'state');
+  // An activation's refusal names no member list — name the version.
+  if (moved.length === 0 && typeof result.version === 'string') {
+    const agent = typeof result.agent === 'string' ? `${result.agent}.` : '';
+    moved.push({
+      label: `BotVersion ${agent}${result.version}`,
+      state: 'changed',
+      detail:
+        `status is now ${str(result.current_status) ?? 'not reported (see the refusal below)'}; ` +
+        `the approval was for ` +
+        `a change from ${str(result.approved_from_status) ?? 'an unrecorded status'}`,
+    });
+  }
+  return {
+    checkedAt: str(result.checked_at),
+    refusal: movedRefusalOf(result) ?? '',
+    moved,
+    unchecked: memberList(result.unchecked, 'reason'),
+  };
+}
+
+/** result_json.target_check → view (D1: every shape carries a status). */
+function targetCheckView(raw: unknown): DeployTargetCheckView | null {
+  const t = record(raw);
+  if (!t) return null;
+  const status =
+    t.status === 'ok' ||
+    t.status === 'unavailable' ||
+    t.status === 'not_checked' ||
+    t.status === 'not_applicable'
+      ? t.status
+      : null;
+  if (status === null) return null;
+  return {
+    status,
+    checkedAt: str(t.checked_at),
+    reason: str(t.reason),
+    note: str(t.note),
+    checked: memberList(t.checked, 'reason'),
+    unchecked: memberList(t.unchecked, 'reason'),
+  };
+}
+
+/** result_json.revert_package → view; 'unknown' when Contrail lost track of the deploy. */
+function revertPackageView(raw: unknown): DeployRevertPackageView | null {
+  const p = record(raw);
+  if (!p) return null;
+  const members = (v: unknown) =>
+    Array.isArray(v)
+      ? v.flatMap((m) => {
+          const r = record(m);
+          const member = r as Loose<RevertPlanMember> | null;
+          return r && member && typeof member.type === 'string'
+            ? [{ r, type: member.type, apiName: str(member.api_name) ?? '' }]
+            : [];
+        })
+      : [];
+  return {
+    dir: str(p.dir),
+    outcome: p.outcome === 'unknown' ? 'unknown' : 'executed',
+    restores: members(p.restores).map(({ r, type, apiName }) => ({
+      type,
+      apiName,
+      contentFile: str((r as Loose<RevertPlanComponent>).content_file),
+    })),
+    deletes: members(p.deletes).map(({ type, apiName }) => ({ type, apiName })),
+    notRestorable: members(p.not_restorable).map(({ r, type, apiName }) => ({
+      type,
+      apiName,
+      reason: str((r as Loose<RevertPlanReason>).reason) ?? '',
+    })),
+    plan: str(p.plan),
+    note: str(p.note),
+  };
+}
+
+/** review_json.automation → the card's sections (the engine composed every line). */
+function automationView(raw: unknown): ObjectAutomationView[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((a) => {
+    const r = record(a);
+    if (!r || typeof r.object !== 'string') return [];
+    return [
+      {
+        object: r.object,
+        snapshot_at: str(r.snapshot_at),
+        summary_lines: stringList(r.summary_lines),
+        notes: stringList(r.notes),
+        not_covered: stringList(r.not_covered),
+      },
+    ];
+  });
+}
+
+/**
+ * Verbatim copy of the engine's datesUnavailableText (deploy/engine.ts,
+ * module-private there): the page-top line a request validated outside this
+ * app showed on its own approval page and did not persist.
+ */
+function datesUnavailableText(at: string, types: string[], reason: string): string {
+  return (
+    `Live diff is against the org (retrieved ${at}); last-modified stamps were unavailable ` +
+    `for ${types.join(', ')} (${reason}), so CHANGED-IN-TARGET detection for those members ` +
+    `relies on content only and the execute-time check will report them as unchecked.`
+  );
+}
+
+/**
+ * S45: the notices the review panel shows. The live check's own banner
+ * already rides `warnings` for rows this app presented; it is repeated here
+ * only when it is missing (a plugin-era row). A request validated or
+ * proposed outside this app (no review_json) says what its own approval
+ * page showed that is not stored here: per-row diffs (their warnings point
+ * at "the diff below"), an automation card. The target-check notice is the
+ * desktop's half of the fail-open disclosure: the write ran, but nothing
+ * confirmed the org still held what the approval showed.
+ */
+function reviewNotices(
+  status: string,
+  liveCheck: DeployLiveCheckView | null,
+  targetCheck: DeployTargetCheckView | null,
+  warnings: string[],
+  origin: { kind: DeployRequestKind; outsideApp: boolean; memberTypes: string[] },
+): string[] {
+  const out: string[] = [];
+  if (
+    liveCheck?.status === 'unavailable' &&
+    !warnings.some((w) => w.startsWith('LIVE COMPARISON UNAVAILABLE'))
+  ) {
+    out.push(
+      `Live comparison unavailable at validate (${liveCheck.reason ?? 'no reason recorded'}) — ` +
+        'the org was not re-read; classifications and diffs came from the local snapshot only.',
+    );
+  }
+  if (origin.outsideApp && liveCheck) {
+    // An S45 page existed (live_check is written beside it); its diffs
+    // were never persisted (they would ride every execute result).
+    out.push(
+      'Validated outside the app — its per-row diffs were shown on its own approval page and ' +
+        'are not stored here; warnings that mention "the diff below" refer to that page. ' +
+        'Re-validate here to see them.',
+    );
+  } else if (
+    origin.outsideApp &&
+    (origin.kind === 'dml' || origin.kind === 'bulk' || origin.kind === 'apex')
+  ) {
+    // The automation card lives only on the page (nothing persisted marks
+    // whether one was shown), so this stays conditional.
+    out.push(
+      'Proposed outside the app — if its own approval page showed an automation card (what the ' +
+        'local snapshot says fires on the objects it touches), that card is not stored here. ' +
+        'Re-propose here to see it.',
+    );
+  }
+  if (
+    liveCheck?.status === 'ok' &&
+    !warnings.some((w) => w.startsWith('Live diff is against the org'))
+  ) {
+    // The engine's two cases: a thrown listing nulls every member's dates;
+    // INVALID_TYPE names the types it could not list.
+    const at = hhmm(liveCheck.at ?? '');
+    if (liveCheck.datesUnavailable !== null) {
+      out.push(
+        datesUnavailableText(at, origin.memberTypes, liveCheck.datesUnavailable.slice(0, 160)),
+      );
+    } else if (liveCheck.datesUnavailableTypes.length > 0) {
+      out.push(
+        datesUnavailableText(
+          at,
+          liveCheck.datesUnavailableTypes,
+          'listMetadata reported INVALID_TYPE',
+        ),
+      );
+    }
+  }
+  if (targetCheck?.status === 'unavailable' || targetCheck?.status === 'not_checked') {
+    const lead =
+      status === 'executed'
+        ? 'Executed'
+        : status === 'execution_failed'
+          ? 'Execution failed'
+          : 'Ran';
+    let why: string;
+    if (targetCheck.status === 'unavailable') {
+      why = targetCheck.reason ?? 'Contrail could not re-read the org';
+    } else if (targetCheck.unchecked.length > 0) {
+      const shown = targetCheck.unchecked
+        .slice(0, 3)
+        .map((u) => `${u.label}: ${u.state ?? 'unchecked'}`)
+        .join('; ');
+      const more = targetCheck.unchecked.length - 3;
+      why = `nothing could be compared — ${shown}${more > 0 ? `; ${more} more` : ''}`;
+    } else {
+      why = 'nothing could be compared — no baseline was recorded';
+    }
+    out.push(`${lead} — the target was NOT re-checked before running (${why})`);
+  }
+  return out;
 }
 
 function parseJson(text: string): unknown {

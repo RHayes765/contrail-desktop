@@ -16,6 +16,7 @@ import { createEngineDeps, type EngineDeps } from '../core/deps.js';
 import { invokeCapability } from '../capabilities/index.js';
 import { emptyGrantSet } from '../core/grants.js';
 import { deploysDir } from '../core/paths.js';
+import { renderApprovalPage } from '../connect/pages.js';
 
 /**
  * S27 bulk-load tests at the capability surface (the engine internals are
@@ -227,6 +228,14 @@ async function propose(args: Record<string, unknown>) {
   return invokeCapability(deps, 'bulk_load_propose', { connection: 'bulk-org', ...args });
 }
 
+/** S45 D1: the bulk target_check, in one place — a wording change touches only this. */
+const BULK_TARGET_CHECK = {
+  status: 'not_applicable',
+  note:
+    'bulk loads are not re-checked before executing — the approval page showed no current ' +
+    'values for their rows, so there is nothing to compare against',
+};
+
 async function execute(code?: string) {
   return invokeCapability(deps, 'bulk_load_execute', {
     connection: 'bulk-org',
@@ -313,6 +322,75 @@ describe('bulk_load capabilities', () => {
     const replay = textOf(await execute(code));
     expect(replay).toContain('"already_completed": true');
     expect(createdJobs).toHaveLength(2);
+
+    // S45 D1: an explicit target_check status on every result shape.
+    expect(JSON.parse(text.slice(text.indexOf('{'))).target_check).toEqual(BULK_TARGET_CHECK);
+  });
+
+  it('S45 D1: the missing-payload path still reports target_check not_applicable (bulk wording)', async () => {
+    await propose({ steps: [stepArgs()] });
+    const code = presenter.views.at(-1)!.code;
+    for (const dir of payloadDirs()) fs.rmSync(dir, { recursive: true, force: true });
+    const text = textOf(await execute(code));
+    const result = JSON.parse(text.slice(text.indexOf('{')));
+    expect(result.executed).toBe(false);
+    expect(result.error_message).toContain('missing from disk');
+    expect(result.target_check).toEqual(BULK_TARGET_CHECK);
+    expect(createdJobs).toHaveLength(0);
+  });
+
+  it('S45 F3: the page carries the snapshot automation card for each step object', async () => {
+    const connId = db.getConnectionByAlias('bulk-org')!.id;
+    deps.store.writeCurrent(
+      connId,
+      new Map([
+        [
+          'objects/Account.object',
+          Buffer.from(`<CustomObject>
+    <validationRules>
+        <fullName>Name_Required</fullName>
+        <active>true</active>
+        <errorConditionFormula>ISBLANK(Name)</errorConditionFormula>
+    </validationRules>
+</CustomObject>`),
+        ],
+      ]),
+    );
+    db.replaceArtifactsForTypes(connId, ['CustomObject'], [
+      {
+        connectionId: connId,
+        type: 'CustomObject',
+        apiName: 'Account',
+        filePath: 'objects/Account.object',
+        contentHash: 'h',
+        lastModifiedDate: null,
+        lastModifiedBy: null,
+        retrievedAt: '2026-11-10T09:30:00.000Z',
+      },
+    ]);
+    const res = await propose({
+      steps: [
+        stepArgs(),
+        stepArgs({
+          path: 'contacts.csv',
+          object: 'Contact',
+          operation: 'upsert',
+          external_id_field: 'Ext__c',
+          abs_path: writeCsv('contacts.csv', 'LastName,Ext__c\nAsh,C-1\n'),
+        }),
+      ],
+    });
+    expect(res.isError ?? false).toBe(false);
+    const view = presenter.views.at(-1)!;
+    expect(view.automation?.map((a) => a.object)).toEqual(['Account', 'Contact']);
+    const page = renderApprovalPage(view);
+    expect(page).toContain('AUTOMATION IN YOUR SNAPSHOT (from ');
+    expect(page).toContain('Validation rule Name_Required — active');
+    expect(page).toContain('The snapshot holds no object file for Contact');
+    expect(page.indexOf('AUTOMATION IN YOUR SNAPSHOT')).toBeLessThan(
+      page.indexOf('<h2>Validation</h2>'),
+    );
+    expect(textOf(res)).not.toContain('AUTOMATION IN YOUR SNAPSHOT');
   });
 
   it('S40: a .tsv step scans as TAB-delimited and declares TAB to the ingest job', async () => {

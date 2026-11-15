@@ -37,7 +37,25 @@ export const useDeploys = create<DeploysState>((set, get) => ({
       const current = get().current;
       if (current) {
         const updated = requests.find((r) => r.id === current.id);
-        if (updated) set({ current: updated });
+        if (!updated) return;
+        // S45: list rows carry no diffs (deploys:list omits them), so the
+        // open review must never be replaced by its list row — the 2.5 s
+        // execution poll would blank its diffs. Same id and state → keep the
+        // open rows (diffs included) and take everything else from the
+        // list; a state change → re-fetch the full view.
+        if (updated.status === current.status && updated.desktopState === current.desktopState) {
+          set({
+            current: {
+              ...updated,
+              changeRows: current.changeRows,
+              destructiveRows: current.destructiveRows,
+            },
+          });
+        } else {
+          const full = await ipc.invoke('deploys:get', { id: current.id });
+          // The human may have opened another request meanwhile.
+          if (get().current?.id === full.id) set({ current: full });
+        }
       }
     } catch (err) {
       set({ error: String(err) });

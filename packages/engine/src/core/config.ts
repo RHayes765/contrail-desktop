@@ -117,6 +117,19 @@ export interface ContrailConfig {
      * is the human's decision, never a tool call's.
      */
     allowedSourceRoots: string[];
+    /**
+     * S45: budget for the live pre-image retrieve validate_deploy runs
+     * beside the checkOnly deploy — the org's current version of every
+     * package member, which the approval page diffs against. Past it the
+     * page falls back to the local snapshot and says the org was not re-read.
+     */
+    preImageTimeoutMs: number;
+    /**
+     * S45: days an executed (or outcome-unknown) deploy's revert package
+     * under staging/_reverts/ is kept before a later validate sweeps it.
+     * 0 = never.
+     */
+    revertRetentionDays: number;
   };
   bulkLoad: {
     /** Ingest job status poll interval (jobs are minutes-scale). */
@@ -224,6 +237,8 @@ export const DEFAULT_CONFIG: ContrailConfig = {
     toolWaitMs: 25 * 1000,
     maxFailedAttempts: 5,
     allowedSourceRoots: [],
+    preImageTimeoutMs: 120_000,
+    revertRetentionDays: 30,
   },
   bulkLoad: {
     pollIntervalMs: 5000,

@@ -10,6 +10,12 @@ import {
   type EngineDeps,
 } from '@contrail/engine';
 import { ManifestService } from '../main/services/manifest.js';
+import {
+  identicalLine,
+  manifestBaseline,
+  noDiffLine,
+  whatChangedHeading,
+} from '../renderer/src/lib/manifestBaseline.js';
 
 /**
  * S28 manifest capture + backfill. Capture is tested DIRECTLY against real
@@ -472,5 +478,230 @@ describe('backfill idempotency and attribution', () => {
     expect(db.listManifestEntries(projectId).length).toBeGreaterThan(0);
     db.deleteProject(projectId);
     expect(db.listManifestEntries(projectId)).toEqual([]);
+  });
+});
+
+describe('S45: the Manifest names the "before" of its diff', () => {
+  const CHANGED =
+    'CHANGED IN TARGET SINCE YOUR SNAPSHOT — the diff below is against the LIVE version ' +
+    '(retrieved 10:02); your snapshot is from 2026-09-01 00:00.';
+  const LIVE_CLASS = 'public class InvoiceService { /* a colleague edit */ }';
+
+  function summaryFor(type: string, apiName: string, warnings: string[]): string {
+    return JSON.stringify({
+      changes: [{ type, api_name: apiName, change: 'modify', warnings }],
+      destructive: [],
+      blast: [],
+    });
+  }
+
+  function zipOf(files: Record<string, string>): string {
+    const zipPath = path.join(tmp, `frozen-${Object.keys(files).length}-${Math.random()}.zip`);
+    const entries: Record<string, Uint8Array> = { 'package.xml': strToU8('<Package/>') };
+    for (const [rel, text] of Object.entries(files)) entries[rel] = strToU8(text);
+    fs.writeFileSync(zipPath, zipSync(entries));
+    return zipPath;
+  }
+
+  /** A revert package as finalizeRevert puts it on the payload, files on disk. */
+  function revertPackage(files: Array<{ type: string; apiName: string; rel: string; text: string }>) {
+    const dir = path.join(tmp, 'staging', '_reverts', 'req-1');
+    const restores = files.map((f) => {
+      const file = path.join(dir, f.rel);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, f.text);
+      return { type: f.type, api_name: f.apiName, content_file: file };
+    });
+    return { dir, restores, deletes: [], not_restorable: [] };
+  }
+
+  it("the live pre-image is the before when one was frozen: a snapshot-identical deploy still diffs against the colleague's edit", () => {
+    // The plan's livediff case: the snapshot equals the deployed bytes, the org did not.
+    const request = makeRequest({
+      kind: 'deploy',
+      summaryJson: summaryFor('ApexClass', 'InvoiceService', [CHANGED]),
+    });
+    service.capture({
+      request,
+      payload: {
+        deployed: true,
+        revert_package: revertPackage([
+          { type: 'ApexClass', apiName: 'InvoiceService', rel: 'classes/InvoiceService.cls', text: LIVE_CLASS },
+        ]),
+      },
+      payloadPath: zipOf({ 'classes/InvoiceService.cls': OLD_CLASS }),
+    });
+    const [entry] = db.listManifestEntries(projectId);
+    expect(entry!.beforeContent).toBe(LIVE_CLASS);
+    expect(entry!.afterContent).toBe(OLD_CLASS);
+    expect(JSON.parse(entry!.detailJson!)).toMatchObject({ warnings: [CHANGED], baseline: 'live_preimage' });
+    const detail = service.entryDetail(entry!.id);
+    expect(detail.identical).toBe(false);
+    expect(detail.hunks?.length).toBeGreaterThan(0);
+    expect(manifestBaseline(detail)).toBe('live_preimage');
+    expect(whatChangedHeading(manifestBaseline(detail))).toBe(
+      'What changed (vs the live org at validate)',
+    );
+  });
+
+  it('without a pre-image the snapshot is the before, labelled — never "byte-identical" under a live warning', () => {
+    const request = makeRequest({
+      kind: 'deploy',
+      summaryJson: summaryFor('ApexClass', 'InvoiceService', [CHANGED]),
+    });
+    service.capture({
+      request,
+      payload: { deployed: true },
+      payloadPath: zipOf({ 'classes/InvoiceService.cls': OLD_CLASS }),
+    });
+    const [entry] = db.listManifestEntries(projectId);
+    expect(entry!.beforeContent).toBe(OLD_CLASS);
+    expect(JSON.parse(entry!.detailJson!).baseline).toBe('snapshot');
+    const detail = service.entryDetail(entry!.id);
+    expect(detail.identical).toBe(true);
+    const baseline = manifestBaseline(detail);
+    expect(baseline).toBe('snapshot');
+    expect(whatChangedHeading(baseline)).toBe(
+      'What changed (vs your local snapshot — not the live org)',
+    );
+    const line = identicalLine(baseline, detail.entry.warnings);
+    expect(line).not.toContain('byte-identical');
+    expect(line).toBe(
+      "Identical to your local snapshot; the org's live copy differed (see the warning above) " +
+        'and is not shown here.',
+    );
+    // No live warning: the original line stands; a pre-S45 entry has no key → snapshot.
+    expect(identicalLine(baseline, [])).toBe(
+      'The deployed content was byte-identical to the previous version.',
+    );
+    expect(manifestBaseline({ detail: { warnings: [] } })).toBe('snapshot');
+  });
+
+  it('an EXISTS IN TARGET row: the pre-image fills the before; without one the tab says the live copy is not shown', () => {
+    const EXISTS =
+      'EXISTS IN TARGET — this deploy OVERWRITES a live ApexClass Brand_New that your snapshot ' +
+      'does not have (retrieved 10:02); the diff below is against the live version.';
+    const withImage = makeRequest({
+      kind: 'deploy',
+      summaryJson: summaryFor('ApexClass', 'Brand_New', [EXISTS]),
+    });
+    service.capture({
+      request: withImage,
+      payload: {
+        deployed: true,
+        revert_package: revertPackage([
+          { type: 'ApexClass', apiName: 'Brand_New', rel: 'classes/Brand_New.cls', text: 'live' },
+        ]),
+      },
+      payloadPath: zipOf({ 'classes/Brand_New.cls': 'mine' }),
+    });
+    const withoutImage = makeRequest({
+      kind: 'deploy',
+      summaryJson: summaryFor('ApexClass', 'Brand_New', [EXISTS]),
+    });
+    service.capture({
+      request: withoutImage,
+      payload: { deployed: true },
+      payloadPath: zipOf({ 'classes/Brand_New.cls': 'mine' }),
+    });
+    const byRequest = new Map(db.listManifestEntries(projectId).map((e) => [e.requestId, e]));
+    const live = byRequest.get(withImage.id)!;
+    expect(live.beforeContent).toBe('live');
+    expect(service.entryDetail(live.id).identical).toBe(false);
+
+    const bare = byRequest.get(withoutImage.id)!;
+    expect(bare.beforeContent).toBeNull();
+    const detail = service.entryDetail(bare.id);
+    expect(detail.contentSource).toBe('captured');
+    expect(detail.identical).toBeNull();
+    expect(noDiffLine(manifestBaseline(detail), detail.entry.warnings, false)).toBe(
+      "The org's live copy (see the warning above) is not shown here, and your local snapshot " +
+        'held no copy to diff against.',
+    );
+    // A row whose before exists, or with no live warning, keeps the old silence.
+    expect(noDiffLine('snapshot', detail.entry.warnings, true)).toBeNull();
+    expect(noDiffLine('snapshot', [], false)).toBeNull();
+  });
+
+  it('child and bundle pre-images are read at the after side altitude; a file outside the package is ignored', () => {
+    const summary = JSON.stringify({
+      changes: [
+        { type: 'CustomField', api_name: 'Account.Fresh__c', change: 'modify', warnings: [] },
+        { type: 'GenAiFunction', api_name: 'Dog_Facts', change: 'modify', warnings: [] },
+        { type: 'ApexClass', api_name: 'InvoiceService', change: 'modify', warnings: [] },
+      ],
+      destructive: [],
+      blast: [],
+    });
+    const liveField = '<fields>\n        <fullName>Fresh__c</fullName>\n        <type>Text</type>\n    </fields>';
+    const pkg = revertPackage([
+      { type: 'CustomField', apiName: 'Account.Fresh__c', rel: 'children/CustomField/Account.Fresh__c.xml', text: liveField },
+      {
+        type: 'GenAiFunction',
+        apiName: 'Dog_Facts',
+        rel: 'bundles/GenAiFunction/Dog_Facts.contrail-bundle.json',
+        text: JSON.stringify({
+          contrail_bundle: 1,
+          files: {
+            'Dog_Facts.genAiFunction-meta.xml': '<GenAiFunction>live</GenAiFunction>',
+            'output/schema.json': '{"live":true}',
+          },
+        }),
+      },
+    ]);
+    // A planted path outside the package dir never becomes a "before".
+    const outside = path.join(tmp, 'elsewhere.cls');
+    fs.writeFileSync(outside, 'not a pre-image');
+    pkg.restores.push({ type: 'ApexClass', api_name: 'InvoiceService', content_file: outside });
+    service.capture({
+      request: makeRequest({ kind: 'deploy', summaryJson: summary }),
+      payload: { deployed: true, revert_package: pkg },
+      payloadPath: zipOf({
+        'objects/Account.object': NEW_OBJECT,
+        'genAiFunctions/Dog_Facts/Dog_Facts.genAiFunction-meta.xml': '<GenAiFunction>new</GenAiFunction>',
+        'genAiFunctions/Dog_Facts/output/schema.json': '{"new":true}',
+        'classes/InvoiceService.cls': NEW_CLASS,
+      }),
+    });
+    const byName = new Map(db.listManifestEntries(projectId).map((e) => [e.apiName, e]));
+    const field = byName.get('Account.Fresh__c')!;
+    expect(field.beforeContent).toBe(liveField);
+    expect(field.afterContent).toContain('<type>Number</type>');
+    expect(JSON.parse(field.detailJson!).baseline).toBe('live_preimage');
+    const fn = byName.get('Dog_Facts')!;
+    expect(fn.beforeContent).toContain('contrail:file genAiFunctions/Dog_Facts/output/schema.json');
+    expect(fn.beforeContent).toContain('{"live":true}');
+    expect(fn.beforeContent).toContain('<GenAiFunction>live</GenAiFunction>');
+    expect(fn.afterContent).toContain('{"new":true}');
+    expect(JSON.parse(fn.detailJson!).baseline).toBe('live_preimage');
+    const cls = byName.get('InvoiceService')!;
+    expect(cls.beforeContent).toBe(OLD_CLASS);
+    expect(JSON.parse(cls.detailJson!).baseline).toBe('snapshot');
+  });
+
+  it('a junction planted inside the package dir cannot pull a file from outside it', () => {
+    const pkg = revertPackage([]);
+    const outsideDir = path.join(tmp, 'outside-dir');
+    fs.mkdirSync(outsideDir, { recursive: true });
+    fs.writeFileSync(path.join(outsideDir, 'InvoiceService.cls'), 'not a pre-image');
+    fs.mkdirSync(pkg.dir, { recursive: true });
+    // 'junction' on Windows (no privilege needed); a plain directory symlink elsewhere.
+    fs.symlinkSync(outsideDir, path.join(pkg.dir, 'linked'), 'junction');
+    const planted = path.join(pkg.dir, 'linked', 'InvoiceService.cls');
+    // The lexical check alone would accept it; the real path is outside.
+    expect(path.resolve(planted).startsWith(path.resolve(pkg.dir) + path.sep)).toBe(true);
+    pkg.restores.push({ type: 'ApexClass', api_name: 'InvoiceService', content_file: planted });
+    service.capture({
+      request: makeRequest({
+        kind: 'deploy',
+        summaryJson: summaryFor('ApexClass', 'InvoiceService', []),
+      }),
+      payload: { deployed: true, revert_package: pkg },
+      payloadPath: zipOf({ 'classes/InvoiceService.cls': NEW_CLASS }),
+    });
+    const [entry] = db.listManifestEntries(projectId);
+    expect(entry!.beforeContent).toBe(OLD_CLASS);
+    expect(entry!.beforeContent).not.toContain('not a pre-image');
+    expect(JSON.parse(entry!.detailJson!).baseline).toBe('snapshot');
   });
 });

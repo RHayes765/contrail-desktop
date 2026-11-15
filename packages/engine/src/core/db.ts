@@ -2091,6 +2091,62 @@ export class ContrailDb {
     return result.changes;
   }
 
+  /**
+   * S45: void ONE still-pending request and store the reason as its result
+   * (the execute-time "target moved" guard — re-sending the code replays this
+   * text, never "a newer validation replaced it"). Atomic against a concurrent
+   * claimRequestForExecution: both UPDATEs predicate on status = 'validated',
+   * so exactly one of them can match — a voided request is never also
+   * claimed. Returns false when the row was no longer 'validated' (claimed,
+   * superseded, expired or locked first), and the caller falls through.
+   */
+  voidRequestWithResult(id: string, resultJson: string): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE deploy_requests SET status = 'superseded', result_json = ?
+         WHERE id = ? AND status = 'validated'`,
+      )
+      .run(resultJson, id);
+    return result.changes === 1;
+  }
+
+  /**
+   * S45: claimCode's lazy expiry of ONE request — predicated on status =
+   * 'validated' like voidRequestWithResult, so a request another process
+   * claimed (the plugin and the desktop share this database) is never
+   * flipped back to 'expired' under its running execution. Returns true only
+   * when this call expired it; the caller removes the payload and pre-images
+   * only then. Hand-mirrored with the plugin db.ts beside voidRequestWithResult,
+   * together with registerFailedAttempt's status-predicated UPDATEs.
+   */
+  expireValidatedRequest(id: string): boolean {
+    const result = this.db
+      .prepare(`UPDATE deploy_requests SET status = 'expired' WHERE id = ? AND status = 'validated'`)
+      .run(id);
+    return result.changes === 1;
+  }
+
+  /**
+   * S45: flip every past-due 'validated' request — any connection, any kind —
+   * to 'expired' and return the rows so the caller can remove their payloads
+   * and pre-images. Expiry used to be lazy (only a claim attempt noticed a
+   * stale code, claimCode's path is untouched), so never-executed
+   * validations stayed 'validated' forever. ISO-8601 UTC stamps compare
+   * lexicographically; RETURNING is supported by the bundled SQLite (3.35+).
+   */
+  expireStaleValidatedRequests(
+    nowIso: string,
+  ): Array<{ id: string; payloadPath: string | null }> {
+    const rows = this.db
+      .prepare(
+        `UPDATE deploy_requests SET status = 'expired'
+         WHERE status = 'validated' AND expires_at < ?
+         RETURNING id, payload_path`,
+      )
+      .all(nowIso) as Array<{ id: string; payload_path: string | null }>;
+    return rows.map((r) => ({ id: r.id, payloadPath: r.payload_path }));
+  }
+
   /** Lookup by code regardless of status; the caller branches on request.status. */
   findRequestByCode(
     connectionId: string,
@@ -2210,6 +2266,19 @@ export class ContrailDb {
       .run(payloadPath, id);
   }
 
+  /**
+   * S45: re-persist a validated request's summary — the deploy validate
+   * writes its revert pre-images AFTER the row exists (the directory is
+   * keyed by the request id) and records what it wrote here.
+   * S45: hand-mirrored with the plugin db.ts, as are voidRequestWithResult and
+   * expireStaleValidatedRequests (engine.ts calls it).
+   */
+  setDeployRequestSummaryJson(id: string, summaryJson: string): void {
+    this.db
+      .prepare(`UPDATE deploy_requests SET summary_json = ? WHERE id = ?`)
+      .run(summaryJson, id);
+  }
+
   updateDeployRequestStatus(
     id: string,
     status: 'executed' | 'executing' | 'expired' | 'superseded' | 'execution_failed' | 'locked',
@@ -2225,6 +2294,12 @@ export class ContrailDb {
    * threshold is reached the request is locked so even the correct code can no
    * longer execute it — the human must re-validate. Returns what happened so
    * the caller can shape the refusal message and audit.
+   * S45: both UPDATEs predicate on status = 'validated' (the plugin and the
+   * desktop share this database): a row another process claimed between the
+   * SELECT and the UPDATE is never flipped to 'locked' under its running
+   * execution — the caller then deletes nothing, because locked is reported
+   * only when the lock UPDATE matched. Hand-mirrored with the plugin db.ts, as
+   * is expireValidatedRequest.
    */
   registerFailedAttempt(
     connectionId: string,
@@ -2242,11 +2317,22 @@ export class ContrailDb {
       | undefined;
     if (!row) return { pendingExisted: false, locked: false, attemptsRemaining: 0 };
 
-    const attempts = row.failed_attempts + 1;
+    const bumped = this.db
+      .prepare(
+        `UPDATE deploy_requests SET failed_attempts = failed_attempts + 1
+         WHERE id = ? AND status = 'validated' RETURNING failed_attempts`,
+      )
+      .get(row.id) as { failed_attempts: number } | undefined;
+    // No longer pending (claimed, voided or expired since the SELECT).
+    if (!bumped) return { pendingExisted: false, locked: false, attemptsRemaining: 0 };
+    const attempts = bumped.failed_attempts;
     if (attempts >= maxAttempts) {
-      this.db
-        .prepare(`UPDATE deploy_requests SET status = 'locked', failed_attempts = ? WHERE id = ?`)
-        .run(attempts, row.id);
+      const locked = this.db
+        .prepare(`UPDATE deploy_requests SET status = 'locked' WHERE id = ? AND status = 'validated'`)
+        .run(row.id);
+      if (locked.changes !== 1) {
+        return { pendingExisted: false, locked: false, attemptsRemaining: 0 };
+      }
       return {
         pendingExisted: true,
         locked: true,
@@ -2255,9 +2341,6 @@ export class ContrailDb {
         payloadPath: row.payload_path,
       };
     }
-    this.db
-      .prepare(`UPDATE deploy_requests SET failed_attempts = ? WHERE id = ?`)
-      .run(attempts, row.id);
     return {
       pendingExisted: true,
       locked: false,

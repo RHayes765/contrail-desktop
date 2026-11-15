@@ -57,7 +57,7 @@ export {
   type NotificationsConfig,
   type PhoneNotification,
 } from './core/notify.js';
-export { dataDir, dbPath, configPath, deploysDir } from './core/paths.js';
+export { dataDir, dbPath, configPath, deploysDir, stagingDir } from './core/paths.js';
 export { ContrailError, ConnectionNotFoundError } from './core/errors.js';
 export {
   GRANTS,
@@ -143,7 +143,23 @@ export type {
   UnavailableCode,
 } from './localdiag/types.js';
 export { queryDependencies } from './deps/graph.js';
-export { semanticDiff, type DiffLimits } from './diff/semantic.js';
+export {
+  semanticDiff,
+  type DiffLimits,
+  type Change,
+  type TextHunk,
+  type ArtifactSemanticDiff,
+} from './diff/semantic.js';
+// S45 F3: the automation card's one text source (the approval page, the
+// Deploy Review section and S46's get_object_automation all read it).
+export {
+  NOT_COVERED,
+  collectObjectAutomation,
+  formatAutomationLines,
+  parseApexObjectTargets,
+  type ObjectAutomation,
+  type AutomationFlow,
+} from './deps/automation.js';
 
 // Metadata reads
 export {
@@ -176,19 +192,47 @@ export {
 } from './metadata/flowgraph.js';
 
 // Deploy
-export { DeployEngine, type ExecutionObserver } from './deploy/engine.js';
+export {
+  DeployEngine,
+  type ExecutionObserver,
+  type DeployValidationSummary,
+  type LiveCheckSummary,
+} from './deploy/engine.js';
 export {
   ApprovalPageServer,
   type ApprovalPresenter,
   type ApprovalPresentation,
   type ApprovalRequestView,
 } from './deploy/approval.js';
+export type {
+  ApprovalPageOptions,
+  ApprovalRowDiff,
+  ApprovalAutomation,
+} from './connect/pages.js';
 export {
   buildDeployZip,
   analyzeChanges,
   flowDeactivationXml,
   fileSafeName,
   deployZipEntryPath,
+  type ComponentChange,
+  type ComponentPreImage,
 } from './deploy/package.js';
+// S45 F1/F2/F4: the live pre-image, the execute-time target check and the
+// revert package (written under stagingDir()/_reverts/<requestId>/).
+export {
+  hhmm,
+  revertDirFor,
+  revertReadmeText,
+  type PreImage,
+  type PreImageResult,
+  type RevertPlan,
+  type RevertPlanMember,
+  type RevertPlanComponent,
+  type RevertPlanReason,
+  type RevertPlanCovered,
+  type RevertTargetCheck,
+  type DeployMovedMember,
+} from './deploy/preimage.js';
 export { resolveSourceFile, resolveSourcePath } from './deploy/sources.js';
 export { generateConfirmationCode } from './deploy/codes.js';

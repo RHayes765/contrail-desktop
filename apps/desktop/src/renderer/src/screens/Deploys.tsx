@@ -1,5 +1,19 @@
 import { useEffect, useState } from 'react';
-import type { DeployRequestView } from '@contrail/shared';
+import type {
+  DeployRequestView,
+  DeployReviewRowView,
+  DeployRowDiffView,
+  DeployTargetCheckView,
+  ObjectAutomationView,
+} from '@contrail/shared';
+import {
+  TARGET_MOVED_LEAD,
+  localStamp,
+  revertDeleteLabel,
+  stateLabel,
+  structuredRow,
+  targetCheckHeadline,
+} from '../lib/deployReview.js';
 import { useDeploys } from '../stores/deploys.js';
 import { useNav } from '../stores/nav.js';
 
@@ -12,23 +26,224 @@ import { useNav } from '../stores/nav.js';
  * decision IS the approval, and only the main process touches the code.
  */
 
-const STATE_LABEL: Record<string, string> = {
-  validated: 'Awaiting approval',
-  executing: 'Executing…',
-  executed: 'Executed',
-  execution_failed: 'Execution failed',
-  expired: 'Expired',
-  superseded: 'Superseded',
-  locked: 'Locked (too many failed code attempts)',
-};
-
-function stateLabel(r: DeployRequestView): string {
-  if (r.desktopState === 'rejected') return 'Rejected';
-  return STATE_LABEL[r.status] ?? r.status;
-}
-
 function orgClass(orgType: string): string {
   return orgType === 'production' ? 'prod' : orgType === 'sandbox' ? 'dev' : 'other';
+}
+
+/** Same rendering of an XML side as the Diff screen's drill panel. */
+function fmtSide(value: unknown): string {
+  if (value == null) return '(unset)';
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+/**
+ * S45 F1: one review row's diff — against the live org retrieved at
+ * validate, or the snapshot when that retrieve failed (the summary line
+ * says which). Collapsed by default, in the Diff screen's drill-panel
+ * classes. The text is raw org text: React renders it as text, never markup.
+ */
+function DeployRowDiff({ diff }: { diff: DeployRowDiffView }) {
+  if (diff.identical) return <div className="deploy-source deploy-diff">{diff.summary}</div>;
+  const filesAdded = diff.counts?.filesAdded ?? [];
+  const filesRemoved = diff.counts?.filesRemoved ?? [];
+  return (
+    <details className="deploy-diff">
+      <summary className="deploy-source">{diff.summary}</summary>
+      {diff.changes && diff.changes.length > 0 && (
+        <div className="diff-changes">
+          {diff.changes.map((change, i) => (
+            <div key={i} className="diff-change">
+              {change.kind === 'scalar' ? (
+                <>
+                  <span className="diff-path">{change.path || '(root)'}</span>
+                  <span className="diff-a">{fmtSide(change.a)}</span>
+                  <span className="diff-arrow">→</span>
+                  <span className="diff-b">{fmtSide(change.b)}</span>
+                </>
+              ) : change.kind === 'added' ? (
+                <>
+                  <span className="diff-status added">added</span>
+                  <span className="diff-path">
+                    {change.path} · {change.key}
+                  </span>
+                </>
+              ) : change.kind === 'removed' ? (
+                <>
+                  <span className="diff-status removed">removed</span>
+                  <span className="diff-path">
+                    {change.path} · {change.key}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="diff-status changed">note</span>
+                  <span className="diff-path">
+                    {change.path} · {change.note}
+                  </span>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {filesAdded.length > 0 && (
+        <div className="deploy-source">added: {filesAdded.join(', ')}</div>
+      )}
+      {filesRemoved.length > 0 && (
+        <div className="deploy-source">removed: {filesRemoved.join(', ')}</div>
+      )}
+      {diff.hunks && diff.hunks.length > 0 && (
+        <div className="diff-hunks">
+          {diff.hunks.map((hunk, i) => (
+            <div key={i} className="diff-hunk">
+              <div className="conn-detail">
+                {hunk.file ? `${hunk.file} · ` : ''}@@ −{hunk.a_line} +{hunk.b_line} @@
+              </div>
+              {hunk.removed.map((line, j) => (
+                <div key={`r${j}`} className="hunk-line removed">
+                  - {line}
+                </div>
+              ))}
+              {hunk.removed_truncated && (
+                <div className="hunk-line removed meter-dim">⋯ more removed lines</div>
+              )}
+              {hunk.added.map((line, j) => (
+                <div key={`a${j}`} className="hunk-line added">
+                  + {line}
+                </div>
+              ))}
+              {hunk.added_truncated && (
+                <div className="hunk-line added meter-dim">⋯ more added lines</div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {diff.note ? (
+        <div className="deploy-source">{diff.note}</div>
+      ) : (
+        diff.truncated && (
+          <div className="deploy-source">
+            … truncated — more differences than this review shows
+          </div>
+        )
+      )}
+    </details>
+  );
+}
+
+/** One review row: label, provenance/detail, warnings, then (S45) its diff. */
+function ReviewRow({ row }: { row: DeployReviewRowView }) {
+  return (
+    <div className="deploy-row">
+      <div>{row.label}</div>
+      {row.detail && <div className="deploy-source">{row.detail}</div>}
+      {row.warnings.map((w, j) => (
+        <div key={j} className="deploy-warning">
+          ⚠ {w}
+        </div>
+      ))}
+      {row.diff && <DeployRowDiff diff={row.diff} />}
+    </div>
+  );
+}
+
+
+/**
+ * S45 F3: the automation card, worded as the approval page's
+ * (pages.ts renderAutomationCard): read from the LOCAL SNAPSHOT, never the
+ * org, with the mandatory not-covered list. An Apex script naming no object
+ * still shows the card (D6) — with a dateless heading, since no snapshot row
+ * was read.
+ */
+function AutomationSection({
+  kind,
+  list,
+  extraNotCovered,
+}: {
+  kind: DeployRequestView['kind'];
+  list: ObjectAutomationView[];
+  extraNotCovered: string[];
+}) {
+  const dates = [
+    ...new Set(list.flatMap((a) => (a.snapshot_at ? [localStamp(a.snapshot_at)] : []))),
+  ];
+  const heading =
+    (list.length
+      ? `AUTOMATION IN YOUR SNAPSHOT (from ${dates.length ? dates.join(', ') : 'an unknown date'})`
+      : 'AUTOMATION IN YOUR SNAPSHOT') + ' — read from the local snapshot, not the live org';
+  const notCovered = [...new Set([...list.flatMap((a) => a.not_covered), ...extraNotCovered])];
+  return (
+    <div className="deploy-section">
+      <h3>{heading}</h3>
+      {kind === 'apex' && (
+        <div className="deploy-row">
+          Objects this script MAY touch (parsed from the text; dynamic SOQL and called Apex hide
+          more): {list.length ? list.map((a) => a.object).join(', ') : 'none found in the text'}
+        </div>
+      )}
+      {list.map((a, i) => (
+        <div key={i} className="deploy-row">
+          <div>{a.object}</div>
+          {a.summary_lines.map((line, j) => (
+            <div key={`l${j}`} className="deploy-source">
+              {line}
+            </div>
+          ))}
+          {a.notes.map((note, j) => (
+            <div key={`n${j}`} className="deploy-warning">
+              {note}
+            </div>
+          ))}
+        </div>
+      ))}
+      {notCovered.length > 0 && (
+        <div className="deploy-row">
+          <div className="meter-dim">Not visible in the snapshot:</div>
+          <ul className="deploy-nc">
+            {notCovered.map((line, i) => (
+              <li key={i}>{line}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** S45 F2: what the execute-time target check reported on the result. */
+function TargetCheckSection({
+  kind,
+  check,
+}: {
+  kind: DeployRequestView['kind'];
+  check: DeployTargetCheckView;
+}) {
+  return (
+    <div className="deploy-section">
+      <h3>Target check</h3>
+      <div className="deploy-row">{targetCheckHeadline(kind, check)}</div>
+      {check.note && <div className="deploy-source">{check.note}</div>}
+      {check.unchecked.length > 0 && (
+        <div className="deploy-row">
+          <div className="meter-dim">Could not be re-checked:</div>
+          {check.unchecked.map((u, i) => (
+            <div key={i} className="deploy-source">
+              {u.label}
+              {u.state ? ` — ${u.state}` : ''}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function ReviewPanel({ request }: { request: DeployRequestView }) {
@@ -36,8 +251,13 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
   const [comment, setComment] = useState('');
   const isProd = request.orgType === 'production';
   const expired = new Date(request.expiresAt).getTime() < Date.now();
+  // `deciding`: an approve/reject is already in flight in main — a reloaded
+  // renderer must not offer a second one.
   const approvable =
-    request.status === 'validated' && request.desktopState !== 'rejected' && !expired;
+    request.status === 'validated' &&
+    request.desktopState !== 'rejected' &&
+    !expired &&
+    !request.deciding;
   const busy = deciding === request.id;
   // Nothing to show = nothing to judge. A blank review must never carry an
   // enabled Approve button (plugin-era rows, unparsed summaries).
@@ -49,24 +269,24 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
       request.results.length >
     0;
 
-  // A component read from a file was not authored by the approver, so the row
-  // has to say which file and carry its fingerprint.
-  const provenance = (c: { sourcePath?: string; sourceSha256?: string }): string | undefined =>
-    c.sourcePath ? `from ${c.sourcePath}  ·  sha256 ${(c.sourceSha256 ?? '').slice(0, 16)}…` : undefined;
-  const rows = request.changes.length
-    ? request.changes.map((c) => ({
-        label: `${c.change.toUpperCase()}  ${c.type}:${c.apiName}`,
-        warnings: c.warnings,
-        detail: provenance(c),
-      }))
-    : request.changeRows;
-  const destructiveRows = request.destructive.length
-    ? request.destructive.map((c) => ({
-        label: `DELETE  ${c.type}:${c.apiName}`,
-        warnings: c.warnings,
-        detail: provenance(c),
-      }))
-    : request.destructiveRows;
+  // S45: the presenter's rows are the approval page's own rows — label,
+  // provenance, warnings and the diff — so they win. A plugin-era row has
+  // none and is rebuilt from the structured validation summary: provenance
+  // plus the live copy's who/when (its diff was never stored — the notice
+  // above says so).
+  const fromPresenter = request.changeRows.length + request.destructiveRows.length > 0;
+  const rows: DeployReviewRowView[] = fromPresenter
+    ? request.changeRows
+    : request.changes.map((c) =>
+        structuredRow(c, `${c.change.toUpperCase()}  ${c.type}:${c.apiName}`),
+      );
+  const destructiveRows: DeployReviewRowView[] = fromPresenter
+    ? request.destructiveRows
+    : request.destructive.map((c) => structuredRow(c, `DELETE  ${c.type}:${c.apiName}`));
+  const showAutomation =
+    request.automation.length > 0 ||
+    (request.kind === 'apex' && request.automationNotCovered.length > 0);
+  const revert = request.revertPackage;
 
   return (
     <div className="panel">
@@ -98,6 +318,14 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
           ))}
         </div>
       )}
+
+      {/* S45: the live check was unavailable at validate, or the write ran
+          without a target check — composed in main from the stored result. */}
+      {request.notices.map((n, i) => (
+        <div key={i} className="notice">
+          ⚠ {n}
+        </div>
+      ))}
 
       {request.agentReview && (
         <div
@@ -144,15 +372,7 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
         <div className="deploy-section deploy-destructive">
           <h3>Destructive changes</h3>
           {destructiveRows.map((row, i) => (
-            <div key={i} className="deploy-row">
-              <div>{row.label}</div>
-              {row.detail && <div className="deploy-source">{row.detail}</div>}
-              {row.warnings.map((w, j) => (
-                <div key={j} className="deploy-warning">
-                  ⚠ {w}
-                </div>
-              ))}
-            </div>
+            <ReviewRow key={i} row={row} />
           ))}
         </div>
       )}
@@ -161,17 +381,17 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
         <div className="deploy-section">
           <h3>Changes</h3>
           {rows.map((row, i) => (
-            <div key={i} className="deploy-row">
-              <div>{row.label}</div>
-              {row.detail && <div className="deploy-source">{row.detail}</div>}
-              {row.warnings.map((w, j) => (
-                <div key={j} className="deploy-warning">
-                  ⚠ {w}
-                </div>
-              ))}
-            </div>
+            <ReviewRow key={i} row={row} />
           ))}
         </div>
+      )}
+
+      {showAutomation && (
+        <AutomationSection
+          kind={request.kind}
+          list={request.automation}
+          extraNotCovered={request.automationNotCovered}
+        />
       )}
 
       {request.results.length > 0 && (
@@ -205,10 +425,82 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
         </p>
       )}
 
+      {request.targetMoved && (
+        <div className="deploy-section deploy-destructive">
+          <h3>Target moved — not executed</h3>
+          <div className="deploy-row">{TARGET_MOVED_LEAD}</div>
+          {request.targetMoved.moved.map((m, i) => (
+            <div key={i} className="deploy-row">
+              <div>
+                {m.label}
+                {m.state ? ` — ${m.state}` : ''}
+              </div>
+              {m.detail && <div className="deploy-source">{m.detail}</div>}
+            </div>
+          ))}
+          {request.targetMoved.unchecked.length > 0 && (
+            <div className="deploy-row">
+              <div className="meter-dim">Could not be re-checked:</div>
+              {request.targetMoved.unchecked.map((u, i) => (
+                <div key={i} className="deploy-source">
+                  {u.label}
+                  {u.state ? ` — ${u.state}` : ''}
+                </div>
+              ))}
+            </div>
+          )}
+          {request.targetMoved.refusal && (
+            <div className="deploy-source">{request.targetMoved.refusal}</div>
+          )}
+        </div>
+      )}
+
       {request.resultSummary && (
         <div className="deploy-section">
           <h3>Result</h3>
           <pre className="diff-raw">{request.resultSummary}</pre>
+        </div>
+      )}
+
+      {request.targetCheck && (
+        <TargetCheckSection kind={request.kind} check={request.targetCheck} />
+      )}
+
+      {(revert || request.revertNote) && (
+        <div className="deploy-section">
+          <h3>Revert package</h3>
+          {revert ? (
+            <>
+              {revert.outcome === 'unknown' && (
+                <div className="deploy-warning">Outcome unknown — revert files kept</div>
+              )}
+              {revert.dir && <div className="deploy-source">{revert.dir}</div>}
+              <div className="deploy-row">
+                {revert.restores.length} to restore · {revert.deletes.length} to delete ·{' '}
+                {revert.notRestorable.length} not restorable
+              </div>
+              {revert.restores.map((m, i) => (
+                <div key={`r${i}`} className="deploy-source">
+                  restore {m.type}:{m.apiName}
+                  {m.contentFile ? ` ← ${m.contentFile}` : ''}
+                </div>
+              ))}
+              {revert.deletes.map((m, i) => (
+                <div key={`d${i}`} className="deploy-source">
+                  {revertDeleteLabel(m, revert.outcome)}
+                </div>
+              ))}
+              {revert.notRestorable.map((m, i) => (
+                <div key={`n${i}`} className="deploy-warning">
+                  not restorable: {m.type}:{m.apiName} — {m.reason}
+                </div>
+              ))}
+              {revert.plan && <div className="deploy-source">plan: {revert.plan}</div>}
+              {revert.note && <div className="deploy-source">{revert.note}</div>}
+            </>
+          ) : (
+            <div className="deploy-source">{request.revertNote}</div>
+          )}
         </div>
       )}
 

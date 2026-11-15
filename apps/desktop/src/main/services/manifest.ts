@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { unzipSync } from 'fflate';
 import {
   deployZipEntryPath,
@@ -45,6 +46,14 @@ type PushFn = <C extends PushChannel>(channel: C, payload: PushEvents[C]) => voi
 /** Per-side content cap — a captured flow is big; a pathological one is not a DB row. */
 const CONTENT_CAP = 400_000;
 
+/**
+ * Which "before" a captured entry's what-changed diff used (stored in
+ * detail_json as `baseline`): the live pre-image validate froze into the
+ * revert package (S45), or the local snapshot when there is none. Entries
+ * captured before S45 carry no key — they used the snapshot.
+ */
+type ManifestBaseline = 'live_preimage' | 'snapshot';
+
 interface ComponentChange {
   type: string;
   api_name: string;
@@ -76,6 +85,7 @@ export class ManifestService {
         executedAt: new Date().toISOString(),
         payloadPath: info.payloadPath,
         captureContent: true,
+        result: info.payload,
       });
       if (rows.length === 0) return;
       this.deps.db.insertManifestEntries(rows);
@@ -134,7 +144,13 @@ export class ManifestService {
   private synthesizeRows(
     request: DeployRequestRecord,
     projectId: string,
-    opts: { executedAt: string; payloadPath: string | null; captureContent: boolean },
+    opts: {
+      executedAt: string;
+      payloadPath: string | null;
+      captureContent: boolean;
+      /** The execution payload (capture only): its revert_package names the live pre-images. */
+      result?: Record<string, unknown> | null;
+    },
   ): Array<Omit<ManifestEntryRecord, 'id' | 'summary' | 'summaryModel' | 'summaryCreatedAt'>> {
     const base = {
       projectId,
@@ -153,10 +169,16 @@ export class ManifestService {
         ...((summary?.destructive as ComponentChange[] | undefined) ?? []),
       ].filter((c) => c && c.change !== 'unchanged_content');
       const zip = this.readZip(opts.payloadPath);
+      // S45: the pre-images validate froze (the revert package) are what the
+      // org held, the honest "before". finalizeRevert runs before this
+      // observer, so the files are on disk at capture.
+      const preImages = opts.captureContent
+        ? revertRestores(opts.result)
+        : new Map<string, string>();
       return changes.map((c) => {
         const contents = opts.captureContent
-          ? this.componentContents(request.connectionId, c, zip)
-          : { before: null, after: null, truncated: false };
+          ? this.componentContents(request.connectionId, c, zip, preImages)
+          : { before: null, after: null, truncated: false, baseline: null };
         return {
           ...base,
           entryKind: 'metadata' as const,
@@ -168,6 +190,7 @@ export class ManifestService {
             warnings: c.warnings ?? [],
             ...(c.source_path ? { source_path: c.source_path } : {}),
             ...(c.source_sha256 ? { source_sha256: c.source_sha256 } : {}),
+            ...(contents.baseline ? { baseline: contents.baseline } : {}),
           }),
           beforeContent: contents.before,
           afterContent: contents.after,
@@ -302,22 +325,32 @@ export class ManifestService {
   }
 
   /**
-   * before = the pre-deploy snapshot's version (still on disk — snapshots
-   * only move on refresh); after = the deployed bytes from the frozen zip.
-   * Child components extract their own block from the parent document on
-   * BOTH sides so the diff altitudes match.
+   * before = the live pre-image validate froze into the revert package
+   * (S45: what the org held, baseline 'live_preimage'), else the pre-deploy
+   * snapshot's version (still on disk — snapshots only move on refresh;
+   * baseline 'snapshot'); after = the deployed bytes from the frozen zip.
+   * Child components extract their own block on BOTH sides so the diff
+   * altitudes match.
    */
   private componentContents(
     connectionId: string,
     c: ComponentChange,
     zip: Record<string, Uint8Array> | null,
-  ): { before: string | null; after: string | null; truncated: boolean } {
+    preImages: Map<string, string>,
+  ): {
+    before: string | null;
+    after: string | null;
+    truncated: boolean;
+    baseline: ManifestBaseline;
+  } {
     const entry = deployZipEntryPath(c.type, c.api_name);
     const extract = (doc: string | null): string | null => {
       if (!doc) return null;
       if (entry?.child) return findChildBlock(doc, entry.childTag, entry.childName) ?? null;
       return doc;
     };
+    const live =
+      c.change !== 'add' ? readPreImage(preImages.get(`${c.type}:${c.api_name}`)) : null;
 
     // S30 bundle components: one logical change is a DIRECTORY of files —
     // capture both sides as the concatenated multi-file text (the same
@@ -342,7 +375,17 @@ export class ManifestService {
         );
       }
       let before: string | null = null;
-      if (c.change !== 'add') {
+      // The revert file is the bundle envelope: {"contrail_bundle":1,
+      // "files":{rel: body}}, rels relative to the bundle dir.
+      const liveFiles = live !== null ? bundleEnvelopeFiles(live) : null;
+      if (liveFiles) {
+        before = frame(
+          Object.entries(liveFiles).map(([rel, text]): [string, string] => [
+            `${entry.bundleDir}${rel}`,
+            text,
+          ]),
+        );
+      } else if (c.change !== 'add') {
         try {
           before = frame(
             this.deps.store
@@ -363,6 +406,7 @@ export class ManifestService {
         before: b2?.content ?? null,
         after: a2?.content ?? null,
         truncated: (b2?.truncated ?? false) || (a2?.truncated ?? false),
+        baseline: liveFiles ? 'live_preimage' : 'snapshot',
       };
     }
 
@@ -373,7 +417,12 @@ export class ManifestService {
     }
 
     let before: string | null = null;
-    if (c.change !== 'add') {
+    // A child's revert file already holds its own block; extracting finds
+    // that block again (or the file is kept as-is).
+    const liveBefore = live !== null ? (extract(live) ?? live) : null;
+    if (liveBefore !== null) {
+      before = liveBefore;
+    } else if (c.change !== 'add') {
       try {
         const rec = this.deps.db.getArtifact(connectionId, c.type, c.api_name);
         if (rec?.filePath) {
@@ -390,6 +439,7 @@ export class ManifestService {
       before: b?.content ?? null,
       after: a?.content ?? null,
       truncated: (b?.truncated ?? false) || (a?.truncated ?? false),
+      baseline: liveBefore !== null ? 'live_preimage' : 'snapshot',
     };
   }
 
@@ -583,6 +633,7 @@ export class ManifestService {
       rec.entryKind === 'metadata'
         ? `${(rec.change ?? 'change').toUpperCase()} ${rec.type} "${rec.apiName}" (executed ${rec.executedAt})`
         : `${rec.label ?? 'Data change'} (executed ${rec.executedAt})`;
+    const detail = parseJson(rec.detailJson ?? '') as Record<string, unknown> | null;
     const { summary, model } = await this.summaries.summarizeChange({
       title,
       before,
@@ -590,7 +641,18 @@ export class ManifestService {
       changeMeta: {
         kind: rec.kind,
         change: rec.change,
-        ...(parseJson(rec.detailJson ?? '') as Record<string, unknown> | null),
+        ...detail,
+        // S45: name the "before" side, so live-org warnings in the detail are
+        // never read as describing a snapshot diff.
+        ...(rec.entryKind === 'metadata' && rec.beforeContent !== null
+          ? {
+              before_source:
+                detail?.baseline === 'live_preimage'
+                  ? "the org's live copy, retrieved when this deploy was validated"
+                  : 'the local snapshot taken before this deploy, not the live org; a warning ' +
+                    'that mentions the live version describes what the approval showed',
+            }
+          : {}),
         ...(currentVersionNote
           ? {
               note:
@@ -610,6 +672,72 @@ export class ManifestService {
       cached: false,
     };
   }
+}
+
+/**
+ * The live pre-image files an executed deploy's revert package names, keyed
+ * type:api_name to the resolved content_file, only files that really live
+ * inside the package's own dir — compared by real path, so a junction or
+ * symlink planted under the dir cannot pull in a file from elsewhere. Empty
+ * when there is no package (the live check was unavailable at validate, or
+ * the deploy predates S45).
+ */
+function revertRestores(result: Record<string, unknown> | null | undefined): Map<string, string> {
+  const out = new Map<string, string>();
+  const pkg = result?.revert_package;
+  if (!pkg || typeof pkg !== 'object') return out;
+  const { dir, restores } = pkg as { dir?: unknown; restores?: unknown };
+  if (typeof dir !== 'string' || !Array.isArray(restores)) return out;
+  const realDir = realPathOf(dir);
+  if (realDir === null) return out;
+  const root = realDir + path.sep;
+  for (const r of restores) {
+    const m = r as { type?: unknown; api_name?: unknown; content_file?: unknown } | null;
+    if (
+      !m ||
+      typeof m.type !== 'string' ||
+      typeof m.api_name !== 'string' ||
+      typeof m.content_file !== 'string'
+    ) {
+      continue;
+    }
+    const real = realPathOf(m.content_file);
+    if (real !== null && real.startsWith(root)) out.set(`${m.type}:${m.api_name}`, real);
+  }
+  return out;
+}
+
+/** A path with every link resolved; null when it does not exist (or cannot be read). */
+function realPathOf(file: string): string | null {
+  try {
+    return fs.realpathSync(file);
+  } catch {
+    return null;
+  }
+}
+
+/** A pre-image file's text; null when absent or unreadable (the snapshot fallback applies). */
+function readPreImage(file: string | undefined): string | null {
+  if (!file) return null;
+  try {
+    if (!fs.statSync(file).isFile()) return null;
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/** A bundle revert file's rel-to-body map; null when it is not a bundle envelope. */
+function bundleEnvelopeFiles(text: string): Record<string, string> | null {
+  const env = parseJson(text) as { contrail_bundle?: unknown; files?: unknown } | null;
+  if (!env || env.contrail_bundle !== 1 || !env.files || typeof env.files !== 'object') {
+    return null;
+  }
+  const out: Record<string, string> = {};
+  for (const [rel, body] of Object.entries(env.files as Record<string, unknown>)) {
+    if (typeof body === 'string') out[rel] = body;
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }
 
 function cap(content: string): { content: string; truncated: boolean } {

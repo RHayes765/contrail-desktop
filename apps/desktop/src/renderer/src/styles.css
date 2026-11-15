@@ -1257,6 +1257,29 @@ button.danger {
 .deploy-result.bad {
   color: #ff8080;
 }
+/* S45: a review row's diff (live org or snapshot baseline), collapsed; its
+   body reuses the Diff screen's .diff-change / .diff-hunk classes. */
+.deploy-diff {
+  margin-top: 6px;
+}
+.deploy-diff > summary {
+  cursor: pointer;
+}
+.deploy-diff > .diff-changes,
+.deploy-diff > .diff-hunks {
+  margin-top: 6px;
+}
+.deploy-diff .diff-hunk {
+  max-height: 18rem;
+  overflow: auto;
+}
+/* S45: the automation card's "Not visible in the snapshot" list. */
+.deploy-nc {
+  margin: 4px 0 0;
+  padding-left: 28px;
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
 
 .approval-banner {
   display: flex;

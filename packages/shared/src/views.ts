@@ -656,6 +656,149 @@ export interface DeployChangeView {
    */
   sourcePath?: string;
   sourceSha256?: string;
+  /**
+   * S45: what the org held for this member when validate_deploy ran (the
+   * live baseline). Absent on rows validated before S45 or when the live
+   * check never ran. `present` is null when the org could not enumerate the
+   * type; dates are null when its listing did not describe the member.
+   */
+  preImage?: DeployPreImageView;
+}
+
+/** S45 F1: one member's frozen live pre-image (the bytes stay on disk). */
+export interface DeployPreImageView {
+  present: boolean | null;
+  source: 'retrieve' | 'list';
+  sha256?: string;
+  lastModifiedDate: string | null;
+  lastModifiedBy: string | null;
+  /** False when a diff against the retrieved bytes would lie (Profile, list-only). */
+  comparable: boolean;
+  /** False when no bytes were captured for a revert. */
+  restorable: boolean;
+}
+
+/**
+ * S45 F1: a review row's diff, as the approval view built it — against the
+ * live org retrieved at validate, or against the local snapshot when that
+ * retrieve failed (`baselineLabel` says which). Text is RAW org text: render
+ * it as text, never as markup.
+ */
+export interface DeployRowDiffView {
+  format: 'xml' | 'text' | 'bundle';
+  identical: boolean;
+  /** "diff vs live org (retrieved HH:MM)" or "diff vs your snapshot (<date>)". */
+  baselineLabel: string;
+  /** The one-line summary, e.g. "diff vs live org (retrieved 15:02) · 3 changes". */
+  summary: string;
+  /** XML semantic changes (null when the format is not xml). */
+  changes: SemanticChangeView[] | null;
+  /** Text hunks; a bundle's hunks name the file inside the bundle. */
+  hunks: Array<TextHunkView & { file?: string }> | null;
+  counts: {
+    changes?: number;
+    linesAdded?: number;
+    linesRemoved?: number;
+    filesChanged?: string[];
+    filesAdded?: string[];
+    filesRemoved?: string[];
+  } | null;
+  truncated: boolean;
+  /** Why the body is shorter than the summary line (budget spent, too large to diff). */
+  note: string | null;
+}
+
+/**
+ * One display row of the review. `diff` rides only on `deploys:get` — the
+ * list (`deploys:list`) omits it so a refresh never ships every diff.
+ */
+export interface DeployReviewRowView {
+  label: string;
+  warnings: string[];
+  detail?: string;
+  diff?: DeployRowDiffView;
+}
+
+/** S45 F1: the validate-time live check (deploys only). */
+export interface DeployLiveCheckView {
+  /** 'unavailable' = the RETRIEVE failed: the org was not re-read at validate. */
+  status: 'ok' | 'unavailable';
+  reason: string | null;
+  startedAt: string | null;
+  at: string | null;
+  /** The org-side stamps of the checkOnly deploy (the guard's clock when no baseline exists). */
+  orgClock: { createdDate: string; completedDate: string | null } | null;
+  datesUnavailableTypes: string[];
+  datesUnavailable: string | null;
+  members: number | null;
+}
+
+/** A member named by a target check or a target-moved refusal. */
+export interface DeployTargetMemberView {
+  /** "ApexClass Foo", "Account 001… Name", "BotVersion Agent.v2". */
+  label: string;
+  /** moved: changed | gone | created | missing; unchecked: the engine's reason code. */
+  state: string | null;
+  /** Who/when, when the org reported it. */
+  detail: string | null;
+}
+
+/**
+ * S45 F2: the execute-time "target moved" guard refused this request — it
+ * did NOT execute and its code is void. `refusal` is the engine's verbatim text.
+ */
+export interface DeployTargetMovedView {
+  checkedAt: string | null;
+  refusal: string;
+  moved: DeployTargetMemberView[];
+  unchecked: DeployTargetMemberView[];
+}
+
+/**
+ * S45 F2: the execute-time target check reported on the result. 'ok' =
+ * compared and unchanged; 'unavailable' = the guard's own org read failed
+ * and the write ran anyway (fail-open, disclosed); 'not_checked' = nothing
+ * could be compared, so the write ran without a check; 'not_applicable' =
+ * apex/bulk/inserts — nothing fixed to re-read.
+ */
+export interface DeployTargetCheckView {
+  status: 'ok' | 'unavailable' | 'not_checked' | 'not_applicable';
+  checkedAt: string | null;
+  reason: string | null;
+  note: string | null;
+  checked: DeployTargetMemberView[];
+  unchecked: DeployTargetMemberView[];
+}
+
+/**
+ * S45 F4: the frozen revert package an executed deploy left under
+ * staging/_reverts/<requestId>/. Contrail never deploys it on its own.
+ */
+export interface DeployRevertPackageView {
+  dir: string | null;
+  /** 'unknown' = Contrail lost track of the deploy; the files are kept in case it committed. */
+  outcome: 'executed' | 'unknown';
+  restores: Array<{ type: string; apiName: string; contentFile: string | null }>;
+  deletes: Array<{ type: string; apiName: string }>;
+  notRestorable: Array<{ type: string; apiName: string; reason: string }>;
+  /** Path of revert-plan.json. */
+  plan: string | null;
+  /** The README text: what a revert does and does not undo. */
+  note: string | null;
+}
+
+/**
+ * S45 F3: one object's automation section — read from the LOCAL SNAPSHOT,
+ * never the org. Structural copy of the engine's card fields (snake_case);
+ * every line is composed by the engine (one text source).
+ */
+export interface ObjectAutomationView {
+  object: string;
+  /** ISO time the snapshot rows behind this section were retrieved; null when none. */
+  snapshot_at: string | null;
+  summary_lines: string[];
+  notes: string[];
+  not_covered: string[];
 }
 
 /**
@@ -689,16 +832,48 @@ export interface DeployRequestView {
   executedAt: string | null;
   approvedAt: string | null;
   approvedComment: string | null;
+  /**
+   * An approve()/reject() for this request is in flight in main (an approval
+   * can sit at 'validated' for up to 15 s while the target is re-checked).
+   * Code-free; a reloaded renderer reads it instead of its own busy flag.
+   */
+  deciding: boolean;
   /** Structured components (parsed from the stored validation summary). */
   changes: DeployChangeView[];
   destructive: DeployChangeView[];
-  /** Flattened display rows from the approval view (DML previews use these). */
-  changeRows: Array<{ label: string; warnings: string[]; detail?: string }>;
-  destructiveRows: Array<{ label: string; warnings: string[]; detail?: string }>;
+  /**
+   * Display rows from the approval view — label, warnings, detail and (S45,
+   * deploys:get only) the row's diff. The review prefers these; plugin-era
+   * rows without them fall back to `changes`/`destructive`.
+   */
+  changeRows: DeployReviewRowView[];
+  destructiveRows: DeployReviewRowView[];
   /** Validation/test result lines (label/value, bad = red). */
   results: Array<{ label: string; value: string; bad?: boolean }>;
   blast: string[];
   warnings: string[];
+  /** S45 F3: what the snapshot says fires on each object a data write touches. */
+  automation: ObjectAutomationView[];
+  /** S45 F3 (Apex): the not-covered lines when the script names no object. */
+  automationNotCovered: string[];
+  /** S45 F1: the validate-time live check; null for non-deploys and pre-S45 rows. */
+  liveCheck: DeployLiveCheckView | null;
+  /** S45 F2: set when the execute-time guard voided the request (it did NOT execute). */
+  targetMoved: DeployTargetMovedView | null;
+  /** S45 F2: the execute-time target check on the result; null when none ran. */
+  targetCheck: DeployTargetCheckView | null;
+  /** S45 F4: the revert package an executed (or outcome-unknown) deploy left. */
+  revertPackage: DeployRevertPackageView | null;
+  /** Why no revert package exists, when the result says so. */
+  revertNote: string | null;
+  /**
+   * Main-composed notices for the review panel: the live check was
+   * unavailable at validate; a request validated or proposed outside this
+   * app (what its own approval page showed that is not stored here, and the
+   * page-top dates-unavailable line); or the write ran without a target
+   * check.
+   */
+  notices: string[];
   /** The Ultracode adversarial review of this exact content, when one gated the propose (S28). */
   agentReview: {
     verdict: 'pass' | 'concerns' | 'fail';

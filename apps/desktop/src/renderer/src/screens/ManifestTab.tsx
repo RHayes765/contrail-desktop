@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react';
 import type { ManifestEntryDetailView, ManifestEntryView } from '@contrail/shared';
 import { ipc } from '../lib/ipc.js';
+import {
+  identicalLine,
+  manifestBaseline,
+  noDiffLine,
+  whatChangedHeading,
+} from '../lib/manifestBaseline.js';
 import { useManifest } from '../stores/manifest.js';
 import { useNav } from '../stores/nav.js';
 import { ArtifactDetailPanel } from '../components/artifactDetail.js';
@@ -50,9 +56,16 @@ function EntryRow({ e, onOpen }: { e: ManifestEntryView; onOpen: (id: string) =>
   );
 }
 
-function WhatChanged({ detail }: { detail: ManifestEntryDetailView }) {
+function WhatChanged({
+  detail,
+  identicalText,
+}: {
+  detail: ManifestEntryDetailView;
+  /** S45: names the baseline when a snapshot diff sits under live-org warnings. */
+  identicalText: string;
+}) {
   if (detail.identical === true) {
-    return <div className="empty">The deployed content was byte-identical to the previous version.</div>;
+    return <div className="empty">{identicalText}</div>;
   }
   if (detail.changes && detail.changes.length > 0) {
     return (
@@ -123,6 +136,14 @@ function EntryDetail({ id, onBack }: { id: string; onBack: () => void }) {
   if (error) return <div className="empty">{error}</div>;
   if (!detail) return <div className="empty">Loading…</div>;
   const e = detail.entry;
+  // S45: the diff's "before" is the live pre-image or the local snapshot —
+  // the heading says which, so the live-org warnings above it never
+  // describe a snapshot diff.
+  const baseline = manifestBaseline(detail);
+  const missing =
+    detail.contentSource === 'captured'
+      ? noDiffLine(baseline, e.warnings, detail.beforeContent !== null)
+      : null;
 
   return (
     <>
@@ -170,10 +191,18 @@ function EntryDetail({ id, onBack }: { id: string; onBack: () => void }) {
 
       {e.entryKind === 'metadata' && (detail.changes || detail.hunks || detail.identical) && (
         <>
-          <h3>What changed</h3>
-          <WhatChanged detail={detail} />
+          <h3>{whatChangedHeading(baseline)}</h3>
+          <WhatChanged detail={detail} identicalText={identicalLine(baseline, e.warnings)} />
         </>
       )}
+      {e.entryKind === 'metadata' &&
+        missing &&
+        !(detail.changes || detail.hunks || detail.identical) && (
+          <>
+            <h3>{whatChangedHeading(baseline)}</h3>
+            <div className="empty">{missing}</div>
+          </>
+        )}
 
       {detail.detail && e.entryKind === 'data' && (
         <pre className="meta-source">{JSON.stringify(detail.detail, null, 2)}</pre>

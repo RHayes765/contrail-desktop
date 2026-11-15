@@ -15,6 +15,8 @@ import {
 import { createEngineDeps, type EngineDeps } from '../core/deps.js';
 import { invokeCapability, type ToolResult } from '../capabilities/index.js';
 import { emptyGrantSet } from '../core/grants.js';
+import { renderApprovalPage } from '../connect/pages.js';
+import { NOT_COVERED } from '../deps/automation.js';
 
 /**
  * S22 tests (desktop mirror of the plugin's apex.test.ts): anonymous Apex
@@ -277,6 +279,17 @@ afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
+/** S45 D1: the apex target_check, in one place — a wording change touches only this. */
+const APEX_TARGET_CHECK = { status: 'not_applicable', note: 'no fixed org target to re-check' };
+
+/**
+ * S45 F3: the localhost page the wrapped ApprovalPageServer renders from the
+ * captured view — the plugin twin greps this same HTML.
+ */
+function lastPage(): string {
+  return renderApprovalPage(presenter.views.at(-1)!);
+}
+
 const SCRIPT = `List<Account> stale = [SELECT Id FROM Account WHERE Name = 'Zombie'];
 delete stale;
 System.debug('cleaned ' + stale.size());`;
@@ -314,6 +327,8 @@ describe('anonymous Apex ritual', () => {
     expect(body.executed).toBe(true);
     expect(body.status).toBe('executed');
     expect(String(body.note)).toContain('COMMITTED');
+    // S45 D1: an explicit target_check status on every result shape.
+    expect(body.target_check).toEqual(APEX_TARGET_CHECK);
     // What ran is byte-identical to what was approved.
     expect(lastAnonymousBody).toBe(SCRIPT);
   });
@@ -371,6 +386,21 @@ describe('anonymous Apex ritual', () => {
     expect(String(result.note)).toContain('NOT committed');
   });
 
+  it('S45 D1: a failure shape (the approved script missing from the payload) still reports target_check not_applicable', async () => {
+    await propose();
+    const code = presenter.views[0]!.code;
+    const request = db.findRequestByCode(db.getConnectionByAlias('apex-org')!.id, 'apex', code)!;
+    const { default: Database } = await import('better-sqlite3');
+    const raw = new Database(path.join(tmp, 'test.db'));
+    raw.prepare(`UPDATE deploy_requests SET payload_json = ? WHERE id = ?`).run('{}', request.id);
+    raw.close();
+    const result = JSON.parse(textOf(await execute(code))) as Record<string, unknown>;
+    expect(result.executed).toBe(false);
+    expect(result.error_message).toContain('missing from the request payload');
+    expect(result.target_check).toEqual(APEX_TARGET_CHECK);
+    expect(executeCalls).toBe(0);
+  });
+
   it('a new proposal supersedes the previous code', async () => {
     await propose();
     const first = presenter.views[0]!.code;
@@ -402,6 +432,100 @@ describe('anonymous Apex ritual', () => {
       unknown
     >;
     expect(String(result.debug_log)).toContain('get_debug_logs');
+  });
+
+  it('S45 F3: the page carries the snapshot automation card for the objects the script MAY touch', async () => {
+    const connId = db.getConnectionByAlias('apex-org')!.id;
+    new SnapshotStore(path.join(tmp, 'snapshots')).writeCurrent(
+      connId,
+      new Map([
+        [
+          'triggers/AccountTrigger.trigger',
+          Buffer.from('trigger AccountTrigger on Account (before delete) {}'),
+        ],
+        [
+          'triggers/AccountTrigger.trigger-meta.xml',
+          Buffer.from('<ApexTrigger><status>Active</status></ApexTrigger>'),
+        ],
+        ['classes/Cleaner.cls', Buffer.from('public class Cleaner {}')],
+      ]),
+    );
+    const row = (type: string, apiName: string, filePath: string) => ({
+      connectionId: connId,
+      type,
+      apiName,
+      filePath,
+      contentHash: 'h',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      retrievedAt: '2026-11-10T09:30:00.000Z',
+    });
+    db.replaceArtifactsForTypes(connId, ['ApexTrigger', 'ApexClass'], [
+      row('ApexTrigger', 'AccountTrigger', 'triggers/AccountTrigger.trigger'),
+      row('ApexClass', 'Cleaner', 'classes/Cleaner.cls'),
+    ]);
+    const proposed = await propose(
+      `${SCRIPT}\nCleaner c = new Cleaner();\ninsert new Contact(LastName = 'X');`,
+    );
+    expect(proposed.isError ?? false).toBe(false);
+    // The structured view the Deploy Review screen reads carries the card's data.
+    expect(presenter.views.at(-1)!.automation?.map((a) => a.object)).toEqual(['Account', 'Contact']);
+    const page = lastPage();
+    expect(page).toContain('AUTOMATION IN YOUR SNAPSHOT (from ');
+    expect(page).toContain(
+      'Objects this script MAY touch (parsed from the text; dynamic SOQL and called Apex hide ' +
+        'more): Account, Contact',
+    );
+    expect(page).toContain('Trigger AccountTrigger — Active · before delete');
+    expect(page).toContain('Not visible in the snapshot:');
+    expect(textOf(proposed)).not.toContain('AUTOMATION IN YOUR SNAPSHOT');
+  });
+
+  it('S45 F3: past 10 objects the card names the rest — the parser no longer drops them silently', async () => {
+    const script = Array.from({ length: 12 }, (_, i) => `insert new Obj${i}__c();`).join('\n');
+    const proposed = await propose(script);
+    expect(proposed.isError ?? false).toBe(false);
+    const page = lastPage();
+    expect(page).toContain(
+      'Objects this script MAY touch (parsed from the text; dynamic SOQL and called Apex hide ' +
+        `more): ${Array.from({ length: 10 }, (_, i) => `Obj${i}__c`).join(', ')}</div>`,
+    );
+    expect(page).toContain(
+      '<div class="auto-note">This card covers the first 10 objects; not shown: Obj10__c, Obj11__c.</div>',
+    );
+    // The structured view the Deploy Review screen reads: ten sections, the
+    // last one naming the rest.
+    const automation = presenter.views.at(-1)!.automation!;
+    expect(automation.map((a) => a.object)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `Obj${i}__c`),
+    );
+    expect(automation.at(-1)!.notes).toContain(
+      'This card covers the first 10 objects; not shown: Obj10__c, Obj11__c.',
+    );
+  });
+
+  it('S45 F3: a script naming no object still gets the card — "none found in the text", then the not_covered list', async () => {
+    const proposed = await propose("System.debug('hello');");
+    expect(proposed.isError ?? false).toBe(false);
+    const page = lastPage();
+    // No snapshot row was read, so the heading names no date (never "an unknown date").
+    expect(page).toContain('AUTOMATION IN YOUR SNAPSHOT — read from the local snapshot, not the live org');
+    expect(page).not.toContain('unknown date');
+    const prefix =
+      'Objects this script MAY touch (parsed from the text; dynamic SOQL and called Apex hide ' +
+      'more): none found in the text';
+    expect(page).toContain(prefix);
+    const notVisibleAt = page.indexOf('Not visible in the snapshot:');
+    expect(notVisibleAt).toBeGreaterThan(page.indexOf(prefix));
+    for (const line of NOT_COVERED) {
+      expect(page).toContain(`<li>${line.replaceAll("'", '&#39;')}</li>`);
+    }
+    expect(textOf(proposed)).not.toContain('AUTOMATION IN YOUR SNAPSHOT');
+    // The structured view: no object sections, the not_covered lines carried
+    // separately so the Deploy Review screen can still draw the card.
+    const view = presenter.views.at(-1)!;
+    expect(view.automation ?? []).toEqual([]);
+    expect(view.automationNotCovered).toEqual([...NOT_COVERED]);
   });
 });
 
