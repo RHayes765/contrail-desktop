@@ -57,7 +57,7 @@ What `validate_deploy` returns — this is everything you can honestly claim abo
 | `tests_run` / `test_failures` | Both | Counts of test methods executed and failed |
 | `test_failure_detail` | Both | Failing class/method names, assertion messages, stack traces (first 25) — **grant-gated**, see below |
 | `code_coverage_warnings` | Passed runs only | The org's coverage warning strings, capped at 10 — if 10 come back, assume there may be more and re-validate after fixing |
-| `permission_warning` | Passed runs only | New components deploying without permissions — lead your summary with it |
+| `permission_warning` | Passed runs only | Components that need permissions this package does not grant — lead your summary with it |
 
 Plainly stated limits — do not promise around them:
 

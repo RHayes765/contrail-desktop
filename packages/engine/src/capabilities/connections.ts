@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ConnectionRecord } from '../core/types.js';
 import { grantedList, notGrantedList } from '../core/grants.js';
+import { log } from '../core/log.js';
 import type { Capability } from './types.js';
 import { ok, fail, guarded } from './result.js';
 
@@ -126,8 +127,9 @@ export const connectionCapabilities: Capability[] = [
     description:
       'Open the localhost page where the human can change a connection\'s grants. Grants ' +
       'are only ever set there. The page opens directly in the human\'s browser; its URL ' +
-      'is returned only if the browser could not be opened automatically. After the human ' +
-      'saves, call get_permissions to see the updated grants.',
+      'is never returned to you — if the browser cannot be opened, the URL goes to ' +
+      'Contrail\'s server log for the human. After the human saves, call get_permissions ' +
+      'to see the updated grants.',
     grant: null,
     writeClass: false,
     inputSchema: {
@@ -137,20 +139,35 @@ export const connectionCapabilities: Capability[] = [
       guarded(async () => {
         const args = rawArgs as { connection: string };
         const { url, opened, connection } = await deps.flows.manageConnection(args.connection);
+        // The URL carries the session token that authorizes the grants save,
+        // so — exactly like the approval and settings pages — it never
+        // reaches model context on any path. The human already has the page
+        // open, or finds its URL in the server log (stderr, and the app's log
+        // file).
         if (opened) {
-          // The URL carries the session token that authorizes the grants
-          // save; it stays out of model context on purpose. The human
-          // already has the page open in their browser.
           return ok(
             { connection: connection.alias, page_opened_in_browser: true },
             'Management page opened in the human\'s browser. They set grants there; call ' +
               'get_permissions afterwards to see the result.',
           );
         }
+        log(
+          'warn',
+          'connection management page could not auto-open — open it yourself to change grants',
+          { url },
+        );
         return ok(
-          { connection: connection.alias, page_opened_in_browser: false, management_url: url },
-          'The browser could not be opened automatically. Give the human this URL to open ' +
-            'themselves — do not fetch it. Call get_permissions after they save.',
+          {
+            connection: connection.alias,
+            page_opened_in_browser: false,
+            note:
+              'The management page could not be opened automatically. Its URL was written to the ' +
+              'Contrail server log (stderr) for the human to open — it is deliberately NOT ' +
+              'provided to you, because the page saves grants. Ask the human to open the page ' +
+              'from the Contrail log, and call get_permissions after they save.',
+          },
+          'The browser could not be opened automatically; the human can find the page URL in ' +
+            'the Contrail server log.',
         );
       }),
   },

@@ -121,6 +121,7 @@ function seedValidatedDeploy(
   const foo: PreImage = {
     present: true,
     source: 'retrieve',
+    stamp_source: 'listMetadata',
     content: FOO_LIVE,
     last_modified_date: '2026-11-10T09:30:00.000Z',
     last_modified_by: 'Bob',
@@ -130,6 +131,7 @@ function seedValidatedDeploy(
   const newCls: PreImage = {
     present: false,
     source: 'retrieve',
+    stamp_source: 'listMetadata',
     last_modified_date: null,
     last_modified_by: null,
     comparable: true,

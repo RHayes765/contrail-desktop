@@ -59,8 +59,9 @@ connected org.
   whole directory**: `refresh_snapshot` before modifying an org-existing bundle,
   and include every file `bundle_files` shows in the new envelope. A file you
   omit is a file you deleted.
-- **Every write is human-approved** via a confirmation code you never see. The
-  full ritual is salesforce-house-rules §3; this skill only points at it.
+- **Every write is human-approved** via a confirmation code Contrail gives only
+  to the human. Full ritual, including a code seen in a screenshot:
+  salesforce-house-rules §3.
 - **Deleting a bundle is destructive**: propose it as a `destructive` entry in
   `validate_deploy`, lead your summary with it, and let the human decide.
 

@@ -12,6 +12,7 @@ import type {
 } from '../core/types.js';
 import type { AccessTokenManager } from '../salesforce/tokens.js';
 import type { SnapshotStore } from '../snapshot/store.js';
+import { findChildBlock } from '../snapshot/indexer.js';
 import {
   MetadataSoapClient,
   type DeployResult,
@@ -107,6 +108,7 @@ import {
   listedPropFor,
   preImageKey,
   preImageListQueryFor,
+  retrieveMessagesNote,
   retrievePreImages,
   revertDirFor,
   summarizePreImage,
@@ -115,13 +117,31 @@ import {
   type DeployMovedMember,
   type PreImage,
   type PreImageResult,
+  type RevertCheckedMember,
   type RevertPlan,
-  type RevertPlanMember,
   type RevertPlanReason,
   type RevertPreImageEntry,
   type RevertTargetCheck,
   type RevertWriteResult,
 } from './preimage.js';
+import {
+  STAMP_NO_ROW_REASON,
+  STAMP_NOT_QUERIED_REASON,
+  STAMP_QUERY_MAX_ROWS,
+  STAMP_SCHEME,
+  UNCHECKED_STAMP_NOT_PROBEABLE,
+  UNCHECKED_STAMP_QUERY_FAILED,
+  UNCHECKED_STAMP_ROW_UNMATCHED,
+  UNCHECKED_STAMP_SOURCE_MISMATCH,
+  isProbeable,
+  readMemberStamps,
+  stampAbsenceEvidence,
+  stampKey,
+  stampQueryFailedReason,
+  stampSourceFor,
+  type StampProbeResult,
+  type StampQuery,
+} from './stampprobe.js';
 import {
   NullNotifier,
   describePhoneOutcome,
@@ -145,6 +165,7 @@ import {
   type ComponentChange,
   type ProposedComponent,
   type ProposedDeletion,
+  type StampSource,
 } from './package.js';
 import { log } from '../core/log.js';
 
@@ -222,7 +243,7 @@ export interface DeployValidationSummary {
   test_failure_detail: unknown;
   code_coverage_warnings: string[];
   blast_radius: string[];
-  /** Advisory: new components that will be invisible/inaccessible without permissions. */
+  /** Advisory: components that need permissions this package does not grant. */
   permission_warning: string | null;
   /** null on a dry run — there is no code to expire. */
   expires_at: string | null;
@@ -238,10 +259,12 @@ export interface DeployValidationSummary {
  * to the agent). `status: 'unavailable'` means the RETRIEVE failed — the org
  * was not re-read and everything on the page came from the local snapshot;
  * a listing fault only nulls dates (dates_unavailable_types /
- * dates_unavailable). `org_clock` carries the checkOnly DeployResult's
- * org-side stamps — the execute-time guard's clock when no live baseline
- * exists. The diffs themselves are NOT persisted (they would ride every
- * execute result); they live on the approval page's rows.
+ * dates_unavailable), and so does a failed stamp query (S46 D1: its type is
+ * in dates_unavailable_types and its reason in probe_failures). `org_clock`
+ * carries the checkOnly DeployResult's org-side stamps — the execute-time
+ * guard's clock when no live baseline exists. The diffs themselves are NOT
+ * persisted (they would ride every execute result); they live on the
+ * approval page's rows.
  */
 export interface LiveCheckSummary {
   status: 'ok' | 'unavailable';
@@ -252,6 +275,16 @@ export interface LiveCheckSummary {
   org_clock?: { created_date: string; completed_date?: string };
   dates_unavailable_types: string[];
   dates_unavailable?: string;
+  /** S46 D1: 2 = CustomField / ValidationRule / CustomLabel / ListView stamps come from per-member
+   *  queries. Absent = validated by 0.39: every stamp from listMetadata. */
+  stamp_scheme?: 2;
+  /** S46 D1: type → reason for the types whose stamp query failed (they are in dates_unavailable_types too). */
+  probe_failures?: Record<string, string>;
+  /** S46 D1: pre-image keys of members whose validate-time stamp query returned only a same-name row
+   *  under a namespace the package did not name. The guard never reports them absent on that query. */
+  probe_unmatched?: string[];
+  /** S46 D1f: what the org's retrieve said, as a note — never a presence verdict. */
+  retrieve_note?: string;
   /** Package members (components + deletions) the live check covered. */
   members: number;
 }
@@ -616,7 +649,11 @@ export class DeployEngine {
     // S41 (§3.1): keyed by INPUT, never by connection alone — see
     // validateJobId. The S38 dry/real split is part of the id.
     const jobId = validateJobId(input);
-    const outcome = await this.runJob(`${conn.id}:${jobId}`, () => this.doValidate(conn, input));
+    // S46 D2: doValidate is handed the job, so a poll reads the progress it
+    // writes instead of the job's initial 'starting'.
+    const outcome = await this.runJob<ValidateResult>(`${conn.id}:${jobId}`, (job) =>
+      this.doValidate(conn, input, job),
+    );
     return { ...outcome, job_id: jobId };
   }
 
@@ -636,6 +673,23 @@ export class DeployEngine {
     // work thunk is unreachable because the key is present.
     const outcome = await this.runJob(key, () => existing.promise as Promise<ValidateResult>);
     return { ...outcome, job_id: jobId };
+  }
+
+  /** S46 D1: the stamp-query executor handed to deploy/stampprobe.ts at validate AND at execute. */
+  private stampQueryFor(conn: ConnectionRecord): StampQuery {
+    const rest = new RestClient(this.tokenMgr, conn, this.config.salesforce.apiVersion);
+    return async (api, soql, signal) => {
+      const init = signal ? { signal } : undefined;
+      const res =
+        api === 'tooling'
+          ? await rest.toolingQueryWithCount<Record<string, unknown>>(
+              soql,
+              STAMP_QUERY_MAX_ROWS,
+              init,
+            )
+          : await rest.queryWithCount<Record<string, unknown>>(soql, STAMP_QUERY_MAX_ROWS, init);
+      return res.records;
+    };
   }
 
   /**
@@ -932,10 +986,12 @@ export class DeployEngine {
       const image = live.images.get(preImageKey(d.type, d.api_name));
       if (!entry || !image) return;
       entry.pre_image = summarizePreImage(image);
-      // Only when the listing actually enumerated the type: present:null
-      // (unenumerable) never claims absence.
-      if (image.present === false && listingCovers(live, d)) {
-        entry.warnings.push(destructiveAbsentText(at));
+      // Only where a read that covered this member stands behind the absence
+      // (absenceEstablished): present:null (unenumerable) never claims it,
+      // and the line names what was consulted — the listing, or for the four
+      // stamp-query types the retrieve and that query.
+      if (image.present === false && absenceEstablished(live, d)) {
+        entry.warnings.push(destructiveAbsentText(at, stampAbsenceEvidence(image.stamp_source)));
       }
     });
     return { attributions, changedInTarget };
@@ -1168,9 +1224,42 @@ export class DeployEngine {
   }
 
   /**
+   * S46 D3: what the live check knows about one permission-needing
+   * component — true = it found it in the org, false = it found it absent,
+   * null = it cannot place it. A member of the package answers from its own
+   * pre-image. A field authored inline in a CustomObject document has no
+   * pre-image of its own, so it answers from that object's: absent with the
+   * object, else by whether the object's live document holds its block.
+   */
+  private livePresence(
+    live: Extract<PreImageResult, { status: 'ok' }>,
+    type: string,
+    apiName: string,
+  ): boolean | null {
+    const image = live.images.get(preImageKey(type, apiName));
+    if (image) return image.present;
+    if (type === 'CustomField') {
+      const dot = apiName.indexOf('.');
+      const obj =
+        dot > 0 ? live.images.get(preImageKey('CustomObject', apiName.slice(0, dot))) : undefined;
+      if (obj?.present === false) return false;
+      if (obj?.present === true && obj.content !== undefined) {
+        return findChildBlock(obj.content, 'fields', apiName.slice(dot + 1)) !== null;
+      }
+    }
+    return null;
+  }
+
+  /**
    * S45 hook 6: the page-top live-check lines — the UNAVAILABLE banner when
    * the retrieve failed (the only case where "the org was not re-read" is
    * true), else the CHANGED-IN-TARGET summary and the dates-unavailable line.
+   * S46 D1: still ONE dates-unavailable line at most. Every reason a member
+   * has no stamp — a listing that threw or could not enumerate a type, a
+   * failed stamp query, a member a stamp query named but gave no usable
+   * stamp, a member no stamp query names — is a group inside that one
+   * sentence, so the page-top list stays at three lines and a stamp
+   * disclosure never pushes a row warning out of the phone push.
    */
   private liveCheckWarnings(
     conn: ConnectionRecord,
@@ -1201,20 +1290,52 @@ export class DeployEngine {
     const at = hhmm(live.at);
     const out: string[] = [];
     if (changedInTarget > 0) out.push(changedSummaryText(changedInTarget, conn.alias, at));
+    const members = [...input.components, ...input.destructive];
+    const probeFailed = (type: string): boolean => Object.hasOwn(live.probe_failures, type);
+    const groups: string[] = [];
+    const listedTypes = [
+      ...new Set(
+        members.filter((m) => stampSourceFor(m.type) === 'listMetadata').map((m) => m.type),
+      ),
+    ];
     if (live.dates_unavailable !== undefined) {
-      const types = [
-        ...new Set([...input.components, ...input.destructive].map((m) => m.type)),
-      ];
-      out.push(datesUnavailableText(at, types, live.dates_unavailable.slice(0, 160)));
-    } else if (live.dates_unavailable_types.length > 0) {
-      out.push(
-        datesUnavailableText(
-          at,
-          live.dates_unavailable_types,
-          'listMetadata reported INVALID_TYPE',
-        ),
-      );
+      // The LISTING threw: it says nothing about a stamp query, so only the
+      // listing-sourced types are named with its reason.
+      if (listedTypes.length > 0) {
+        groups.push(`${listedTypes.join(', ')} (${live.dates_unavailable.slice(0, 160)})`);
+      }
+    } else {
+      const invalid = live.dates_unavailable_types.filter((t) => !probeFailed(t));
+      if (invalid.length > 0) {
+        groups.push(`${invalid.join(', ')} (listMetadata reported INVALID_TYPE)`);
+      }
     }
+    // One group per distinct failure reason.
+    for (const [reason, types] of groupByReason(live.probe_failures)) {
+      groups.push(`${types.join(', ')} (${stampQueryFailedReason(reason)})`);
+    }
+    // Members of a stamp-query type the org holds (the retrieve returned
+    // them, or their own row came back) that carry no stamp.
+    const undated = members.filter((m) => {
+      const img = live.images.get(preImageKey(m.type, m.api_name));
+      return (
+        img !== undefined &&
+        img.stamp_source !== 'listMetadata' &&
+        img.present === true &&
+        img.last_modified_date === null
+      );
+    });
+    // No query named them (a standard field, a name the grammar cannot
+    // place) — said even when their type's query failed.
+    const notQueried = undated.filter((m) => !isProbeable(m));
+    // A query that succeeded named them: zero rows, two rows, an unparseable
+    // date, or only a same-name row under another namespace.
+    const noStamp = undated.filter((m) => isProbeable(m) && !probeFailed(m.type));
+    if (notQueried.length > 0) {
+      groups.push(`${memberNames(notQueried)} (${STAMP_NOT_QUERIED_REASON})`);
+    }
+    if (noStamp.length > 0) groups.push(`${memberNames(noStamp)} (${STAMP_NO_ROW_REASON})`);
+    if (groups.length > 0) out.push(datesUnavailableText(at, groups));
     return out;
   }
 
@@ -1491,10 +1612,15 @@ export class DeployEngine {
         not_restorable: pre.not_restorable,
         // Requests validated before covered existed carry none.
         covered: pre.covered ?? [],
+        // A package with no pre-image files never refers to "these files":
+        // its README already hedges what it can revert ("if it committed").
         note: unknown
           ? `Contrail lost track of this deploy (${unknown.error.slice(0, 300)}); check Setup → ` +
-            `Deployment Status. If it committed, these files are what the org held when this ` +
-            `package was validated.`
+            `Deployment Status.` +
+            (pre.components.length > 0
+              ? ` If it committed, these files are what the org held when this package was ` +
+                `validated.`
+              : '')
           : 'Pre-images retrieved when this deploy was validated; README.txt says what a ' +
             'revert does and does not undo. Contrail never deploys a revert on its own.',
         ...(unknown
@@ -1686,7 +1812,6 @@ export class DeployEngine {
       input.components,
       input.destructive,
     );
-    const permCoverage = analyzePermissionCoverage(input.components);
 
     // S41: Aura bundles get two LIVE org checks the local snapshot cannot
     // answer — see auraLiveChecks. Mutates the change entries in place.
@@ -1723,8 +1848,9 @@ export class DeployEngine {
     }
 
     // v2: check_rules hook — a project constitution evaluates here, after
-    // changes/destructive/blast/permCoverage exist and BEFORE the org
-    // round-trip, so a locally-refusable deploy never burns a validation.
+    // changes/destructive/blast exist and BEFORE the org round-trip, so a
+    // locally-refusable deploy never burns a validation. (S46 D3: the
+    // permission coverage is computed after the live check, further down.)
 
     const soap = new MetadataSoapClient(this.tokenMgr, conn, this.config.salesforce.apiVersion);
     // S45 hook 1: the live pre-image — what the org holds for every member
@@ -1748,6 +1874,7 @@ export class DeployEngine {
         onProgress: (p) => {
           if (job && awaitingPreImages) job.progress = p;
         },
+        queryStamps: this.stampQueryFor(conn),
       });
     }
     if (job) {
@@ -1848,7 +1975,9 @@ export class DeployEngine {
         test_failure_detail: this.gateTestDetail(conn, result),
         code_coverage_warnings: result.codeCoverageWarnings.slice(0, 10),
         blast_radius: blast,
-        permission_warning: permCoverage.warning,
+        // S46 D3: a dry run never re-reads the org, so every component is
+        // "not confirmed" — the warning never says the package adds it.
+        permission_warning: analyzePermissionCoverage(input.components).warning,
         expires_at: null,
         live_check: null,
       };
@@ -1865,6 +1994,7 @@ export class DeployEngine {
       at: new Date().toISOString(),
       reason: 'retrieve_failed:not started',
     };
+    const retrieveNote = retrieveMessagesNote(live.retrieve_messages ?? []);
     const liveCheck: LiveCheckSummary = {
       status: live.status,
       ...(live.status === 'unavailable' ? { reason: live.reason } : {}),
@@ -1882,9 +2012,30 @@ export class DeployEngine {
       ...(live.status === 'ok' && live.dates_unavailable !== undefined
         ? { dates_unavailable: live.dates_unavailable }
         : {}),
+      // S46 D1: on EVERY real validation, the unavailable one included — with
+      // no pre-image to carry a stamp_source, this marker is what tells the
+      // execute-time guard the request was validated under the stamp queries.
+      stamp_scheme: STAMP_SCHEME,
+      ...(live.status === 'ok' && Object.keys(live.probe_failures).length > 0
+        ? { probe_failures: live.probe_failures }
+        : {}),
+      ...(live.status === 'ok' && live.probe_unmatched.length > 0
+        ? { probe_unmatched: live.probe_unmatched }
+        : {}),
+      // S46 D1f: what the org's retrieve said, on the result only — never on
+      // the page, where "cannot be found" beside an ADD would read as a verdict.
+      ...(retrieveNote !== undefined ? { retrieve_note: retrieveNote } : {}),
       members: input.components.length + input.destructive.length,
     };
     const review = this.applyLivePreImages(conn, input, changes, destructive, live, aura);
+    // S46 D3: only now is each member's presence known — the warning says
+    // "adds" for what the live check found absent, "already in the org" for
+    // what it found, and neither for what it could not place (every
+    // component, when the live check was unavailable).
+    const permCoverage = analyzePermissionCoverage(
+      input.components,
+      live.status === 'ok' ? (type, name) => this.livePresence(live, type, name) : undefined,
+    );
 
     // S41 (review fix): supersede IMMEDIATELY before inserting the new
     // request — atomically close the old approval as the new one opens.
@@ -3974,7 +4125,7 @@ export class DeployEngine {
     try {
       probe = await withDeadline(opts.deadlineMs, (signal) =>
         kind === 'deploy'
-          ? this.probeDeployTarget(conn, request)
+          ? this.probeDeployTarget(conn, request, signal)
           : kind === 'dml'
             ? this.probeDmlTarget(conn, request, signal)
             : this.probeActivationTarget(conn, request, signal),
@@ -4036,20 +4187,43 @@ export class DeployEngine {
   }
 
   /**
-   * S45 F2, deploy: re-list every member with the SAME listMetadataDetailed /
-   * listMetadataQueries calls the validate-time live check made (children by
-   * their own type, foldered members scoped to their folder), so baseline and
-   * probe share one source, and compare stamps as epoch ms. A member whose
-   * type cannot be enumerated (at validate or now), or whose frozen stamp is
-   * missing, is reported `unchecked` — NEVER a void. With no live baseline
-   * (the retrieve was unavailable at validate) the ORG clock anchors the
-   * check: a stamp at or after the checkOnly DeployResult's createdDate
-   * minus 5 s counts as moved (fail-closed in that margin); no org clock →
-   * every member unchecked — never a host-clock comparison.
+   * S45 F2, deploy: re-read every member's last-modified stamp from the
+   * source its frozen pre-image names, so baseline and probe share one
+   * source, and compare stamps as epoch ms. A listing-sourced member is
+   * re-listed with the SAME listMetadataDetailed / listMetadataQueries calls
+   * the validate-time live check made (foldered members scoped to their
+   * folder). S46 D1: a CustomField, ValidationRule, CustomLabel or ListView
+   * whose pre-image names a stamp query is re-read by that query — the same
+   * readMemberStamps (deploy/stampprobe.ts) validate called, naming only the
+   * package's own members. A request with no pre-image (the live check was
+   * unavailable) follows live_check.stamp_scheme; one with neither marker was
+   * validated by 0.39 and is re-listed for every type, those four included.
+   *
+   * A member whose type cannot be enumerated (at validate or now), whose
+   * frozen stamp is missing, whose stamp query fails now, or that no stamp
+   * query can name is reported `unchecked` — NEVER a void. So is a member
+   * with no row of its own whose name a stamp query returned — now, or at
+   * validate — under a namespace the package did not name: never gone,
+   * created or checked on that query's word. A SOAP fault still throws out
+   * of the probe (the whole check is unavailable); a failed stamp query does
+   * not. With no live baseline (the retrieve was unavailable at validate) the
+   * ORG clock anchors the check: a stamp at or after the checkOnly
+   * DeployResult's createdDate minus 5 s counts as moved (fail-closed in that
+   * margin); no org clock → every member unchecked — never a host-clock
+   * comparison.
+   *
+   * S46 D4: a `checked` entry carries `absent: true` when the execute-time
+   * read returned nothing for a member the approval assumed absent — the
+   * validate-time check found it absent, or, with no live baseline (where
+   * nothing read the org at validate), the package proposes it as an add.
+   * For a stamp-query member that is "the query returned no row carrying its
+   * name": what Contrail read, not proof of what the org holds — where the
+   * query cannot see a member, one created after validate is not detected.
    */
   private async probeDeployTarget(
     conn: ConnectionRecord,
     request: DeployRequestRecord,
+    signal: AbortSignal,
   ): Promise<TargetProbe> {
     const summary = JSON.parse(request.summaryJson) as {
       changes?: ComponentChange[];
@@ -4065,29 +4239,55 @@ export class DeployEngine {
       seen.add(key);
       members.push(m);
     }
-    const checked: RevertPlanMember[] = [];
+    const checked: RevertCheckedMember[] = [];
     const unchecked: RevertPlanReason[] = [];
     const moved: DeployMovedMember[] = [];
     const uncheck = (m: ComponentChange, reason: string) =>
       unchecked.push({ type: m.type, api_name: m.api_name, reason });
-    const toProbe: ComponentChange[] = [];
+    // S46 D1: a member's stamp is re-read from the source recorded at
+    // validate — on its pre-image, or (no pre-image) by stamp_scheme.
+    const scheme2 = live?.stamp_scheme === STAMP_SCHEME;
+    const sourceOf = (m: ComponentChange): StampSource =>
+      m.pre_image?.stamp_source ?? (scheme2 ? stampSourceFor(m.type) : 'listMetadata');
+    const viaListing: ComponentChange[] = [];
+    const viaQuery: ComponentChange[] = [];
+    const route = (m: ComponentChange): void => {
+      const src = sourceOf(m);
+      if (src === 'listMetadata') {
+        if (preImageListQueryFor(m) === null) uncheck(m, 'type_not_enumerable');
+        else viaListing.push(m);
+      } else if (stampSourceFor(m.type) !== src) uncheck(m, UNCHECKED_STAMP_SOURCE_MISMATCH);
+      else if (!isProbeable(m)) uncheck(m, UNCHECKED_STAMP_NOT_PROBEABLE);
+      else viaQuery.push(m);
+    };
     let threshold: number | null = null;
     let degrade: { org_clock_created_date: string; live_check_reason: string } | undefined;
     let note: string | undefined;
 
     if (live?.status === 'ok') {
-      // Absence is a fact only where the validate-time listing covered the type.
-      const datesCovered = (type: string) =>
-        live.dates_unavailable === undefined && !live.dates_unavailable_types.includes(type);
+      // Absence is a fact only where the validate-time read covered the type:
+      // the listing enumerated it, or — a stamp-query member — its type's
+      // query answered (a listing that threw says nothing about a stamp query).
+      const datesCovered = (m: ComponentChange): boolean =>
+        sourceOf(m) === 'listMetadata'
+          ? live.dates_unavailable === undefined && !live.dates_unavailable_types.includes(m.type)
+          : !live.dates_unavailable_types.includes(m.type);
       for (const m of members) {
         const pre = m.pre_image;
-        if (!pre || pre.present === null) uncheck(m, 'type_not_enumerable');
-        else if (pre.present === true && Number.isNaN(Date.parse(pre.last_modified_date ?? ''))) {
+        // present: null on a stamp-query type means no read could place the
+        // name (e.g. a destructive '.X__c'); the type itself is enumerable.
+        if (!pre || pre.present === null) {
+          uncheck(
+            m,
+            pre?.stamp_source !== undefined && pre.stamp_source !== 'listMetadata'
+              ? UNCHECKED_STAMP_NOT_PROBEABLE
+              : 'type_not_enumerable',
+          );
+        } else if (pre.present === true && Number.isNaN(Date.parse(pre.last_modified_date ?? ''))) {
           uncheck(m, 'dates_unavailable_at_validate');
-        } else if (pre.present === false && !datesCovered(m.type)) {
+        } else if (pre.present === false && !datesCovered(m)) {
           uncheck(m, 'dates_unavailable_at_validate');
-        } else if (preImageListQueryFor(m) === null) uncheck(m, 'type_not_enumerable');
-        else toProbe.push(m);
+        } else route(m);
       }
     } else {
       const created = live?.org_clock?.created_date;
@@ -4103,49 +4303,104 @@ export class DeployEngine {
       } else {
         threshold = createdMs - ORG_CLOCK_MARGIN_MS;
         degrade = { org_clock_created_date: created, live_check_reason: liveReason };
-        for (const m of members) {
-          if (preImageListQueryFor(m) === null) uncheck(m, 'type_not_enumerable');
-          else toProbe.push(m);
-        }
+        for (const m of members) route(m);
       }
     }
 
     let checkedAt = new Date().toISOString();
-    if (toProbe.length > 0) {
+    if (viaListing.length > 0 || viaQuery.length > 0) {
       const soap = new MetadataSoapClient(this.tokenMgr, conn, this.config.salesforce.apiVersion);
-      const { types, folderQueries } = buildPreImageListQueries(toProbe);
+      const { types, folderQueries } = buildPreImageListQueries(viaListing);
       const none = { props: [] as FileProperties[], unsupportedTypes: [] as string[] };
-      const [flat, foldered] = await Promise.all([
+      const noStamps: StampProbeResult = {
+        rows: new Map(),
+        failed: new Map(),
+        unprobed: new Map(),
+        unmatched: new Set(),
+      };
+      // A SOAP fault throws out of the probe (the whole check is unavailable);
+      // readMemberStamps never throws — a failed stamp query fails its type.
+      const [flat, foldered, stamps] = await Promise.all([
         types.length > 0 ? soap.listMetadataDetailed(types) : Promise.resolve(none),
         folderQueries.length > 0 ? soap.listMetadataQueries(folderQueries) : Promise.resolve(none),
+        viaQuery.length > 0
+          ? readMemberStamps(this.stampQueryFor(conn), viaQuery, { signal })
+          : Promise.resolve(noStamps),
       ]);
       checkedAt = new Date().toISOString();
       const props = [...flat.props, ...foldered.props];
       const unsupported = new Set([...flat.unsupportedTypes, ...foldered.unsupportedTypes]);
-      for (const m of toProbe) {
-        if (unsupported.has(m.type)) {
-          uncheck(m, 'type_not_enumerable');
+      const listed = new Set(viaListing);
+      const queried = new Set(viaQuery);
+      const unmatchedAtValidate = new Set(
+        live?.status === 'ok' ? (live.probe_unmatched ?? []) : [],
+      );
+      // Package order, whichever source each member is read from.
+      for (const m of members) {
+        const src = sourceOf(m);
+        // The member's stamp as its source reports it now; undefined = the
+        // source returned no row for it.
+        let row: { last_modified_by: string | null; last_modified_date: string | null } | undefined;
+        if (listed.has(m)) {
+          if (unsupported.has(m.type)) {
+            uncheck(m, 'type_not_enumerable');
+            continue;
+          }
+          const prop = listedPropFor(props, m.type, m.api_name);
+          if (prop) {
+            row = {
+              last_modified_by: prop.lastModifiedByName ? prop.lastModifiedByName : null,
+              last_modified_date: prop.lastModifiedDate ? prop.lastModifiedDate : null,
+            };
+          }
+        } else if (queried.has(m)) {
+          const key = stampKey(m.type, m.api_name);
+          if (stamps.failed.has(m.type)) {
+            uncheck(m, UNCHECKED_STAMP_QUERY_FAILED);
+            continue;
+          }
+          // route() admitted only members a query can name; should the probe
+          // ever disagree, "no query named it" must not read as "no row".
+          if (stamps.unprobed.has(key)) {
+            uncheck(m, UNCHECKED_STAMP_NOT_PROBEABLE);
+            continue;
+          }
+          const stamp = stamps.rows.get(key);
+          // No row of its own, but its name came back under a namespace the
+          // package did not name — now, or at validate: the query cannot be
+          // taken at its word for this member. Never gone, created or absent.
+          if (!stamp && (stamps.unmatched.has(key) || unmatchedAtValidate.has(key))) {
+            uncheck(m, UNCHECKED_STAMP_ROW_UNMATCHED);
+            continue;
+          }
+          if (stamp) {
+            row = {
+              last_modified_by: stamp.last_modified_by,
+              last_modified_date: stamp.last_modified_date,
+            };
+          }
+        } else {
+          // Reported unchecked before any read.
           continue;
         }
-        const row = listedPropFor(props, m.type, m.api_name);
-        const stamps = {
-          last_modified_by: row?.lastModifiedByName ? row.lastModifiedByName : null,
-          last_modified_date: row?.lastModifiedDate ? row.lastModifiedDate : null,
-        };
         const name = { type: m.type, api_name: m.api_name };
-        const undated = row !== undefined && Number.isNaN(Date.parse(row.lastModifiedDate));
+        const via = src === 'listMetadata' ? {} : { source: src };
+        const nowMs = Date.parse(row?.last_modified_date ?? '');
+        const undated = row !== undefined && Number.isNaN(nowMs);
         if (threshold !== null) {
           if (!row) {
             // No live baseline says whether the member existed at validate:
             // absence is exactly what an ADD's approval assumed; for anything
             // else Contrail cannot tell whether it vanished before or after
-            // validation — unchecked, never "checked".
-            if (m.change === 'add') checked.push(name);
+            // validation — unchecked, never "checked". The ADD is marked
+            // absent (D4): no stamp was compared, and nothing read the org at
+            // validate — `add` is the local snapshot's classification.
+            if (m.change === 'add') checked.push({ ...name, absent: true });
             else uncheck(m, 'absent_no_baseline');
           } else if (undated) {
             uncheck(m, 'dates_unavailable_at_execute');
-          } else if (Date.parse(row.lastModifiedDate) >= threshold) {
-            moved.push({ ...name, ...stamps, frozen_date: null, state: 'changed' });
+          } else if (nowMs >= threshold) {
+            moved.push({ ...name, ...row, frozen_date: null, state: 'changed', ...via });
           } else {
             checked.push(name);
           }
@@ -4153,24 +4408,35 @@ export class DeployEngine {
         }
         const pre = m.pre_image!;
         if (pre.present === true && !row) {
+          // Reached only with a parseable frozen date (a null one was
+          // unchecked above) — for a stamp-query member that date came from
+          // a row of its own, and the query now returns no row with its name.
           moved.push({
             ...name,
             last_modified_by: null,
             last_modified_date: null,
             frozen_date: pre.last_modified_date,
             state: 'gone',
+            ...via,
           });
         } else if (pre.present === false && row) {
-          moved.push({ ...name, ...stamps, frozen_date: null, state: 'created' });
+          moved.push({ ...name, ...row, frozen_date: null, state: 'created', ...via });
         } else if (undated) {
-          // A listed row with no parseable stamp is no evidence of a change:
+          // A row with no parseable stamp is no evidence of a change:
           // unchecked, never a void.
           uncheck(m, 'dates_unavailable_at_execute');
-        } else if (
-          row &&
-          Date.parse(row.lastModifiedDate) !== Date.parse(pre.last_modified_date ?? '')
-        ) {
-          moved.push({ ...name, ...stamps, frozen_date: pre.last_modified_date, state: 'changed' });
+        } else if (row && nowMs !== Date.parse(pre.last_modified_date ?? '')) {
+          moved.push({
+            ...name,
+            ...row,
+            frozen_date: pre.last_modified_date,
+            state: 'changed',
+            ...via,
+          });
+        } else if (!row) {
+          // Absent at validate, and the execute-time read again returned
+          // nothing (D4): checked, but not a stamp comparison.
+          checked.push({ ...name, absent: true });
         } else {
           checked.push(name);
         }
@@ -5187,18 +5453,25 @@ function changedInTargetText(at: string, snapshotFrom: string, comparable: boole
 function liveBytesDifferText(at: string, cause: 'no_dates' | 'within_margin'): string {
   return (
     `live bytes differ from your snapshot (retrieved ${at}) — ` +
+    // 'no_dates' fires when EITHER side has no parseable stamp (the org's, or
+    // the snapshot row's), so the sentence never says which one was missing.
     (cause === 'no_dates'
-      ? `last-modified stamps were unavailable for this type, so Contrail cannot say who or when.`
+      ? `a last-modified stamp was missing for this member — the org's or your snapshot's — so ` +
+        `Contrail cannot say who or when.`
       : `this member's last-modified stamp is within a minute of when your snapshot was taken, ` +
         `too close to tell apart from clock differences between this computer and the org, so ` +
         `Contrail cannot say who or when.`)
   );
 }
 
-function destructiveAbsentText(at: string): string {
+/**
+ * `evidence` names what Contrail consulted (stampAbsenceEvidence): the
+ * listing, or — for a stamp-query type — the retrieve and that query.
+ */
+function destructiveAbsentText(at: string, evidence: string): string {
   return (
-    `not present in the target (retrieved ${at}) — listMetadata reports no such member; the ` +
-    `org decides whether this delete fails or no-ops`
+    `not present in the target (retrieved ${at}) — ${evidence}; the org decides whether this ` +
+    `delete fails or no-ops`
   );
 }
 
@@ -5219,11 +5492,35 @@ function liveUnavailableText(reason: string, snapshotFrom: string | null): strin
   );
 }
 
-function datesUnavailableText(at: string, types: string[], reason: string): string {
+/**
+ * The ONE dates-unavailable line. Each group is `${types or member names}
+ * (${reason})` — built in liveCheckWarnings — and they are joined with '; ',
+ * so however many reasons there are the page carries a single sentence.
+ */
+function datesUnavailableText(at: string, groups: string[]): string {
   return (
     `Live diff is against the org (retrieved ${at}); last-modified stamps were unavailable ` +
-    `for ${types.join(', ')} (${reason}), so CHANGED-IN-TARGET detection for those members ` +
+    `for ${groups.join('; ')}, so CHANGED-IN-TARGET detection for those members ` +
     `relies on content only and the execute-time check will report them as unchecked.`
+  );
+}
+
+/** `{type: reason}` → reason → its types, both in first-appearance order. */
+function groupByReason(failures: Record<string, string>): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const [type, reason] of Object.entries(failures)) {
+    const types = out.get(reason);
+    if (types) types.push(type);
+    else out.set(reason, [type]);
+  }
+  return out;
+}
+
+/** The first ten members as `Type api_name`, then how many more there are. */
+function memberNames(members: Array<{ type: string; api_name: string }>): string {
+  const shown = members.slice(0, 10).map((m) => `${m.type} ${m.api_name}`);
+  return (
+    shown.join(', ') + (members.length > shown.length ? ` and ${members.length - 10} more` : '')
   );
 }
 
@@ -5263,11 +5560,27 @@ function isFlowDeactivation(c: ProposedComponent): boolean {
   );
 }
 
-/** Did the validate-time listing enumerate this member's type (so absence is a fact)? */
-function listingCovers(
+/**
+ * Does a validate-time read that covered this member stand behind "absent"?
+ * Asked only about a member whose pre-image says present: false — the
+ * retrieve returned nothing for it. A listing-sourced member: the listing
+ * enumerated its type. A member of a stamp-query type (S46 D1): its type's
+ * query succeeded, a query named it, and no row carrying its name came back
+ * — not even one under a namespace the package did not name
+ * (probe_unmatched). False means the page says nothing about the absence;
+ * it never means the member is there.
+ */
+function absenceEstablished(
   live: Extract<PreImageResult, { status: 'ok' }>,
   member: { type: string; api_name: string },
 ): boolean {
+  if (stampSourceFor(member.type) !== 'listMetadata') {
+    return (
+      !live.dates_unavailable_types.includes(member.type) &&
+      isProbeable(member) &&
+      !live.probe_unmatched.includes(preImageKey(member.type, member.api_name))
+    );
+  }
   return (
     live.dates_unavailable === undefined &&
     !live.dates_unavailable_types.includes(member.type) &&

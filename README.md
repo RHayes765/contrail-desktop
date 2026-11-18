@@ -13,8 +13,26 @@ whose only input is a test definition the human already approved).
 >
 > **📖 The full tool & feature reference lives in the engine repo:
 > [contrail-plugin/TOOLS.md](https://github.com/RHayes765/contrail-plugin/blob/main/TOOLS.md)**
-> — the same engine and capabilities in both surfaces (the plugin's 39th tool,
-> `open_settings`, is a native Settings screen here), desktop differences noted there.
+> — the same engine and capabilities in both surfaces, desktop differences noted
+> there; four plugin tools have no counterpart here: `open_settings` (a native
+> Settings screen), `list_skills` and `read_skill` (the app's own skill library)
+> and `render_flow` (the Metadata and Diff screens' flow diagrams).
+
+**Live-check fixes (S46).** Stamps for custom fields, validation rules,
+custom labels and list views now come from a query that names only the
+package's members instead of the org-wide listing — on a dev org with about
+24,000 custom fields that listing took over 90 seconds and pushed the
+execute-time check past its 15-second deadline. Their pre-images come from a
+retrieve that names the child (a standard field, or a child whose parent
+document the same package already retrieves, is still read from that
+document). A validation poll reports real progress; the permission warning no
+longer says a package "adds" what the org already has; the revert README is
+accurate for add-only deploys; and the approval page says plainly that a
+screenshot of it contains the code. Version skew: a 0.39 desktop app showing
+a request validated by the 0.40 plugin prints a failed stamp query as
+"listMetadata reported INVALID_TYPE" for that type. The guard behaviour is
+still correct; only that notice's reason is wrong. Update the desktop app
+together with the plugin.
 
 ## Why it exists
 

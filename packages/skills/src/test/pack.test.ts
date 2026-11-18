@@ -51,6 +51,43 @@ describe('bundled skill pack', () => {
     expect(hits).toEqual([]);
   });
 
+  it('no bundled HTML asset references the network', () => {
+    // Twin of the plugin's lint-skills HTML rule: a shipped page loads nothing
+    // from the network. The one URL prefix allowed is the XML namespace
+    // identifier, which is never fetched.
+    const ALLOWED_URL_PREFIX = 'http://www.w3.org/';
+    const htmlFilesUnder = (dir: string): string[] => {
+      const out: string[] = [];
+      if (!fs.existsSync(dir)) return out;
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) out.push(...htmlFilesUnder(p));
+        else if (e.isFile() && e.name.toLowerCase().endsWith('.html')) out.push(p);
+      }
+      return out.sort();
+    };
+    const files: string[] = [];
+    const hits: string[] = [];
+    for (const entry of fs.readdirSync(bundledSkillsDir(), { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      for (const file of htmlFilesUnder(path.join(bundledSkillsDir(), entry.name, 'assets'))) {
+        const rel = path.relative(bundledSkillsDir(), file).replaceAll(path.sep, '/');
+        files.push(rel);
+        fs.readFileSync(file, 'utf8')
+          .split(/\r?\n/)
+          .forEach((line, i) => {
+            for (const m of line.matchAll(/https?:\/\//gi)) {
+              if (line.startsWith(ALLOWED_URL_PREFIX, m.index)) continue;
+              hits.push(`${rel}:${i + 1} network URL: ${line.trim().slice(0, 80)}`);
+            }
+          });
+      }
+    }
+    // The flow page template is among them, so the rule is never vacuous.
+    expect(files).toContain('salesforce-flow-visualize/assets/flow-diff-template.html');
+    expect(hits).toEqual([]);
+  });
+
   it('never ships an overlay patch', () => {
     const stray: string[] = [];
     const walk = (d: string): void => {

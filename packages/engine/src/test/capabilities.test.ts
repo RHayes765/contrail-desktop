@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,11 +19,14 @@ let tmp: string;
 let db: ContrailDb;
 let deps: EngineDeps;
 let opened: string[];
+/** When true, the stubbed browser records the URL and then fails to open it. */
+let browserFails: boolean;
 
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'contrail-cap-'));
   db = new ContrailDb(path.join(tmp, 'test.db'));
   opened = [];
+  browserFails = false;
   deps = createEngineDeps({
     db,
     tokens: new MemoryTokenStore(),
@@ -42,6 +45,7 @@ beforeEach(() => {
       revokeToken: async () => ({ ok: true }),
       openBrowser: async (url: string) => {
         opened.push(url);
+        if (browserFails) throw new Error('no display');
       },
     },
   });
@@ -111,6 +115,23 @@ describe('capability surface', () => {
       expect(cap.grant, `${cap.name} grant declaration must match TOOL_GRANT_MAP`).toBe(
         TOOL_GRANT_MAP[cap.name],
       );
+    }
+  });
+
+  it('every capability description fits the 2,000-byte cut (UTF-8)', () => {
+    // Capabilities are minted to the Agent SDK as mcp__contrail__* tools, and
+    // a client cuts an MCP tool description at 2 KB, removing the tail —
+    // where a newly appended paragraph sits. This covers every capability,
+    // so one added later is held to the same bound. Parameter descriptions
+    // are outside it.
+    const LIMIT = 2000;
+    const caps = allCapabilities();
+    expect(caps.length).toBeGreaterThan(0);
+    for (const cap of caps) {
+      expect(
+        Buffer.byteLength(cap.description, 'utf8'),
+        `${cap.name} description bytes`,
+      ).toBeLessThanOrEqual(LIMIT);
     }
   });
 
@@ -240,6 +261,47 @@ describe('capability surface', () => {
     expect(text).not.toContain('?s=');
     expect(text).not.toContain('management_url');
     expect(text).toContain('"page_opened_in_browser": true');
+  });
+
+  it('manage_connection never returns the page address when the browser cannot be opened — the URL goes to the server log', async () => {
+    db.insertConnection({
+      alias: 'unopened-org',
+      instanceUrl: 'https://unopened.my.salesforce.com',
+      loginUrl: 'https://login.salesforce.com',
+      orgId: '00Dmm0000000004EAA',
+      orgName: 'Unopened',
+      orgType: 'sandbox',
+      isSandbox: true,
+      username: null,
+      userId: null,
+      grants: emptyGrantSet(),
+    });
+    browserFails = true;
+    const logged: string[] = [];
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      logged.push(String(chunk));
+      return true;
+    });
+    let result: ToolResult;
+    try {
+      result = await invokeCapability(deps, 'manage_connection', { connection: 'unopened-org' });
+    } finally {
+      stderr.mockRestore();
+    }
+    const text = textOf(result);
+    expect(result.isError ?? false).toBe(false);
+    expect(text).toContain('"page_opened_in_browser": false');
+    expect(text).toContain('deliberately NOT');
+    expect(text).toContain('get_permissions');
+    // No address of any kind, and never the session token.
+    expect(text).not.toContain('http');
+    expect(text).not.toContain('localhost');
+    expect(text).not.toContain('?s=');
+    expect(text).not.toContain('management_url');
+    // The tokened URL went to the server log (stderr), as the approval and settings pages do.
+    const url = opened.find((u) => u.includes('/manage?s='));
+    expect(url).toBeDefined();
+    expect(logged.some((line) => line.includes(url!))).toBe(true);
   });
 
   it('get_audit_log returns events', async () => {

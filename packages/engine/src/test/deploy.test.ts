@@ -508,6 +508,15 @@ describe('validate_deploy', () => {
     expect(text).not.toContain(code); // THE invariant
     expect(openedUrls).toHaveLength(1);
     expect(text).not.toContain(openedUrls[0]); // opened browser → URL withheld too
+    // S46 D6: the page says what Contrail does with the code, and that anything
+    // which shows the agent the page shows it the code — not that the agent
+    // "cannot see" the page, and not that closing the tab makes nothing happen.
+    // Desktop: the presenter seam is structured — the page is rendered from its view.
+    const page = renderApprovalPage(presenter.views[0]!);
+    expect(page).toContain('Contrail itself never gives the agent this page or the code');
+    expect(page).toContain('tell it you do not approve');
+    expect(page).not.toContain('The agent cannot see this page');
+    expect(page).not.toContain('nothing happens');
   });
 
   it('withholds test failure detail without diagnostics_read but keeps the counts', async () => {

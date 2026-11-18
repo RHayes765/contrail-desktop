@@ -669,11 +669,16 @@ describe('S45: the native review carries the page (diffs, automation, live check
       orgClock: { createdDate: '2026-11-15T10:01:01.000Z', completedDate: null },
       datesUnavailableTypes: ['BotVersion'],
       datesUnavailable: null,
+      // S46: a pre-S46 summary has neither key.
+      probeFailures: {},
+      retrieveNote: null,
       members: 1,
     });
     expect(view.changes[0].preImage).toMatchObject({
       present: true,
       source: 'retrieve',
+      // A pre-S46 pre-image names no stamp source (every stamp was listed).
+      stampSource: null,
       lastModifiedBy: 'Other User',
       lastModifiedDate: '2026-11-15T10:00:00.000Z',
       comparable: true,
@@ -748,6 +753,7 @@ describe('S45: the native review carries the page (diffs, automation, live check
     const image = (over: Partial<NonNullable<DeployChangeView['preImage']>>) => ({
       present: true,
       source: 'retrieve' as const,
+      stampSource: 'listMetadata',
       lastModifiedDate: '2026-11-15T09:00:00.000Z',
       lastModifiedBy: null,
       comparable: true,
@@ -1854,5 +1860,428 @@ describe('S45: the review panel says what was checked, and never more (renderer-
     expect(revertDeleteLabel(m, 'unknown')).toBe(
       'delete ApexClass:NewOne (this deploy added it, if it committed)',
     );
+  });
+});
+
+describe('S46 D: stamp sources, absent members and the one dates line in the review', () => {
+  const AT = '2026-11-17T15:02:00.000Z';
+  /** The engine's dates-unavailable line around its groups (verbatim). */
+  const datesLine = (groups: string): string =>
+    `Live diff is against the org (retrieved ${hhmm(AT)}); last-modified stamps were ` +
+    `unavailable for ${groups}, so CHANGED-IN-TARGET detection for those members relies on ` +
+    'content only and the execute-time check will report them as unchecked.';
+  const datesLines = (notices: string[]): string[] =>
+    notices.filter((n) => n.startsWith('Live diff is against the org'));
+
+  /** A pre-image as the S46 engine summarizes it (snake_case). */
+  const pre = (over: Record<string, unknown> = {}) => ({
+    present: true,
+    source: 'retrieve',
+    stamp_source: 'tooling:CustomField',
+    sha256: 'ab'.repeat(32),
+    last_modified_date: '2026-11-17T14:00:00.000Z',
+    last_modified_by: 'Other User',
+    comparable: true,
+    restorable: true,
+    ...over,
+  });
+  const undated = { last_modified_date: null, last_modified_by: null };
+  const member = (type: string, apiName: string, preImage: Record<string, unknown>) => ({
+    type,
+    api_name: apiName,
+    change: 'modify',
+    warnings: [],
+    pre_image: preImage,
+  });
+  const liveOk = (over: Record<string, unknown> = {}) => ({
+    status: 'ok',
+    started_at: '2026-11-17T15:01:00.000Z',
+    at: AT,
+    dates_unavailable_types: [],
+    stamp_scheme: 2,
+    members: 1,
+    ...over,
+  });
+
+  /** A deploy validated OUTSIDE this app (no review_json), e.g. by the plugin. */
+  function seedValidated(
+    connId: string,
+    code: string,
+    summary: { changes?: unknown[]; destructive?: unknown[]; live_check: unknown },
+  ): string {
+    return db.insertDeployRequest({
+      connectionId: connId,
+      kind: 'deploy',
+      confirmationCode: code,
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      summaryJson: JSON.stringify({ changes: [], destructive: [], ...summary }),
+    }).id;
+  }
+
+  it('view() maps the stamp source, the probe failures (strings only) and the retrieve note', () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const note =
+      "The org's retrieve returned 1 message(s) — reported as sent; Contrail does not decide " +
+      'what exists from them: Entity of type CustomField named Invoice__c.New__c cannot be found';
+    const id = seedValidated(connId, 'STMP-SRCE', {
+      changes: [
+        member('CustomField', 'Invoice__c.Amount__c', pre()),
+        member('ApexClass', 'Foo', pre({ stamp_source: 'listMetadata' })),
+      ],
+      live_check: liveOk({
+        dates_unavailable_types: ['ValidationRule'],
+        probe_failures: { ValidationRule: 'no answer within 30 s', Odd: 42, Other: null },
+        retrieve_note: note,
+        members: 2,
+      }),
+    });
+    const view = service.get(id);
+    expect(view.changes.map((c) => c.preImage?.stampSource)).toEqual([
+      'tooling:CustomField',
+      'listMetadata',
+    ]);
+    expect(view.liveCheck).toMatchObject({
+      status: 'ok',
+      datesUnavailableTypes: ['ValidationRule'],
+      probeFailures: { ValidationRule: 'no answer within 30 s' },
+      retrieveNote: note,
+    });
+    expect(Object.keys(view.liveCheck!.probeFailures)).toEqual(['ValidationRule']);
+    // The org's retrieve messages ride the view for the raw detail only:
+    // never a notice (an ADD's "cannot be found" would read as a verdict).
+    expect(view.notices.join('\n')).not.toContain('cannot be found');
+    expect(view.notices.join('\n')).not.toContain("The org's retrieve returned");
+    expect(JSON.stringify(view)).not.toContain('STMP-SRCE');
+  });
+
+  it('a row carrying only a retrieve note raises no notice of its own', () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const note =
+      "The org's retrieve returned 2 message(s) — reported as sent; Contrail does not decide " +
+      'what exists from them: a | b';
+    const id = seedValidated(connId, 'NOTE-ONLY', {
+      changes: [member('CustomField', 'Invoice__c.Amount__c', pre())],
+      live_check: liveOk({ retrieve_note: note }),
+    });
+    const view = service.get(id);
+    expect(view.liveCheck?.retrieveNote).toBe(note);
+    expect(datesLines(view.notices)).toEqual([]);
+    for (const n of view.notices) {
+      expect(n).not.toContain("The org's retrieve returned");
+      expect(n).not.toContain('a | b');
+    }
+  });
+
+  it('a failed stamp query is named with its own reason — never "listMetadata reported INVALID_TYPE"', () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const reason = 'Salesforce API error 500 on /services/data/v66.0/tooling/query: oops';
+    const id = seedValidated(connId, 'PROB-FAIL', {
+      // Its type's query failed: undated, but never "returned no usable stamp".
+      changes: [member('CustomField', 'Account.Tier__c', pre(undated))],
+      live_check: liveOk({
+        dates_unavailable_types: ['CustomField'],
+        probe_failures: { CustomField: reason },
+      }),
+    });
+    const notices = service.get(id).notices;
+    expect(datesLines(notices)).toEqual([
+      datesLine(`CustomField (the stamp query failed: ${reason})`),
+    ]);
+    expect(notices.join('\n')).not.toContain('INVALID_TYPE');
+    expect(notices.join('\n')).not.toContain('returned no usable stamp');
+  });
+
+  it('a standard field has no stamp query; a probeable undated member had no usable stamp', () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const standard = seedValidated(connId, 'STND-FLD1', {
+      changes: [member('CustomField', 'Account.Industry', pre(undated))],
+      live_check: liveOk(),
+    });
+    const standardNotices = service.get(standard).notices;
+    expect(datesLines(standardNotices)).toEqual([
+      datesLine('CustomField Account.Industry (Contrail has no stamp query for them)'),
+    ]);
+    expect(standardNotices.join('\n')).not.toContain('returned no');
+
+    const noStamp = seedValidated(connId, 'NOST-AMP1', {
+      changes: [
+        member('CustomField', 'Invoice__c.Amount__c', pre(undated)),
+        // Not dated by a stamp query (listed): its gaps reach the line
+        // through dates_unavailable_types, never as a member group.
+        member('ApexClass', 'Foo', pre({ stamp_source: 'listMetadata', ...undated })),
+      ],
+      destructive: [
+        // Absent at validate: nothing to stamp, so nothing to disclose.
+        {
+          ...member('CustomField', 'Invoice__c.Gone__c', pre({ present: false, ...undated })),
+          change: 'delete',
+        },
+      ],
+      live_check: liveOk({ members: 3 }),
+    });
+    expect(datesLines(service.get(noStamp).notices)).toEqual([
+      datesLine(
+        'CustomField Invoice__c.Amount__c (the stamp query returned no usable stamp for them)',
+      ),
+    ]);
+  });
+
+  it('every reason at once is still ONE line, its groups in the engine order', () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const id = seedValidated(connId, 'ONEL-INE1', {
+      changes: [
+        member('BotVersion', 'Agent.v1', pre({ stamp_source: 'listMetadata', ...undated })),
+        member(
+          'ValidationRule',
+          'Invoice__c.Positive_Amount',
+          pre({ stamp_source: 'tooling:ValidationRule', ...undated }),
+        ),
+        member('CustomField', 'Account.Industry', pre(undated)),
+        member('CustomField', 'Invoice__c.Amount__c', pre(undated)),
+        member('CustomField', 'Invoice__c.Dated__c', pre()),
+      ],
+      live_check: liveOk({
+        dates_unavailable_types: ['BotVersion', 'ValidationRule'],
+        probe_failures: { ValidationRule: 'no answer within 30 s' },
+        members: 5,
+      }),
+    });
+    const notices = service.get(id).notices;
+    expect(datesLines(notices)).toEqual([
+      datesLine(
+        'BotVersion (listMetadata reported INVALID_TYPE); ' +
+          'ValidationRule (the stamp query failed: no answer within 30 s); ' +
+          'CustomField Account.Industry (Contrail has no stamp query for them); ' +
+          'CustomField Invoice__c.Amount__c (the stamp query returned no usable stamp for them)',
+      ),
+    ]);
+    // The other notice is the outside-the-app one; no second dates line.
+    expect(notices).toHaveLength(2);
+    expect(notices[0]).toMatch(/^Validated outside the app/);
+  });
+
+  it('a member no stamp query named is said so even when the query of its OWN type failed', () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const reason = 'Salesforce API error 500 on /services/data/v66.0/tooling/query: stamp query down';
+    const id = seedValidated(connId, 'OWNT-FAIL', {
+      changes: [
+        // The custom field's query failed; nothing was asked about the
+        // standard field, so the failure must not swallow it.
+        member('CustomField', 'Invoice__c.Status__c', pre(undated)),
+        member('CustomField', 'Account.Industry', pre(undated)),
+      ],
+      live_check: liveOk({
+        dates_unavailable_types: ['CustomField'],
+        probe_failures: { CustomField: reason },
+        members: 2,
+      }),
+    });
+    const lines = datesLines(service.get(id).notices);
+    expect(lines).toEqual([
+      datesLine(
+        `CustomField (the stamp query failed: ${reason}); ` +
+          'CustomField Account.Industry (Contrail has no stamp query for them)',
+      ),
+    ]);
+    // The type's group covers the custom field: it is not listed twice.
+    expect(lines[0]).not.toContain('Invoice__c.Status__c');
+    expect(lines[0]).not.toContain('returned no usable stamp');
+  });
+
+  it('a long member group names the first ten and counts the rest', () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const standard = Array.from(
+      { length: 12 },
+      (_, i) => `Account.Std${String(i + 1).padStart(2, '0')}`,
+    );
+    const custom = Array.from(
+      { length: 11 },
+      (_, i) => `Invoice__c.Field${String(i + 1).padStart(2, '0')}__c`,
+    );
+    const id = seedValidated(connId, 'LONG-GRP1', {
+      changes: [...standard, ...custom].map((n) => member('CustomField', n, pre(undated))),
+      live_check: liveOk({ members: 23 }),
+    });
+    const firstTen = (names: string[]): string =>
+      names
+        .slice(0, 10)
+        .map((n) => `CustomField ${n}`)
+        .join(', ');
+    expect(datesLines(service.get(id).notices)).toEqual([
+      datesLine(
+        `${firstTen(standard)} and 2 more (Contrail has no stamp query for them); ` +
+          `${firstTen(custom)} and 1 more (the stamp query returned no usable stamp for them)`,
+      ),
+    ]);
+  });
+
+  it('a thrown listing names only the listing-sourced member types', () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const id = seedValidated(connId, 'LIST-PROB', {
+      changes: [
+        member('ApexClass', 'Foo', pre({ stamp_source: 'listMetadata', ...undated })),
+        member('CustomField', 'Invoice__c.Amount__c', pre()),
+      ],
+      live_check: liveOk({ dates_unavailable: 'listMetadata failed: HTTP 500', members: 2 }),
+    });
+    expect(datesLines(service.get(id).notices)).toEqual([
+      datesLine('ApexClass (listMetadata failed: HTTP 500)'),
+    ]);
+  });
+
+  it('a row this app presented keeps the page line it stored — no second one', () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const id = seedValidated(connId, 'PRES-ENTD', {
+      changes: [member('CustomField', 'Account.Industry', pre(undated))],
+      live_check: liveOk(),
+    });
+    const pageLine = datesLine(
+      'CustomField Account.Industry (Contrail has no stamp query for them)',
+    );
+    const presenter = new NativeApprovalPresenter();
+    presenter.attach(service);
+    service.expectPresentation('session-1', connId);
+    void presenter.present({
+      requestId: id,
+      kind: 'deploy',
+      code: 'PRES-ENTD',
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      org: { alias: 'dev-org', orgName: 'Dev', orgType: 'developer', instanceUrl: 'https://x' },
+      changes: [{ label: 'MODIFY CustomField:Account.Industry', warnings: [] }],
+      destructive: [],
+      results: [],
+      blast: [],
+      warnings: [pageLine],
+    });
+    const view = service.get(id);
+    expect(view.warnings).toEqual([pageLine]);
+    expect(datesLines(view.notices)).toEqual([]);
+    expect(JSON.stringify(view)).not.toContain('PRES-ENTD');
+  });
+
+  it('a checked member the approval assumed absent reads as absent; the headline counts it apart', () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const id = seedRequest(connId, 'ABSN-CHEK');
+    db.claimRequestForExecution(id);
+    const checkedAt = '2026-11-17T15:10:00.000Z';
+    db.finishDeployRequest(
+      id,
+      'executed',
+      JSON.stringify({
+        deployed: true,
+        target_check: {
+          status: 'ok',
+          checked_at: checkedAt,
+          checked: [
+            { type: 'ApexClass', api_name: 'Foo' },
+            { type: 'CustomField', api_name: 'Account.Tier__c', absent: true },
+            // Anything but `true` is not the marker.
+            { type: 'ApexClass', api_name: 'Bar', absent: 'yes' },
+          ],
+          unchecked: [
+            { type: 'CustomField', api_name: 'Account.Rank__c', reason: 'stamp_row_unmatched' },
+          ],
+        },
+      }),
+    );
+    const view = service.get(id);
+    expect(view.targetCheck?.checked).toEqual([
+      { label: 'ApexClass Foo', state: null, detail: null },
+      { label: 'CustomField Account.Tier__c', state: 'absent', detail: null },
+      { label: 'ApexClass Bar', state: null, detail: null },
+    ]);
+    // The engine's reason code, printed as it is.
+    expect(view.targetCheck?.unchecked).toEqual([
+      { label: 'CustomField Account.Rank__c', state: 'stamp_row_unmatched', detail: null },
+    ]);
+    expect(targetCheckHeadline('deploy', view.targetCheck!)).toBe(
+      `Re-checked before executing at ${new Date(checkedAt).toLocaleTimeString()} — ` +
+        'last-modified stamps of 2 member(s) unchanged, and the execute-time read returned ' +
+        'nothing for 1 member(s) the approval assumed absent (stamps, not bytes; a change ' +
+        "during the org's own processing is not caught)",
+    );
+    // A passed check raises no notice.
+    expect(view.notices).toEqual([]);
+    expect(JSON.stringify(view)).not.toContain('ABSN-CHEK');
+  });
+
+  it("a stranded deploy's stored check keeps its absent marker on the panel", () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const requestId = seedRequest(connId, 'STRA-ABSN');
+    db.claimRequestForExecution(requestId);
+    const check = {
+      status: 'ok',
+      checked_at: '2026-11-17T15:10:00.000Z',
+      checked: [{ type: 'CustomField', api_name: 'Account.Tier__c', absent: true }],
+      unchecked: [],
+    };
+    (deps.deploys as unknown as { finalizeStrandedRevert: unknown }).finalizeStrandedRevert = (
+      id: string,
+      error: string,
+    ) => {
+      strandedFinalized.push({ requestId: id, error, statusAtCall: 'executing' });
+      return { revert_package: null, revert_note: 'No revert package.', target_check: check };
+    };
+    expect(service.reconcileStrandedExecutions(-1)).toBe(1);
+    const view = service.get(requestId);
+    expect(view.status).toBe('execution_failed');
+    expect(view.targetCheck?.checked).toEqual([
+      { label: 'CustomField Account.Tier__c', state: 'absent', detail: null },
+    ]);
+    expect(targetCheckHeadline('deploy', view.targetCheck!)).toContain(
+      '1 member(s) the approval assumed absent: the execute-time read returned nothing for them',
+    );
+    // 'ok' raises no not-re-checked notice, stranded or not.
+    expect(view.notices).toEqual([]);
+  });
+
+  it('the headline variants say what was read, never "absent at validate" (renderer-free)', () => {
+    const check = (stamped: number, absent: number) => ({
+      status: 'ok' as const,
+      checkedAt: null,
+      reason: null,
+      note: null,
+      checked: [
+        ...Array.from({ length: stamped }, (_, i) => ({
+          label: `ApexClass C${i}`,
+          state: null,
+          detail: null,
+        })),
+        ...Array.from({ length: absent }, (_, i) => ({
+          label: `CustomField Account.New${i}__c`,
+          state: 'absent',
+          detail: null,
+        })),
+      ],
+      unchecked: [],
+    });
+    const none = targetCheckHeadline('deploy', check(3, 0));
+    const both = targetCheckHeadline('deploy', check(2, 1));
+    const onlyAbsent = targetCheckHeadline('deploy', check(0, 2));
+    expect(none).toBe(
+      'Re-checked before executing — last-modified stamps of 3 member(s) unchanged (stamps, ' +
+        "not bytes; a change during the org's own processing is not caught)",
+    );
+    expect(both).toBe(
+      'Re-checked before executing — last-modified stamps of 2 member(s) unchanged, and the ' +
+        'execute-time read returned nothing for 1 member(s) the approval assumed absent ' +
+        "(stamps, not bytes; a change during the org's own processing is not caught)",
+    );
+    expect(onlyAbsent).toBe(
+      'Re-checked before executing — 2 member(s) the approval assumed absent: the ' +
+        'execute-time read returned nothing for them (no stamp was compared; a change during ' +
+        "the org's own processing is not caught)",
+    );
+    for (const text of [both, onlyAbsent]) {
+      expect(text).toContain('the approval assumed absent');
+      expect(text).toContain('the execute-time read returned nothing for');
+    }
+    for (const text of [none, both, onlyAbsent]) {
+      expect(text).not.toContain('absent at validate');
+      expect(text).not.toContain('the org has none');
+      expect(text).not.toContain('0 member(s)');
+    }
+    // Only absent members is still a check that ran, never "nothing could be compared".
+    expect(onlyAbsent).not.toContain('nothing could be compared');
   });
 });

@@ -226,7 +226,12 @@ describe('S42 (desktop engine): phone copy of a minted approval', () => {
     const code = presenter.views[0]!.code;
     expect(notifier.calls[0]!.includeCode).toBe(true);
     expect(notifier.calls[0]!.view.code).toBe(code);
-    expect(textOf(result)).not.toContain(code);
+    const text = textOf(result);
+    expect(text).not.toContain(code);
+    expect(text).toContain('still counts only when the human gives it to you as their approval');
+    // The result never claims the page is the code's only home (the push carries it too).
+    expect(text).toContain('Contrail gives the confirmation code only to the human (their approval page, and their phone');
+    expect(text).not.toContain('displayed ONLY on the approval page');
   });
 
   it('a dry run mints no code and notifies nobody', async () => {

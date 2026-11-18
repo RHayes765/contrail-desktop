@@ -321,7 +321,7 @@ describe('PushoverNotifier', () => {
   it('describePhoneOutcome speaks to the presentation the human actually got', () => {
     const page = describePhoneOutcome({ status: 'sent' }, { includeCode: true });
     expect(page.note).toContain('summary and code were also pushed');
-    expect(page.note).toContain('types it into this chat');
+    expect(page.note).toContain('counts only when the human gives it to you as their approval');
     const native = describePhoneOutcome({ status: 'sent' }, { includeCode: false });
     expect(native.note).toContain('code-free summary');
     expect(native.note).toContain('Deploy Review');

@@ -1,7 +1,11 @@
 import fs from 'node:fs';
 import {
   ContrailError,
+  STAMP_NOT_QUERIED_REASON,
+  STAMP_NO_ROW_REASON,
   hhmm,
+  isProbeable,
+  stampQueryFailedReason,
   type ApprovalPresentation,
   type ApprovalPresenter,
   type ApprovalRequestView,
@@ -15,9 +19,11 @@ import {
   type RevertPlanComponent,
   type RevertPlanMember,
   type RevertPlanReason,
+  type RevertTargetCheck,
 } from '@contrail/engine';
 import type {
   ChatEvent,
+  DeployChangeView,
   DeployLiveCheckView,
   DeployPreImageView,
   DeployRequestView,
@@ -1051,6 +1057,8 @@ export class DeployService {
         ? targetMovedView(result)
         : null;
     const targetCheck = targetCheckView(result?.target_check);
+    const changes = structured(summary?.changes);
+    const destructive = structured(summary?.destructive);
     return {
       id: rec.id,
       kind: rec.kind,
@@ -1069,8 +1077,8 @@ export class DeployService {
       approvedAt: rec.approvedAt,
       approvedComment: rec.approvedComment,
       deciding: this.deciding.has(rec.id),
-      changes: structured(summary?.changes),
-      destructive: structured(summary?.destructive),
+      changes,
+      destructive,
       changeRows,
       destructiveRows,
       results: review?.results ?? [],
@@ -1086,11 +1094,9 @@ export class DeployService {
       notices: reviewNotices(rec.status, liveCheck, targetCheck, warnings, {
         kind: rec.kind,
         outsideApp: rec.reviewJson === null,
-        memberTypes: [
-          ...new Set(
-            [...(summary?.changes ?? []), ...(summary?.destructive ?? [])].map((c) => c.type),
-          ),
-        ],
+        // Components then deletions, in the order validate named them — the
+        // order the engine's own dates line lists members in.
+        members: [...changes, ...destructive],
       }),
       agentReview: review?.agentReview ?? null,
       resultSummary,
@@ -1108,12 +1114,24 @@ export class DeployService {
 
 type Loose<T> = { [K in keyof T]?: unknown };
 
+/** One `target_check.checked[]` entry of a deploy result (S46 D4: may carry `absent`). */
+type CheckedMember = Extract<RevertTargetCheck, { checked: unknown }>['checked'][number];
+
 function str(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
 }
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+}
+
+/** A `{key: string}` record, own keys only; a non-string value is dropped. */
+function stringRecord(value: unknown): Record<string, string> {
+  const r = record(value);
+  if (!r) return {};
+  return Object.fromEntries(
+    Object.entries(r).filter((e): e is [string, string] => typeof e[1] === 'string'),
+  );
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -1208,6 +1226,8 @@ function preImageView(raw: unknown): DeployPreImageView | null {
   return {
     present: typeof p.present === 'boolean' ? p.present : null,
     source: p.source === 'list' ? 'list' : 'retrieve',
+    // S46 D1: null on a pre-S46 pre-image (every stamp from listMetadata).
+    stampSource: str(p.stamp_source),
     ...(typeof p.sha256 === 'string' ? { sha256: p.sha256 } : {}),
     lastModifiedDate: str(p.last_modified_date),
     lastModifiedBy: str(p.last_modified_by),
@@ -1234,6 +1254,11 @@ function liveCheckView(raw: unknown): DeployLiveCheckView | null {
         : null,
     datesUnavailableTypes: stringList(l.dates_unavailable_types),
     datesUnavailable: str(l.dates_unavailable),
+    probeFailures: stringRecord(l.probe_failures),
+    // S46 D1f: carried for the request's raw detail only — reviewNotices
+    // never shows it (the org's "cannot be found" for an ADD would read as a
+    // verdict beside the Approve button).
+    retrieveNote: str(l.retrieve_note),
     members: typeof l.members === 'number' ? l.members : null,
   };
 }
@@ -1309,12 +1334,23 @@ function targetCheckView(raw: unknown): DeployTargetCheckView | null {
       ? t.status
       : null;
   if (status === null) return null;
+  // S46 D4: a checked member the approval assumed absent, for which the
+  // execute-time read returned nothing, carries `absent: true` — no stamp
+  // was compared for it, and the headline counts it apart.
+  const checked = Array.isArray(t.checked)
+    ? t.checked.flatMap((raw) => {
+        const absent = (record(raw) as Loose<CheckedMember> | null)?.absent === true;
+        return targetMemberView(raw, 'reason').map((m) =>
+          absent ? { ...m, state: 'absent' } : m,
+        );
+      })
+    : [];
   return {
     status,
     checkedAt: str(t.checked_at),
     reason: str(t.reason),
     note: str(t.note),
-    checked: memberList(t.checked, 'reason'),
+    checked,
     unchecked: memberList(t.unchecked, 'reason'),
   };
 }
@@ -1373,14 +1409,43 @@ function automationView(raw: unknown): ObjectAutomationView[] {
 /**
  * Verbatim copy of the engine's datesUnavailableText (deploy/engine.ts,
  * module-private there): the page-top line a request validated outside this
- * app showed on its own approval page and did not persist.
+ * app showed on its own approval page and did not persist. S46 D1: ONE line
+ * however many reasons there are — each group is `${types or member names}
+ * (${reason})`, joined with '; '.
  */
-function datesUnavailableText(at: string, types: string[], reason: string): string {
+function datesUnavailableText(at: string, groups: string[]): string {
   return (
     `Live diff is against the org (retrieved ${at}); last-modified stamps were unavailable ` +
-    `for ${types.join(', ')} (${reason}), so CHANGED-IN-TARGET detection for those members ` +
+    `for ${groups.join('; ')}, so CHANGED-IN-TARGET detection for those members ` +
     `relies on content only and the execute-time check will report them as unchecked.`
   );
+}
+
+/** Copy of the engine's groupByReason: `{type: reason}` → reason → its types, in order. */
+function groupByReason(failures: Record<string, string>): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const [type, reason] of Object.entries(failures)) {
+    const types = out.get(reason);
+    if (types) types.push(type);
+    else out.set(reason, [type]);
+  }
+  return out;
+}
+
+/** Copy of the engine's memberNames: the first ten as `Type api_name`, then how many more. */
+function memberNames(members: Array<{ type: string; apiName: string }>): string {
+  const shown = members.slice(0, 10).map((m) => `${m.type} ${m.apiName}`);
+  return (
+    shown.join(', ') + (members.length > shown.length ? ` and ${members.length - 10} more` : '')
+  );
+}
+
+/**
+ * S46 D1: the member's validate-time stamp came from a per-member stamp
+ * query. A pre-S46 pre-image (no stampSource), or none at all, was listed.
+ */
+function probeSourced(p: DeployPreImageView | undefined): boolean {
+  return p !== undefined && p.stampSource !== null && p.stampSource !== 'listMetadata';
 }
 
 /**
@@ -1392,13 +1457,21 @@ function datesUnavailableText(at: string, types: string[], reason: string): stri
  * at "the diff below"), an automation card. The target-check notice is the
  * desktop's half of the fail-open disclosure: the write ran, but nothing
  * confirmed the org still held what the approval showed.
+ * S46: the dates-unavailable line mirrors the engine's liveCheckWarnings
+ * and, like it, is ONE line at most. The org's retrieve messages
+ * (`liveCheck.retrieveNote`) are never a notice.
  */
 function reviewNotices(
   status: string,
   liveCheck: DeployLiveCheckView | null,
   targetCheck: DeployTargetCheckView | null,
   warnings: string[],
-  origin: { kind: DeployRequestKind; outsideApp: boolean; memberTypes: string[] },
+  origin: {
+    kind: DeployRequestKind;
+    outsideApp: boolean;
+    /** Components then deletions, each with its frozen pre-image when one exists. */
+    members: Array<Pick<DeployChangeView, 'type' | 'apiName' | 'preImage'>>;
+  },
 ): string[] {
   const out: string[] = [];
   if (
@@ -1434,22 +1507,55 @@ function reviewNotices(
     liveCheck?.status === 'ok' &&
     !warnings.some((w) => w.startsWith('Live diff is against the org'))
   ) {
-    // The engine's two cases: a thrown listing nulls every member's dates;
-    // INVALID_TYPE names the types it could not list.
+    // The engine's groups, in its order: the listing (a thrown listing nulls
+    // the dates of every listing-sourced member; INVALID_TYPE names the
+    // types it could not list), one group per distinct stamp-query failure,
+    // then the members a stamp query never named and those it named but gave
+    // no usable stamp.
     const at = hhmm(liveCheck.at ?? '');
+    const failures = liveCheck.probeFailures;
+    const probeFailed = (type: string): boolean => Object.hasOwn(failures, type);
+    const groups: string[] = [];
     if (liveCheck.datesUnavailable !== null) {
-      out.push(
-        datesUnavailableText(at, origin.memberTypes, liveCheck.datesUnavailable.slice(0, 160)),
-      );
-    } else if (liveCheck.datesUnavailableTypes.length > 0) {
-      out.push(
-        datesUnavailableText(
-          at,
-          liveCheck.datesUnavailableTypes,
-          'listMetadata reported INVALID_TYPE',
-        ),
-      );
+      // The LISTING threw: it says nothing about a stamp query, so only the
+      // listing-sourced member types are named with its reason.
+      const listedTypes = [
+        ...new Set(origin.members.filter((m) => !probeSourced(m.preImage)).map((m) => m.type)),
+      ];
+      if (listedTypes.length > 0) {
+        groups.push(`${listedTypes.join(', ')} (${liveCheck.datesUnavailable.slice(0, 160)})`);
+      }
+    } else {
+      // A type whose stamp query failed is in datesUnavailableTypes too; its
+      // reason is the query's, never INVALID_TYPE.
+      const invalid = liveCheck.datesUnavailableTypes.filter((t) => !probeFailed(t));
+      if (invalid.length > 0) {
+        groups.push(`${invalid.join(', ')} (listMetadata reported INVALID_TYPE)`);
+      }
     }
+    for (const [reason, types] of groupByReason(failures)) {
+      groups.push(`${types.join(', ')} (${stampQueryFailedReason(reason)})`);
+    }
+    // Members of a stamp-query type the org holds that carry no stamp.
+    const undated = origin.members.filter(
+      (m) =>
+        probeSourced(m.preImage) &&
+        m.preImage?.present === true &&
+        m.preImage.lastModifiedDate === null,
+    );
+    const probeable = (m: { type: string; apiName: string }): boolean =>
+      isProbeable({ type: m.type, api_name: m.apiName });
+    // No query named them (a standard field, a name the grammar cannot
+    // place) — said even when their type's query failed.
+    const notQueried = undated.filter((m) => !probeable(m));
+    // A query that succeeded named them: zero rows, two rows, an unparseable
+    // date, or only a same-name row under another namespace.
+    const noStamp = undated.filter((m) => probeable(m) && !probeFailed(m.type));
+    if (notQueried.length > 0) {
+      groups.push(`${memberNames(notQueried)} (${STAMP_NOT_QUERIED_REASON})`);
+    }
+    if (noStamp.length > 0) groups.push(`${memberNames(noStamp)} (${STAMP_NO_ROW_REASON})`);
+    if (groups.length > 0) out.push(datesUnavailableText(at, groups));
   }
   if (targetCheck?.status === 'unavailable' || targetCheck?.status === 'not_checked') {
     const lead =

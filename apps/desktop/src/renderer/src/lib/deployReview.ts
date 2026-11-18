@@ -86,13 +86,43 @@ export function targetCheckHeadline(
   return (
     `Re-checked before executing${at} — ` +
     (kind === 'deploy'
-      ? `last-modified stamps of ${n} member(s) unchanged (stamps, not bytes; a change ` +
-        "during the org's own processing is not caught)"
+      ? deployCheckedText(check)
       : kind === 'dml'
         ? `values of ${n} record(s) unchanged`
         : kind === 'activation'
           ? 'status unchanged'
           : `${n} compared, none had changed`)
+  );
+}
+
+/**
+ * A deploy's 'ok' headline body. S46 D4: a checked member marked 'absent'
+ * was one the approval assumed absent, and the execute-time read returned
+ * nothing for it — no stamp was compared, so it is never counted among the
+ * unchanged stamps. "The approval assumed absent", never "absent at
+ * validate": with no live baseline validate did not read the org, and the
+ * assumption is the local snapshot's ADD. "Returned nothing", never "the org
+ * has none": for some types the read is a filtered query.
+ */
+function deployCheckedText(check: DeployTargetCheckView): string {
+  const a = check.checked.filter((m) => m.state === 'absent').length;
+  const s = check.checked.length - a;
+  if (a === 0) {
+    return (
+      `last-modified stamps of ${s} member(s) unchanged (stamps, not bytes; a change ` +
+      "during the org's own processing is not caught)"
+    );
+  }
+  if (s === 0) {
+    return (
+      `${a} member(s) the approval assumed absent: the execute-time read returned nothing for ` +
+      "them (no stamp was compared; a change during the org's own processing is not caught)"
+    );
+  }
+  return (
+    `last-modified stamps of ${s} member(s) unchanged, and the execute-time read returned ` +
+    `nothing for ${a} member(s) the approval assumed absent (stamps, not bytes; a change ` +
+    "during the org's own processing is not caught)"
   );
 }
 

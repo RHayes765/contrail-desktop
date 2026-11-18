@@ -217,7 +217,18 @@ export {
   deployZipEntryPath,
   type ComponentChange,
   type ComponentPreImage,
+  type StampSource,
 } from './deploy/package.js';
+// S46 D1: what the app needs to print the ONE dates-unavailable line for a
+// request it did not present (services/deploys.ts mirrors the engine's
+// liveCheckWarnings) — the two member-group reasons, the failed-query reason
+// and the "can a stamp query name this member" predicate.
+export {
+  STAMP_NO_ROW_REASON,
+  STAMP_NOT_QUERIED_REASON,
+  stampQueryFailedReason,
+  isProbeable,
+} from './deploy/stampprobe.js';
 // S45 F1/F2/F4: the live pre-image, the execute-time target check and the
 // revert package (written under stagingDir()/_reverts/<requestId>/).
 export {

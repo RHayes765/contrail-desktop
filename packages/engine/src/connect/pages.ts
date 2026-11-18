@@ -169,10 +169,10 @@ export function renderGrantsPage(opts: GrantsPageOptions): string {
       <div class="org-row"><span class="k">Instance</span><span class="v">${esc(opts.org.instanceUrl)}</span></div>
       <div class="org-row"><span class="k">Logged in as</span><span class="v">${esc(opts.org.username ?? '(unknown)')}</span></div>
     </div>
-    <div class="warn">Grants are set on this page only. The AI agent cannot see this page,
-      cannot set grants, and cannot change them later — changes always come back here.
-      Every deploy or data write additionally requires your explicit confirmation, in every
-      environment.</div>
+    <div class="warn">Grants are set on this page only. Contrail does not show the AI agent
+      this page; the agent cannot set grants and cannot change them later — changes always
+      come back here. Every deploy or data write additionally requires your explicit
+      confirmation, in every environment.</div>
     <form method="post" action="${esc(opts.actionPath)}" class="card">
       <input type="hidden" name="session" value="${esc(opts.sessionId)}">
       ${labelField}
@@ -318,8 +318,12 @@ export interface ApprovalPageOptions {
 
 /**
  * The write-approval page. This page is the ONLY place the confirmation code
- * appears — the agent never sees it, so reading it back is what approval
- * means. Everything shown here also went to the agent except the code.
+ * appears — Contrail never hands the agent this page or the code, so reading
+ * it back is what approval means. Everything shown here also went to the
+ * agent except the code. Anything that shows the agent this page shows it
+ * the code too (a screenshot pasted into the chat, an agent that can view
+ * the human's screen): the code card says so, and promises nothing about
+ * closing the tab that the page does not do.
  */
 export function renderApprovalPage(opts: ApprovalPageOptions): string {
   const isProd = opts.org.orgType === 'production';
@@ -407,8 +411,11 @@ export function renderApprovalPage(opts: ApprovalPageOptions): string {
       <h2>Confirmation code</h2>
       <div class="code" id="code">${esc(opts.code)}</div>
       <p class="note">If — and only if — you approve everything above, read this code back to
-        the agent. The agent cannot see this page. If anything looks wrong, close this tab and
-        nothing happens. The code is single-use and expires
+        the agent. Contrail itself never gives the agent this page or the code — but anything that
+        shows the agent this page hands it the code too (a screenshot or copy pasted into the chat,
+        or an agent that can view your screen), so share it only if you mean to approve. If anything
+        looks wrong, close this tab and do not give the agent the code; if the agent has already
+        seen this page, tell it you do not approve. The code is single-use and expires
         ${esc(new Date(opts.expiresAt).toLocaleTimeString())}; re-validating replaces it.</p>
     </div>
     <div class="card danger-card" id="dead" style="display:none">

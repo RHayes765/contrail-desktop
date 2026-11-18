@@ -660,7 +660,8 @@ export interface DeployChangeView {
    * S45: what the org held for this member when validate_deploy ran (the
    * live baseline). Absent on rows validated before S45 or when the live
    * check never ran. `present` is null when the org could not enumerate the
-   * type; dates are null when its listing did not describe the member.
+   * type; dates are null when its stamp source (`stampSource`) gave no
+   * usable stamp for the member.
    */
   preImage?: DeployPreImageView;
 }
@@ -669,6 +670,14 @@ export interface DeployChangeView {
 export interface DeployPreImageView {
   present: boolean | null;
   source: 'retrieve' | 'list';
+  /**
+   * S46 D1: where this member's last-modified stamp was read from at
+   * validate — 'listMetadata', or a per-member stamp query
+   * ('tooling:CustomField', 'tooling:ValidationRule',
+   * 'tooling:ExternalString', 'data:ListView'). Null on a pre-image frozen
+   * before S46, whose stamps all came from listMetadata.
+   */
+  stampSource: string | null;
   sha256?: string;
   lastModifiedDate: string | null;
   lastModifiedBy: string | null;
@@ -730,6 +739,19 @@ export interface DeployLiveCheckView {
   orgClock: { createdDate: string; completedDate: string | null } | null;
   datesUnavailableTypes: string[];
   datesUnavailable: string | null;
+  /**
+   * S46 D1: type → reason for the types whose per-member stamp query failed
+   * at validate (they are in `datesUnavailableTypes` too). {} when none.
+   */
+  probeFailures: Record<string, string>;
+  /**
+   * S46 D1f: what the org's retrieve reported, quoted as sent — a note for
+   * the request's raw detail only, never a presence verdict. The review
+   * never shows it as a notice: an ADD of a field produces "cannot be
+   * found" on every validate, and beside the Approve button that would read
+   * as a verdict.
+   */
+  retrieveNote: string | null;
   members: number | null;
 }
 
@@ -737,7 +759,12 @@ export interface DeployLiveCheckView {
 export interface DeployTargetMemberView {
   /** "ApexClass Foo", "Account 001… Name", "BotVersion Agent.v2". */
   label: string;
-  /** moved: changed | gone | created | missing; unchecked: the engine's reason code. */
+  /**
+   * moved: changed | gone | created | missing; unchecked: the engine's reason
+   * code; checked: null, or 'absent' (S46 D4) for a member the approval
+   * assumed absent and for which the execute-time read returned nothing — no
+   * stamp was compared for it.
+   */
   state: string | null;
   /** Who/when, when the org reported it. */
   detail: string | null;

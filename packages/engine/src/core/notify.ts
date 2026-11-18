@@ -147,7 +147,7 @@ export function describePhoneOutcome(
       status: 'sent',
       note: opts.includeCode
         ? "The approval summary and code were also pushed to the human's phone. The code " +
-          'still only counts when the human types it into this chat.'
+          'still counts only when the human gives it to you as their approval.'
         : "A code-free summary was pushed to the human's phone; they approve in the app's " +
           'Deploy Review screen as usual.',
     };

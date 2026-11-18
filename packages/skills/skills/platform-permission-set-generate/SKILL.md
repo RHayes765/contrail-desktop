@@ -291,10 +291,12 @@ same message. Three sharp edges:
 
 ## What Contrail's coverage checker counts as a grant
 
-`validate_deploy` cross-checks new components against any PermissionSet/Profile
-in the same package and returns a `permission_warning` listing what is not
-granted. A component counts as covered only when it is **named in the right block
-AND the enabling flag is on** — a mention with the flag off is NOT coverage:
+`validate_deploy` cross-checks the package's components against any
+PermissionSet/Profile in the same package and returns a `permission_warning`
+listing what is not granted — saying which of them are new, which are already in
+the org, and which it could not place. A component counts as covered only when it
+is **named in the right block AND the enabling flag is on** — a mention with the
+flag off is NOT coverage:
 
 | Component in package | Block checked | Name element | Must be |
 |---|---|---|---|

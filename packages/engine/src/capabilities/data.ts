@@ -686,31 +686,27 @@ export const dataCapabilities: Capability[] = [
       'the org, on either runner: Testing Center (AiEvaluationDefinition — the documented ' +
       'Connect API) or the Agentforce Studio Tests tab (AiTestingDefinition — BETA: ' +
       'Salesforce labels the type and its runner Beta, the runner is absent from the ' +
-      'Connect REST reference, and its result schema may change). Two-step like ' +
-      'run_apex_tests: submit with eval (the definition DeveloperName) for a run_id; call ' +
-      'again with run_id to poll and, once complete, read per-case results — Testing ' +
-      'Center: routed topic, executed action sequence and each expectation outcome; ' +
-      "Studio: the agent's response (subject_response) and each scorer's outcome, with " +
+      'Connect REST reference, and its result schema may change). Two-step: submit with ' +
+      'eval (the definition DeveloperName) for a run_id; call again with run_id to poll and ' +
+      'read per-case results — Testing Center: routed topic, action sequence and each ' +
+      "expectation outcome; Studio: the agent's response and each scorer's outcome, with " +
       'an explanation only when the scorer response carries one. Runner selection: a ' +
-      'run_id picks its runner by prefix (4KB = Testing Center, 3A2 = Studio — both ' +
-      'live-confirmed; anything else is refused); a bare eval is looked up live via listMetadata across both ' +
-      'types, which needs the metadata_read grant — one match picks the runner (and the ' +
-      "org's exact-case name is what gets submitted), a name held by both is refused as " +
-      'ambiguous, a name held by neither is refused (check the name or refresh_snapshot), ' +
-      'and a failed lookup is refused too — nothing is ever submitted to a guessed runner. ' +
-      'Pass runner to skip detection (no metadata_read needed then). Side effects, ' +
+      'run_id picks its runner by prefix (any unrecognised prefix is refused); a bare eval ' +
+      'is looked up live via listMetadata across both types, which needs the metadata_read ' +
+      'grant — one match picks the runner, a name held by both is refused as ambiguous, a ' +
+      'name held by neither is refused, and a failed lookup is refused too — nothing is ' +
+      'ever submitted to a guessed runner. Pass runner to skip detection. Side effects, ' +
       'honestly, on BOTH runners: the agent under test executes its REAL actions during ' +
-      'the run — records they create or change are NOT rolled back (unlike Apex test ' +
-      'runs), so prefer sandboxes for agents whose actions write. Runs take MINUTES (poll ' +
-      'sparingly); orgs allow ~10 concurrent runs. Polling and results need ' +
-      'diagnostics_read; STARTING a run additionally requires data_write, because it ' +
-      'triggers real agent-action execution — the definition itself was approved through ' +
-      'the deploy ritual, which is why no further confirmation code is needed here. ' +
-      "Testing Center requires an ACTIVE agent version; whether a Studio suite's " +
-      'subjectVersion can target a non-active version is unverified — expect a run-level ' +
-      "FAILED with error_message if not. Studio pass/fail is DERIVED from each scorer's " +
-      'JSON response and is null when no explicit verdict exists — read the raw scorer ' +
-      'rows when it matters.',
+      'the run — records they create or change are NOT rolled back, so prefer sandboxes ' +
+      'for agents whose actions write. Runs take MINUTES (poll sparingly). Polling and ' +
+      'results need diagnostics_read; STARTING a run additionally requires data_write, ' +
+      'because it triggers real agent-action execution — the definition itself was ' +
+      'approved through the deploy ritual, which is why no further confirmation code is ' +
+      'needed here. Testing Center requires an ACTIVE agent version; whether a Studio ' +
+      "suite's subjectVersion can target a non-active version is unverified — expect a " +
+      'run-level FAILED with error_message if not. Studio pass/fail is DERIVED from each ' +
+      "scorer's JSON response and is null when no explicit verdict exists — read the raw " +
+      'scorer rows when it matters.',
     grant: 'diagnostics_read',
     writeClass: false,
     inputSchema: {

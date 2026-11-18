@@ -378,6 +378,31 @@ describe('input-keyed validate jobs', () => {
     expect(validations).toBe(2); // one per package — never a third, never zero for Beta
   });
 
+  it('S46 D2: a poll of a running validation reports the progress doValidate wrote, never "starting"', async () => {
+    armGate();
+    stalledIds.add('0Af-check-1');
+
+    // The first call outlives the soft wait while the org's status call is
+    // stalled: what it reports is where the validation IS, not the job's
+    // initial placeholder.
+    const alpha1 = await deploys.validateDeploy(conn, dryInput('AlphaCls'));
+    expect(alpha1.status).toBe('in_progress');
+    if (alpha1.status !== 'in_progress') return;
+    expect(alpha1.progress).toBe('validating with Salesforce (checkOnly)');
+
+    // A later poll by job id, still stalled.
+    const polled = await deploys.pollValidate(conn, alpha1.job_id);
+    expect(polled?.status).toBe('in_progress');
+    if (polled?.status !== 'in_progress') return;
+    expect(polled.progress).not.toBe('starting');
+    expect(polled.progress).toBe('validating with Salesforce (checkOnly)');
+
+    gateRelease();
+    gatePromise = null;
+    const done = await pollUntilDone(alpha1.job_id);
+    expect(done.status).toBe('complete');
+  });
+
   it('pollValidate answers only for jobs that exist; collected results are gone honestly', async () => {
     expect(await deploys.pollValidate(conn, 'vdry-doesnotexist')).toBeNull();
 

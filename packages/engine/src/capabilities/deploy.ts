@@ -21,9 +21,10 @@ import { requireConnection } from './metadata.js';
 const ID_RE = /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/;
 
 const APPROVAL_INSTRUCTIONS =
-  'The confirmation code is displayed ONLY on the approval page in the human\'s browser — ' +
-  'it is not available to you anywhere. Present this summary (destructive changes first), ' +
-  'then ask the human to review the page and read the code back if they approve.';
+  'Contrail gives the confirmation code only to the human (their approval page, and their ' +
+  'phone if they set that up) — never to you, in any tool result. Present this summary ' +
+  '(destructive changes first), then ask the human to review the page and read the code ' +
+  'back if they approve.';
 
 const REF_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
 const REF_TOKEN_RE = /^@\{([A-Za-z][A-Za-z0-9_]*)\.id\}$/;
@@ -171,25 +172,22 @@ export const deployCapabilities: Capability[] = [
       'Build a deploy package and validate it against the org with checkOnly=true — ' +
       'nothing is committed. Returns the change summary (destructive changes flagged), ' +
       'validation/test results, and blast radius; puts a confirmation code on the ' +
-      'human-only approval page. Checking work-in-progress mid-build? Pass ' +
-      'dry_run: true — same validation, NO approval request or code is created ' +
-      '(save the human from pages that were never meant to be approved). ' +
-      'Normally OMIT test_level — the org then applies its ' +
-      'own default (production runs local tests for Apex packages automatically and ' +
-      'refuses an explicit NoTestRun). ' +
-      'An in-progress result means call validate_deploy again to check on it. ' +
-      'Live diff (real validations only, never dry_run): alongside the checkOnly deploy, ' +
-      "Contrail retrieves the org's CURRENT version of every component and deletion, and the " +
-      'approval page diffs each changed component against that live version, per file for ' +
-      'bundles — the diff baseline is the org at validate time. A component the org has but ' +
-      'your snapshot lacks is flagged EXISTS IN TARGET (this deploy overwrites it, so it ' +
-      'classifies as MODIFY), one your snapshot has but the org lacks NOT IN TARGET, and one ' +
-      "whose last-modified stamp in the org differs from your snapshot's CHANGED IN TARGET. " +
-      'When that retrieve fails or times out (deploy.preImageTimeoutMs), the page says the ' +
-      'org was not re-read and falls back to your local snapshot; types whose retrieved bytes ' +
-      'cannot be compared (such as Profile) are diffed against the snapshot and labelled so. ' +
-      'The pre-images and their last-modified stamps are frozen on the request: execute_deploy ' +
-      're-checks the stamps before running, and the restorable bytes become its revert package.',
+      'human-only approval page. Mid-build check? Pass dry_run: true — same validation, ' +
+      'NO approval request or code is created. Normally OMIT test_level: the org applies ' +
+      'its own default. An in-progress result means call validate_deploy again to check ' +
+      'on it. ' +
+      "Live diff (real validations only, never dry_run): Contrail retrieves the org's " +
+      'CURRENT version of every component and deletion, and the approval page diffs each ' +
+      'changed component against that live version, per file for bundles — the diff ' +
+      'baseline is the org at validate time. A component the org has but your snapshot ' +
+      'lacks is flagged EXISTS IN TARGET (this deploy overwrites it: MODIFY), one your ' +
+      'snapshot has but the org lacks NOT IN TARGET, and one whose last-modified stamp in ' +
+      "the org differs from your snapshot's CHANGED IN TARGET. When that retrieve fails or " +
+      'times out, the page says the org was not re-read and falls back to your local ' +
+      'snapshot; types whose bytes cannot be compared (such as Profile) are diffed against ' +
+      'the snapshot and labelled so. The pre-images and their last-modified stamps are ' +
+      'frozen on the request: execute_deploy re-checks the stamps before running, and the ' +
+      'restorable bytes become its revert package.',
     grant: 'metadata_write',
     writeClass: true,
     inputSchema: {
@@ -514,29 +512,26 @@ export const deployCapabilities: Capability[] = [
     name: 'execute_deploy',
     title: 'Execute a validated deploy',
     description:
-      'Execute the most recently validated deploy. Approval flow depends on the surface: in ' +
-      'the desktop app, call WITHOUT a confirmation code — the user approves in Deploy Review ' +
-      'and this call waits for their decision. With the localhost approval page, pass the code ' +
-      'the human read from the page. Never guess, fabricate, or reuse a code; codes are ' +
-      'single-use, expire in ~1h, and any new REAL validation on the connection ' +
-      'replaces them (a dry_run check leaves them untouched). ' +
-      "Target check: before claiming the code, Contrail re-lists the package's members in the " +
-      'org and compares their last-modified stamps — not bytes — with the validate-time ' +
-      'retrieve (or, when no live baseline was captured at validate, with the org-side ' +
-      'validation time); if a member changed, appeared or disappeared, nothing is deployed, ' +
-      'the code is voided, and the call reports TARGET MOVED naming what moved — re-validate ' +
-      'for a fresh code. The check covers changes up to the moment the code is claimed, not ' +
-      'changes landing while the org processes the deploy; a member it cannot compare (its ' +
-      'type cannot be enumerated, no baseline stamp was captured at validate, the org gives ' +
-      'it no stamp, or — with no live baseline — it is missing from the listing) is reported ' +
-      "as unchecked on the result's target_check, never refused; and when the org cannot be " +
-      're-read at all, the deploy still runs and target_check says the check did not happen. ' +
+      'Execute the most recently validated deploy. In the desktop app, call WITHOUT a ' +
+      'confirmation code — the user approves in Deploy Review and this call waits for their ' +
+      'decision. With the localhost approval page, pass the code the human read from the ' +
+      'page. Never guess, fabricate, or reuse a code; codes are single-use, expire in ~1h, ' +
+      'and any new REAL validation on the connection replaces them (a dry_run check leaves ' +
+      'them untouched). ' +
+      'Target check: before claiming the code, Contrail re-reads the last-modified stamps of ' +
+      "the package's members and compares them — not bytes — with the validate-time " +
+      'baseline; if a member changed, appeared or disappeared, nothing is deployed, the code ' +
+      'is voided, and the call reports TARGET MOVED naming what moved — re-validate for a ' +
+      'fresh code. The check covers changes up to the moment the code is claimed only; a ' +
+      "member it cannot compare is reported as unchecked on the result's target_check, never " +
+      'refused; and when the org cannot be re-read at all, the deploy still runs and ' +
+      'target_check says the check did not happen. ' +
       "Revert package: on success the result's revert_package points at the pre-images " +
-      'Contrail retrieved when this deploy was VALIDATED (not immediately before executing), ' +
-      'under staging/_reverts/<request id>/ with revert-plan.json and README.txt; it is kept, ' +
-      'marked outcome unknown, when Contrail loses track of a deploy that may have committed, ' +
-      'and is null with a revert_note saying why when there is no live pre-image to restore ' +
-      'from. Contrail never deploys a revert on its own — a revert is its own validate_deploy.',
+      'Contrail retrieved when this deploy was VALIDATED (not just before executing); it is ' +
+      'kept, marked outcome unknown, when Contrail loses track of a deploy that may have ' +
+      'committed, and is null with a revert_note saying why when there is no live pre-image ' +
+      'to restore from. Contrail never deploys a revert on its own — a revert is its own ' +
+      'validate_deploy.',
     grant: 'metadata_write',
     writeClass: true,
     inputSchema: {
