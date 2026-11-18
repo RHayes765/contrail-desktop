@@ -161,11 +161,12 @@ Writing the source is the midpoint, not the finish line.
      record `compile_check=unavailable: <reason>` in the report and present the
      code explicitly as UNVERIFIED. Do not substitute self-review for the gate.
 
-7. **Approval, deploy, refresh** — by reference. Present the validation summary
+7. **Approval and deploy** — by reference. Present the validation summary
    (target org first; destructive changes and any `permission_warning` lead), the
    human reads the confirmation code from the approval page, you pass it to
-   `execute_deploy`, then run `refresh_snapshot`. Full contract:
-   **salesforce-house-rules §3**.
+   `execute_deploy` — Contrail then re-reads the deployed components into the
+   snapshot itself (`refresh_snapshot` only for what the result's `snapshot`
+   block reports as not updated). Full contract: **salesforce-house-rules §3**.
 
 ### Phase 3 — Report
 
@@ -419,7 +420,7 @@ Workflow: all steps completed (1-8); any N/A justified
 Risks: <security, bulkification, async, dependency notes — include your own findings from self-review against the Rules>
 Compile+Tests: <REQUIRED — actual validate_deploy result: component errors, tests run/failed, coverage warnings; or "compile_check=unavailable: <reason>" after attempting>
 Permissions: <which permission set grants classAccesses; any permission_warning verbatim>
-Deploy: <validated, awaiting human approval | executed + refresh_snapshot run | not attempted>
+Deploy: <validated, awaiting human approval | executed (snapshot: <status from the result's snapshot block>) | not attempted>
 ```
 
 ---

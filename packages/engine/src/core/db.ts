@@ -1593,20 +1593,51 @@ export class ContrailDb {
    * Snapshot posture for a connection: what the index holds now, and when the
    * last recorded run happened. artifact-table facts work even for snapshots
    * taken by the plugin (which never writes metadata_snapshots rows).
+   *
+   * S46 (C): `syncedAt` is what "synced … ago" and the stale badge report —
+   * the later of (a) the oldest retrieved_at among the rows of `syncTypes`
+   * (the default sync types; over every row when none of them has a row or
+   * none are named) and (b) the last recorded run's taken_at, which keeps a
+   * type every sync now skips from pinning the date forever. A member-scoped
+   * re-read (a re-baseline after a deploy) rewrites only some rows of a type,
+   * so it never moves the oldest; `lastIndexedAt` (the newest row) moves on
+   * ANY index change and stays the cache-key basis, with `artifactCount`.
    */
-  getSnapshotStatus(connectionId: string): {
+  getSnapshotStatus(
+    connectionId: string,
+    syncTypes?: string[],
+  ): {
     artifactCount: number;
     edgeCount: number;
     lastIndexedAt: string | null;
+    /** S46 (C): the oldest whole-type refresh among the default sync types — see above. */
+    syncedAt: string | null;
     lastRun: { takenAt: string; kind: string; artifactCount: number | null } | null;
     /** Median duration of the last three recorded runs — the "typically ~Xm" basis. */
     typicalDurationMs: number | null;
   } {
     const artifacts = this.db
       .prepare(
-        `SELECT COUNT(*) AS n, MAX(retrieved_at) AS latest FROM artifacts WHERE connection_id = ?`,
+        `SELECT COUNT(*) AS n, MAX(retrieved_at) AS latest, MIN(retrieved_at) AS oldest
+         FROM artifacts WHERE connection_id = ?`,
       )
-      .get(connectionId) as { n: number; latest: string | null };
+      .get(connectionId) as { n: number; latest: string | null; oldest: string | null };
+    let oldestSynced: string | null = null;
+    const types = [...new Set(syncTypes ?? [])];
+    // Chunked: one bound parameter per type, well under SQLite's limit.
+    for (let i = 0; i < types.length; i += 400) {
+      const chunk = types.slice(i, i + 400);
+      const row = this.db
+        .prepare(
+          `SELECT MIN(retrieved_at) AS oldest FROM artifacts
+           WHERE connection_id = ? AND type IN (${chunk.map(() => '?').join(',')})`,
+        )
+        .get(connectionId, ...chunk) as { oldest: string | null };
+      if (row.oldest !== null && (oldestSynced === null || row.oldest < oldestSynced)) {
+        oldestSynced = row.oldest;
+      }
+    }
+    if (oldestSynced === null) oldestSynced = artifacts.oldest;
     const edges = this.db
       .prepare(`SELECT COUNT(*) AS n FROM dependency_edges WHERE connection_id = ?`)
       .get(connectionId) as { n: number };
@@ -1631,10 +1662,18 @@ export class ContrailDb {
       .sort((a, b) => a - b);
     const typicalDurationMs =
       durations.length > 0 ? (durations[Math.floor(durations.length / 2)] ?? null) : null;
+    const takenAt = lastRun?.taken_at ?? null;
+    const syncedAt =
+      oldestSynced === null
+        ? takenAt
+        : takenAt === null || !(Date.parse(takenAt) > Date.parse(oldestSynced))
+          ? oldestSynced
+          : takenAt;
     return {
       artifactCount: artifacts.n,
       edgeCount: edges.n,
       lastIndexedAt: artifacts.latest,
+      syncedAt,
       lastRun: lastRun
         ? { takenAt: lastRun.taken_at, kind: lastRun.kind, artifactCount: lastRun.artifact_count }
         : null,
@@ -1880,6 +1919,72 @@ export class ContrailDb {
     tx();
   }
 
+  /**
+   * S46 (member-scoped refresh): replace named rows only, in one
+   * transaction. Every row named by `remove` AND every row an incoming
+   * artifact would occupy is deleted first — matched by type and
+   * case-insensitive api_name, so a case-changed rename never leaves two
+   * rows under the case-sensitive UNIQUE key — with its FTS rows; then the
+   * incoming artifacts are inserted as replaceArtifactsForTypes inserts
+   * them. Every other row keeps its id. The FTS delete is chunked (400 ids)
+   * because artifact_id is UNINDEXED: one table scan per chunk.
+   * Hand-mirror of the plugin db.ts.
+   */
+  replaceArtifactRows(
+    connectionId: string,
+    remove: Array<{ type: string; apiName: string }>,
+    artifacts: Array<Omit<ArtifactRecord, 'id' | 'workspaceId'> & { content?: string }>,
+  ): { deleted: number; inserted: number } {
+    const find = this.db.prepare(
+      `SELECT id FROM artifacts WHERE connection_id = ? AND type = ? AND api_name = ? COLLATE NOCASE`,
+    );
+    const ins = this.db.prepare(
+      `INSERT INTO artifacts
+         (id, workspace_id, connection_id, type, api_name, file_path, content_hash,
+          last_modified_date, last_modified_by, retrieved_at)
+       VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const insFts = this.db.prepare(
+      `INSERT INTO artifact_fts (api_name, type, content, connection_id, artifact_id)
+       VALUES (?, ?, ?, ?, ?)`,
+    );
+    const tx = this.db.transaction((): { deleted: number; inserted: number } => {
+      const ids = new Set<string>();
+      for (const r of [...remove, ...artifacts]) {
+        for (const row of find.all(connectionId, r.type, r.apiName) as Array<{ id: string }>) {
+          ids.add(row.id);
+        }
+      }
+      const all = [...ids];
+      let deleted = 0;
+      for (let i = 0; i < all.length; i += 400) {
+        const chunk = all.slice(i, i + 400);
+        const marks = chunk.map(() => '?').join(',');
+        this.db.prepare(`DELETE FROM artifact_fts WHERE artifact_id IN (${marks})`).run(...chunk);
+        deleted += this.db
+          .prepare(`DELETE FROM artifacts WHERE id IN (${marks})`)
+          .run(...chunk).changes;
+      }
+      for (const a of artifacts) {
+        const id = randomUUID();
+        ins.run(
+          id,
+          connectionId,
+          a.type,
+          a.apiName,
+          a.filePath,
+          a.contentHash,
+          a.lastModifiedDate,
+          a.lastModifiedBy,
+          a.retrievedAt,
+        );
+        insFts.run(a.apiName, a.type, a.content ?? '', connectionId, id);
+      }
+      return { deleted, inserted: artifacts.length };
+    });
+    return tx();
+  }
+
   listArtifacts(connectionId: string, type?: string): ArtifactRecord[] {
     const rows = type
       ? this.db
@@ -1900,6 +2005,20 @@ export class ContrailDb {
       )
       .get(connectionId, type, apiName);
     return row ? rowToArtifact(row as ArtifactRow) : null;
+  }
+
+  /**
+   * S46: every row stored under one snapshot file — a document's root row
+   * and all its children (one row for a bundle). Hand-mirror of the plugin
+   * db.ts.
+   */
+  listArtifactsByFilePath(connectionId: string, filePath: string): ArtifactRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM artifacts WHERE connection_id = ? AND file_path = ? ORDER BY type, api_name`,
+      )
+      .all(connectionId, filePath);
+    return (rows as ArtifactRow[]).map(rowToArtifact);
   }
 
   countArtifactsByType(connectionId: string): Record<string, number> {
@@ -1995,6 +2114,44 @@ export class ContrailDb {
       for (const t of fromTypes) del.run(connectionId, source, t);
       for (const e of edges) {
         ins.run(randomUUID(), connectionId, e.fromType, e.fromName, e.toType, e.toName, source);
+      }
+    });
+    tx();
+  }
+
+  /**
+   * S46 (member-scoped refresh): in one transaction, drop the extractor
+   * edges FROM each re-read component, drop every edge (both sources) FROM
+   * each removed one, then insert the new edges as extractor edges. Edges
+   * TO those components, and org edges from a re-read one, are untouched.
+   * Hand-mirror of the plugin db.ts.
+   */
+  replaceEdgesFromArtifacts(
+    connectionId: string,
+    input: {
+      refreshed: Array<{ type: string; name: string }>;
+      removed: Array<{ type: string; name: string }>;
+      edges: DependencyEdge[];
+    },
+  ): void {
+    const delExtractor = this.db.prepare(
+      `DELETE FROM dependency_edges
+       WHERE connection_id = ? AND source = 'extractor' AND from_type = ? AND from_name = ? COLLATE NOCASE`,
+    );
+    const delAll = this.db.prepare(
+      `DELETE FROM dependency_edges
+       WHERE connection_id = ? AND from_type = ? AND from_name = ? COLLATE NOCASE`,
+    );
+    const ins = this.db.prepare(
+      `INSERT OR IGNORE INTO dependency_edges
+         (id, workspace_id, connection_id, from_type, from_name, to_type, to_name, source)
+       VALUES (?, 'default', ?, ?, ?, ?, ?, ?)`,
+    );
+    const tx = this.db.transaction(() => {
+      for (const r of input.refreshed) delExtractor.run(connectionId, r.type, r.name);
+      for (const r of input.removed) delAll.run(connectionId, r.type, r.name);
+      for (const e of input.edges) {
+        ins.run(randomUUID(), connectionId, e.fromType, e.fromName, e.toType, e.toName, 'extractor');
       }
     });
     tx();
@@ -2226,6 +2383,24 @@ export class ContrailDb {
   }
 
   /**
+   * S46 (B), desktop only: withdraw a recorded approval whose execution the
+   * policies refused at the claim (the row is still 'validated', its code
+   * unused) — the row reads as undecided again. `desktopState` is the state
+   * it returns to ('awaiting_approval' for a request presented in the app,
+   * else null). Only an approved, still-validated row changes; returns
+   * whether one did.
+   */
+  clearDeployDecision(id: string, desktopState: string | null): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE deploy_requests SET desktop_state = ?, approved_at = NULL, approved_comment = NULL ` +
+          `WHERE id = ? AND status = 'validated' AND desktop_state = 'approved'`,
+      )
+      .run(desktopState, id);
+    return result.changes === 1;
+  }
+
+  /**
    * Atomically claim a validated request for execution. Returns true only for
    * the single caller that flips 'validated'→'executing'; concurrent callers
    * and re-runs get false. This is the single-use guarantee (spec §5) — the
@@ -2253,6 +2428,63 @@ export class ContrailDb {
       .run(status, new Date().toISOString(), resultJson, id);
   }
 
+  /**
+   * S46 (re-baseline): amend an EXECUTED request's stored result — the
+   * post-deploy re-read replaces the `pending` snapshot block with its
+   * outcome. Predicated on status = 'executed'; never touches status or
+   * executed_at. Hand-mirror of the plugin db.ts.
+   */
+  amendDeployRequestResult(id: string, resultJson: string): boolean {
+    const result = this.db
+      .prepare(`UPDATE deploy_requests SET result_json = ? WHERE id = ? AND status = 'executed'`)
+      .run(resultJson, id);
+    return result.changes === 1;
+  }
+
+  /**
+   * S46: requests by connection, creation window or id — newest first
+   * (created_at DESC, id DESC, a total order, so `offset` pages without
+   * gaps or repeats). `since` and `until` bound created_at inclusively;
+   * limit 1–1000, default 200. Hand-mirror of the plugin db.ts.
+   */
+  queryDeployRequests(filter: {
+    connectionId?: string;
+    since?: string;
+    until?: string;
+    id?: string;
+    limit?: number;
+    offset?: number;
+  }): DeployRequestRecord[] {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (filter.connectionId) {
+      clauses.push('connection_id = ?');
+      params.push(filter.connectionId);
+    }
+    if (filter.since) {
+      clauses.push('created_at >= ?');
+      params.push(filter.since);
+    }
+    if (filter.until) {
+      clauses.push('created_at <= ?');
+      params.push(filter.until);
+    }
+    if (filter.id) {
+      clauses.push('id = ?');
+      params.push(filter.id);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = Math.min(Math.max(Math.trunc(filter.limit ?? 200), 1), 1000);
+    const offset = Math.max(Math.trunc(filter.offset ?? 0), 0);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM deploy_requests ${where}
+         ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+      )
+      .all(...params, limit, offset);
+    return (rows as DeployRequestRow[]).map(rowToDeployRequest);
+  }
+
   getDeployRequestStatus(id: string): string | null {
     const row = this.db
       .prepare(`SELECT status FROM deploy_requests WHERE id = ?`)
@@ -2277,6 +2509,43 @@ export class ContrailDb {
     this.db
       .prepare(`UPDATE deploy_requests SET summary_json = ? WHERE id = ?`)
       .run(summaryJson, id);
+  }
+
+  /**
+   * S46: the one writer of a PRESENTED request's summary_json — the page
+   * view, the justification, a freeze override and the execute-time policy
+   * record all go through it, so no write can erase another's keys. Reads
+   * the row and writes `patch(summary)` in one IMMEDIATE transaction (the
+   * write lock is taken before the read; the plugin and the desktop share
+   * this database), and only while the row is still 'validated' — the
+   * UPDATE is predicated on that too, so a patch can never land on a
+   * claimed, voided or expired row. Returns false, writing nothing, when
+   * the row is missing or no longer 'validated'. A summary that is not a
+   * JSON object is patched from {}. Hand-mirror of the plugin db.ts. (The
+   * desktop's post-claim seam merges into the row read after the claim, so
+   * it never writes over a key this wrote.)
+   */
+  patchDeployRequestSummary(
+    id: string,
+    patch: (summary: Record<string, unknown>) => Record<string, unknown>,
+  ): boolean {
+    const tx = this.db.transaction((): boolean => {
+      const row = this.db
+        .prepare(`SELECT summary_json, status FROM deploy_requests WHERE id = ?`)
+        .get(id) as { summary_json: string; status: string } | undefined;
+      if (!row || row.status !== 'validated') return false;
+      const parsed = safeParse(row.summary_json);
+      const summary =
+        parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+          ? (parsed as Record<string, unknown>)
+          : {};
+      const next = JSON.stringify(patch(summary));
+      const result = this.db
+        .prepare(`UPDATE deploy_requests SET summary_json = ? WHERE id = ? AND status = 'validated'`)
+        .run(next, id);
+      return result.changes === 1;
+    });
+    return tx.immediate();
   }
 
   updateDeployRequestStatus(
@@ -2397,20 +2666,74 @@ export class ContrailDb {
     return evt;
   }
 
+  /**
+   * S46 widens the filter: `until` (inclusive), `requestId` (events whose
+   * detail names that request — as its requestId, or in a requestIds list
+   * such as the expiry sweep's; validated as a UUID first, so neither LIKE
+   * pattern holds a wildcard) and `eventType` (exact, or every type under a
+   * prefix ending in a dot). `since` and `until` are compared as the instants
+   * they name (stored ts is always toISOString, so each bound is re-formatted
+   * the same way); a bound that is not a timestamp is refused. A malformed
+   * requestId or eventType is refused, never matched loosely. Hand-mirror of
+   * the plugin db.ts.
+   */
   queryAuditEvents(filter: {
     connectionId?: string;
     since?: string;
+    until?: string;
+    requestId?: string;
+    eventType?: string;
     limit?: number;
   }): AuditEvent[] {
     const clauses: string[] = [];
     const params: unknown[] = [];
+    const bound = (name: 'since' | 'until', v: string): string => {
+      const ms = Date.parse(v);
+      if (Number.isNaN(ms)) {
+        throw new ContrailError(
+          `${name} must be an ISO 8601 timestamp (for example 2026-11-17T09:00:00Z), got "${v}".`,
+          'bad_timestamp',
+        );
+      }
+      return new Date(ms).toISOString();
+    };
     if (filter.connectionId) {
       clauses.push('connection_id = ?');
       params.push(filter.connectionId);
     }
     if (filter.since) {
       clauses.push('ts >= ?');
-      params.push(filter.since);
+      params.push(bound('since', filter.since));
+    }
+    if (filter.until) {
+      clauses.push('ts <= ?');
+      params.push(bound('until', filter.until));
+    }
+    if (filter.requestId !== undefined) {
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(filter.requestId)) {
+        throw new ContrailError(
+          `request id must be the request_id a validate or propose result returned (a UUID), got "${filter.requestId}"`,
+          'bad_request_id',
+        );
+      }
+      clauses.push('(detail_json LIKE ? OR detail_json LIKE ?)');
+      params.push(`%"requestId":"${filter.requestId}"%`, `%"requestIds":[%"${filter.requestId}"%`);
+    }
+    if (filter.eventType !== undefined) {
+      if (!/^[a-z_]+\.[a-z_]*$/.test(filter.eventType)) {
+        throw new ContrailError(
+          `event type must look like policy.refused, or a prefix ending in a dot such as policy., got "${filter.eventType}"`,
+          'bad_event_type',
+        );
+      }
+      if (filter.eventType.endsWith('.')) {
+        // substr, not LIKE: '_' is a LIKE wildcard and is legal in a type.
+        clauses.push('substr(event_type, 1, ?) = ?');
+        params.push(filter.eventType.length, filter.eventType);
+      } else {
+        clauses.push('event_type = ?');
+        params.push(filter.eventType);
+      }
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const limit = Math.min(Math.max(filter.limit ?? 100, 1), 1000);

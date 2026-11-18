@@ -6,6 +6,7 @@ import type {
   DiffScopeView,
 } from '@contrail/shared';
 import { ipc } from '../lib/ipc.js';
+import { snapshotBasis } from '../lib/snapshotBasis.js';
 import { useConnections } from '../stores/connections.js';
 import { Md } from '../components/thread.js';
 import { FlowDiagram, type FlowHighlights } from '../components/FlowDiagram.js';
@@ -69,12 +70,14 @@ function OrgPicker({
       )}
       {value && (
         <span className="conn-detail">
+          {/* S46 (C): the oldest whole-type refresh (syncedAt), which a
+              re-baseline after a deploy never moves. */}
           {snap?.syncing
             ? 'syncing…'
-            : snap?.lastIndexedAt
-              ? `snapshot ${agoLabel(snap.lastIndexedAt)}${snap.stale ? ' — STALE' : ''}`
+            : snap?.syncedAt
+              ? `snapshot ${agoLabel(snap.syncedAt)}${snap.stale ? ' — STALE' : ''}`
               : 'never synced'}
-          {snap && !snap.syncing && (snap.stale || !snap.lastIndexedAt) && (
+          {snap && !snap.syncing && (snap.stale || !snap.syncedAt) && (
             <button className="diff-sync-link" onClick={() => void syncSnapshot(value)}>
               sync now
             </button>
@@ -128,8 +131,8 @@ export function DiffScreen() {
       if (seqRef.current !== seq) return; // pair changed mid-flight
       setScope(result);
       setScopeBasis({
-        a: snapshots[connA]?.lastIndexedAt ?? null,
-        b: snapshots[connB]?.lastIndexedAt ?? null,
+        a: snapshotBasis(snapshots[connA]),
+        b: snapshotBasis(snapshots[connB]),
       });
       setOpenGroups({});
     } catch (err) {
@@ -176,11 +179,13 @@ export function DiffScreen() {
   };
 
   // A re-sync while results are on screen makes them historical — say so.
+  // S46 (C): so does a member-scoped re-read, including a removal-only one
+  // (snapshotBasis pairs the newest index time with the row count).
   const scopeOutdated =
     scope != null &&
     scopeBasis != null &&
-    ((connA && (snapshots[connA]?.lastIndexedAt ?? null) !== scopeBasis.a) ||
-      (connB && (snapshots[connB]?.lastIndexedAt ?? null) !== scopeBasis.b));
+    ((connA && snapshotBasis(snapshots[connA]) !== scopeBasis.a) ||
+      (connB && snapshotBasis(snapshots[connB]) !== scopeBasis.b));
 
   const groups = useMemo(() => {
     if (!scope) return [];

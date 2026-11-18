@@ -1,10 +1,12 @@
 import {
+  applyMemberUnits,
   extractAllEdges,
   runExtractAndIndex,
   semanticDiff,
   SnapshotStore,
   type EdgeExtractionInput,
   type ExtractIndexInput,
+  type MemberApplyInput,
 } from '@contrail/engine';
 
 /**
@@ -36,6 +38,7 @@ export interface DiffPairResult {
 type WorkRequest =
   | { kind: 'extractAndIndex'; id: number; input: ExtractIndexInput }
   | { kind: 'extractEdges'; id: number; input: EdgeExtractionInput }
+  | { kind: 'applyMemberUnits'; id: number; input: MemberApplyInput }
   | { kind: 'diffPairs'; id: number; input: { pairs: DiffPair[] } };
 
 type WorkResponse =
@@ -88,6 +91,9 @@ parentPort.on('message', (e) => {
       result = runExtractAndIndex(store, msg.input);
     } else if (msg.kind === 'extractEdges') {
       result = extractAllEdges(msg.input.connectionId, msg.input.artifacts, msg.input.known);
+    } else if (msg.kind === 'applyMemberUnits') {
+      // S46 (C): a member run's staged write (filesystem only, like the rest).
+      result = applyMemberUnits(store, msg.input);
     } else {
       result = diffPairs(msg.input.pairs);
     }

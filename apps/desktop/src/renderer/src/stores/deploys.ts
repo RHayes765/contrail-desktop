@@ -19,7 +19,12 @@ interface DeploysState {
   refresh: () => Promise<void>;
   open: (id: string) => Promise<void>;
   close: () => void;
-  approve: (id: string, comment: string) => Promise<boolean>;
+  /**
+   * S46 (B): `emergencyReason` — typed only during a change freeze — is the
+   * human's break-glass for this one request; main records it with the
+   * approval or refuses both.
+   */
+  approve: (id: string, comment: string, emergencyReason?: string) => Promise<boolean>;
   reject: (id: string, comment: string) => Promise<boolean>;
   clearError: () => void;
 }
@@ -72,12 +77,13 @@ export const useDeploys = create<DeploysState>((set, get) => ({
 
   close: () => set({ current: null }),
 
-  approve: async (id, comment) => {
+  approve: async (id, comment, emergencyReason) => {
     set({ deciding: id, error: null });
     try {
       const view = await ipc.invoke('deploys:approve', {
         id,
         ...(comment.trim() ? { comment: comment.trim() } : {}),
+        ...(emergencyReason?.trim() ? { emergencyReason: emergencyReason.trim() } : {}),
       });
       set({ current: view, deciding: null });
       await get().refresh();

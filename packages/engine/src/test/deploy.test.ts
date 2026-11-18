@@ -59,6 +59,7 @@ let lastCompositeBody: {
  * endpoints — still exist for the raw-HTTP tests.
  */
 class RecordingPresenter implements ApprovalPresenter {
+  readonly mode = 'page' as const;
   readonly views: ApprovalRequestView[] = [];
   readonly urls: string[] = [];
   private readonly inner: ApprovalPageServer;
@@ -374,7 +375,8 @@ beforeEach(async () => {
     ...DEFAULT_CONFIG,
     salesforce: { ...DEFAULT_CONFIG.salesforce },
     oauth: { ...DEFAULT_CONFIG.oauth },
-    snapshot: { ...DEFAULT_CONFIG.snapshot },
+    // S46 (C): these stubs model no post-execute listing or retrieve.
+    snapshot: { ...DEFAULT_CONFIG.snapshot, rebaselineAfterDeploy: false },
     deploy: { ...DEFAULT_CONFIG.deploy, pollIntervalMs: 10, toolWaitMs: 10_000 },
   };
   deps = createEngineDeps({

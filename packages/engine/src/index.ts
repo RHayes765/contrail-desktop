@@ -32,14 +32,62 @@ export {
 // Core
 export { ContrailDb } from './core/db.js';
 export { KeychainTokenStore, MemoryTokenStore, type TokenStore } from './core/keychain.js';
-export { AuditLog } from './core/audit.js';
+export { AuditLog, type AuditQueryFilter } from './core/audit.js';
 export {
   DEFAULT_CONFIG,
   loadConfig,
+  loadPolicies,
   saveConfigSection,
   readConfigSection,
   type ContrailConfig,
+  type PolicyLoad,
 } from './core/config.js';
+// S46 (B): governance for client work — the config-only policies, their
+// evaluation and every sentence Deploy Review shows about them (one text
+// source with the plugin's approval page: core/policy.ts is byte-identical).
+export {
+  POLICY_LIMITS,
+  TEST_LEVEL_ORDER,
+  DEFAULT_POLICIES,
+  APPROVAL_NOTICES,
+  hostTimeZone,
+  parsePolicies,
+  policyInEffect,
+  evaluatePolicies,
+  unmatchedRules,
+  normalizeTicket,
+  normalizeJustification,
+  normalizeFreezeReason,
+  policyRefusalText,
+  policyUnreadableText,
+  freezeBannerText,
+  freezeProposeNote,
+  freezePageNotOpenedText,
+  freezeExecuteRefusalText,
+  freezeStartRefusalText,
+  policyChangedText,
+  unmatchedRuleText,
+  justificationProvenance,
+  apexDeletesNote,
+  dryRunPolicyNote,
+  type PolicyTestLevel,
+  type PolicyOrgType,
+  type PolicyKind,
+  type FreezeWindow,
+  type PolicyRule,
+  type PolicyConfig,
+  type PolicyContext,
+  type PolicyFreeze,
+  type PolicyInEffect,
+  type PolicyViolationCode,
+  type PolicyViolation,
+  type PolicyVerdict,
+  type PolicyPhase,
+  type PolicySource,
+  type ApprovalSurfaceMode,
+  type StoredJustification,
+  type ApprovalNoticeCode,
+} from './core/policy.js';
 export { getUpdateNotice, refreshUpdateCache, isNewerVersion, type UpdateNotice } from './core/updateCheck.js';
 export {
   NOTIFY_ACCOUNTS,
@@ -48,7 +96,9 @@ export {
   NullNotifier,
   composePushover,
   describePhoneOutcome,
+  FREEZE_TAIL,
   type ApprovalNotifier,
+  type ApprovalNotifyOptions,
   type NotifierStatus,
   type NotifyOutcome,
   type NotifyFailure,
@@ -57,7 +107,7 @@ export {
   type NotificationsConfig,
   type PhoneNotification,
 } from './core/notify.js';
-export { dataDir, dbPath, configPath, deploysDir, stagingDir } from './core/paths.js';
+export { dataDir, dbPath, configPath, deploysDir, stagingDir, evidenceDir } from './core/paths.js';
 export { ContrailError, ConnectionNotFoundError } from './core/errors.js';
 export {
   GRANTS,
@@ -116,6 +166,10 @@ export {
   type RefreshOptions,
   type RefreshJobState,
   type RefreshSummary,
+  type RefreshComplete,
+  type RefreshOutcome,
+  type TypeRefreshOutcome,
+  type MemberRefreshOutcome,
 } from './snapshot/engine.js';
 export {
   inlineSnapshotWork,
@@ -126,6 +180,23 @@ export {
   type ExtractIndexResult,
   type EdgeExtractionInput,
 } from './snapshot/work.js';
+// S46 (C): the member-scoped refresh's write step and its shapes — what the
+// snapshot worker, its bridge and main/index.ts import (snapshot/members.ts
+// is byte-identical with the plugin's).
+export {
+  applyMemberUnits,
+  MEMBER_REFRESH_MAX,
+  REBASELINE_PROGRESS,
+  type SnapshotMember,
+  type MemberUnit,
+  type MemberSkipReason,
+  type MemberOutcome,
+  type MemberApplyInput,
+  type MemberApplyResult,
+  type MemberRefreshSummary,
+  type RebaselineOutcome,
+  type ExecuteSnapshotBlock,
+} from './snapshot/members.js';
 export {
   indexSnapshotFiles,
   extractChildBlocks,
@@ -197,18 +268,47 @@ export {
   type ExecutionObserver,
   type DeployValidationSummary,
   type LiveCheckSummary,
+  // S46 (B): the change record and policy state; (C): the re-baseline hook.
+  type StoredGovernance,
+  type GovernanceForAgent,
+  type GovernanceInput,
+  type GovernanceState,
+  type DryRunPolicyCheck,
+  type PolicyReport,
+  type PoliciesStatus,
+  type SnapshotRebaseliner,
 } from './deploy/engine.js';
 export {
   ApprovalPageServer,
   type ApprovalPresenter,
   type ApprovalPresentation,
   type ApprovalRequestView,
+  type ApprovalLivePage,
+  type ApprovalStatusCheck,
+  type ApprovalRoute,
 } from './deploy/approval.js';
 export type {
   ApprovalPageOptions,
   ApprovalRowDiff,
   ApprovalAutomation,
+  ApprovalGovernance,
 } from './connect/pages.js';
+// S46 (B): the change-evidence dossier (export_change_evidence) and the
+// code-free page view every mint stores (deploy/evidence.ts is byte-identical
+// with the plugin's).
+export {
+  codeFreePageView,
+  redactRowLabel,
+  justificationRecord,
+  buildEvidence,
+  exportChangeEvidence,
+  EVIDENCE_MAX_REQUESTS,
+  type StoredPageView,
+  type EvidenceIo,
+  type EvidenceFilters,
+  type EvidenceResult,
+  type EvidenceDossier,
+} from './deploy/evidence.js';
 export {
   buildDeployZip,
   analyzeChanges,

@@ -176,15 +176,22 @@ export class ReviewService {
           body: `An anonymous Apex script (DML commits on success):\n\`\`\`\n${raw
             .script!.slice(0, MAX_CONTENT_CHARS)}\n\`\`\``,
         };
-      case 'dml':
+      case 'dml': {
+        // S46: ticket and justification are the change record, not reviewed
+        // content — the hash drops them (reviewHash.ts canonicalForm), and
+        // the reviewer's body leaves them out too.
+        const { ticket: _t, justification: _j, ...reviewed } = raw.dml!;
+        void _t;
+        void _j;
         return {
           subject: { kind: 'dml', args: raw.dml! },
           body: `A DML proposal (the exact arguments):\n\`\`\`json\n${JSON.stringify(
-            raw.dml,
+            reviewed,
             null,
             2,
           ).slice(0, MAX_CONTENT_CHARS)}\n\`\`\``,
         };
+      }
       case 'bulk': {
         if (!this.resolveFolderDataFile) {
           throw new Error('bulk review subjects are not available in this mode.');

@@ -51,8 +51,15 @@ function canonicalForm(subject: ReviewSubject): unknown {
     }
     case 'apex':
       return { kind: 'apex', script: sha256(Buffer.from(subject.script, 'utf8')) };
-    case 'dml':
-      return { kind: 'dml', args: subject.args };
+    case 'dml': {
+      // S46: the change record is not reviewed content. Only the TOP-LEVEL
+      // ticket and justification are dropped — a key of either name inside a
+      // record is a field value and still changes the hash.
+      const { ticket: _t, justification: _j, ...args } = subject.args;
+      void _t;
+      void _j;
+      return { kind: 'dml', args };
+    }
     case 'bulk': {
       const steps = subject.steps
         .map((s) => [s.object, s.operation, s.externalIdField ?? '', sha256(readBytes(s.absPath))])

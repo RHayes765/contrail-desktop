@@ -148,6 +148,16 @@ export function deploysDir(): string {
   return ensureDir(path.join(dataDir(), 'deploys'));
 }
 
+/**
+ * S46: change-evidence dossiers written by export_change_evidence, one
+ * folder each. Never a content_file or csv_file source root (like S47's
+ * sibling exports/), and never swept: a dossier is the human's deliverable.
+ * Hand-mirror of the plugin paths.ts.
+ */
+export function evidenceDir(): string {
+  return ensureDir(path.join(dataDir(), 'evidence'));
+}
+
 function ensureDir(dir: string): string {
   fs.mkdirSync(dir, { recursive: true });
   return dir;

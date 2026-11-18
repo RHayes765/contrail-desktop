@@ -2,15 +2,18 @@ import { shell } from 'electron';
 import {
   grantDependencyViolations,
   RestClient,
+  unmatchedRuleText,
   type ConnectionRecord,
   type EngineDeps,
   type GrantSet,
 } from '@contrail/engine';
 import type {
+  ConnectionPolicyView,
   ConnectionView,
   ConnectOutcomeView,
   OrgLimitsView,
   PingResultView,
+  PoliciesView,
 } from '@contrail/shared';
 
 /**
@@ -70,6 +73,48 @@ export class ConnectionService {
 
   list(): ConnectionView[] {
     return this.deps.db.listConnections().map(connectionView);
+  }
+
+  /**
+   * S46 (B): the policies that apply to each connection right now — what an
+   * agent's list_connections reports, from ONE read of config.json's
+   * policies over ONE listing of the connections (DeployEngine.policyListing).
+   * Read-only: no screen in this app edits the policies; the human edits
+   * config.json.
+   */
+  policies(): PoliciesView {
+    const conns = this.deps.db.listConnections();
+    const listing = this.deps.deploys.policyListing(conns);
+    const byConnection: Record<string, ConnectionPolicyView> = {};
+    conns.forEach((c, i) => {
+      const r = listing.reports[i];
+      if (!r) return;
+      byConnection[c.id] = {
+        rules: r.rules,
+        requiresJustification: r.requires_justification,
+        requiresTicket: r.requires_ticket,
+        ticketPatterns: r.ticket_patterns,
+        denies: r.denies,
+        minTestLevel: r.min_test_level,
+        freezeWindows: r.freeze_windows.map((w) => ({
+          rule: w.rule,
+          name: w.name,
+          when: w.when,
+          timeZone: w.time_zone,
+        })),
+        freezeNow: r.freeze_now,
+      };
+    });
+    const s = listing.status;
+    return s.status === 'ok'
+      ? {
+          status: 'ok',
+          source: s.source,
+          problem: null,
+          unmatchedRuleLines: s.unmatched_rules.map((name) => unmatchedRuleText(name)),
+          byConnection,
+        }
+      : { status: 'unreadable', source: null, problem: s.problem, unmatchedRuleLines: [], byConnection };
   }
 
   /** Same-org-same-user connections that would duplicate `rec`. */

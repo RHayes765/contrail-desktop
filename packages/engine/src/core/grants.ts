@@ -167,4 +167,7 @@ export const TOOL_GRANT_MAP: Readonly<Record<string, Grant | null>> = {
   // S46: reads flow XML (snapshot or Tooling) and writes a local HTML page.
   // Gated per connection - EVERY connection it reads must hold the grant.
   render_flow: 'metadata_read',
+  // S46: writes a dossier from Contrail's own local records - no org call,
+  // no grant.
+  export_change_evidence: null,
 };

@@ -59,6 +59,9 @@ export function bootstrap(
     flowOps: { openBrowser: openBrowserViaShell },
     snapshotWork: overrides?.snapshotWork,
     approvals,
+    // S46 (B): the version the change-evidence dossier prints (the engine
+    // package has no release version of its own).
+    appVersion,
   });
   // check_apex / check_soql: the vendored bundles ride @contrail/apex-ls, and
   // the spawn runs Electron's own binary AS NODE — end users have no node on

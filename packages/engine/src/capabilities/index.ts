@@ -8,6 +8,7 @@ import { diffCapabilities } from './diff.js';
 import { dataCapabilities } from './data.js';
 import { deployCapabilities } from './deploy.js';
 import { localDiagCapabilities } from './localdiag.js';
+import { evidenceCapabilities } from './evidence.js';
 
 export type { Capability } from './types.js';
 export { ok, fail, guarded, type ToolResult } from './result.js';
@@ -19,6 +20,8 @@ const ALL: Capability[] = [
   ...dataCapabilities,
   ...deployCapabilities,
   ...localDiagCapabilities,
+  // S46 (B): grant null, not write-class, uncataloged (catalog.ts is unchanged).
+  ...evidenceCapabilities,
 ];
 
 const BY_NAME = new Map(ALL.map((c) => [c.name, c]));

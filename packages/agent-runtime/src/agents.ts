@@ -11,8 +11,9 @@ import type { SessionContext } from './types.js';
  *     servers included);
  *   - no propose/execute tool, no deactivate_flow, no refresh_snapshot (it
  *     mutates the shared local snapshot), no set_trace_flag (writes a setup
- *     record), no add_project_note, and never the Agent tool itself (no
- *     recursive spawning);
+ *     record), no add_project_note, no export_change_evidence (writes a
+ *     dossier folder), and never the Agent tool itself (no recursive
+ *     spawning);
  *   - `disallowedTools` repeats the bans as belt-and-suspenders.
  *
  * Writes stay with the accountable MAIN thread — which also sidesteps a real
@@ -75,6 +76,9 @@ export const SUBAGENT_BANNED_TOOLS: readonly string[] = [
   'set_trace_flag',
   'add_project_note',
   'request_review',
+  // S46 (B): writes a change-evidence dossier — a file for the human, under
+  // Contrail's data directory — so it stays with the accountable main thread.
+  'export_change_evidence',
   'connect_org',
   'disconnect_org',
   'manage_connection',

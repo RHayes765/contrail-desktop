@@ -328,7 +328,8 @@ beforeEach(async () => {
   config = {
     ...DEFAULT_CONFIG,
     salesforce: { ...DEFAULT_CONFIG.salesforce },
-    snapshot: { ...DEFAULT_CONFIG.snapshot, pollIntervalMs: 5 },
+    // S46 (C): these stubs model no post-execute re-read (rebaseline.test.ts does).
+    snapshot: { ...DEFAULT_CONFIG.snapshot, pollIntervalMs: 5, rebaselineAfterDeploy: false },
     deploy: { ...DEFAULT_CONFIG.deploy, pollIntervalMs: 5, toolWaitMs: 10_000 },
   };
   deps = createEngineDeps({

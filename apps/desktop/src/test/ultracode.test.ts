@@ -7,6 +7,7 @@ import { AgentSessionRun, type SessionSpec } from '../main/services/agentRuntime
 import { DeployService } from '../main/services/deploys.js';
 import { canonicalReviewHash } from '../main/services/reviewHash.js';
 import type { ReviewService, ReviewResult } from '../main/services/reviews.js';
+import { governanceEngine } from './governance-engine.js';
 
 /**
  * THE ULTRACODE GATE (S28). Every test here attacks the mandatory-review
@@ -106,7 +107,9 @@ beforeEach(() => {
   projectId = db.createProject({ name: 'UC Project' }).id;
   db.addProjectBinding(projectId, connId, 'dev');
 
-  const engine = {
+  // S46 (B): a real engine behind the request view's change record; the
+  // propose calls the gate is about are the stubs below.
+  const engine = Object.assign(governanceEngine(db, tmp).engine, {
     proposeApex: async (_conn: unknown, code: string) => {
       proposed.push({ kind: 'apex', content: code });
       return { request_id: 'req-1', lines: 2 };
@@ -143,7 +146,7 @@ beforeEach(() => {
         started_at: '2026-11-04T00:00:00.000Z',
       };
     },
-  };
+  });
   deps = { db, audit: { record: () => undefined }, deploys: engine } as unknown as EngineDeps;
   service = new DeployService(deps, () => undefined);
 });
@@ -330,6 +333,67 @@ describe('the mandatory gate', () => {
       ids: ['001000000000001AAA', '001000000000002AAA'],
     });
     expect(widened.isError).toBe(true);
+  });
+
+  it('S46 dml gate: ticket and justification ride the propose without a new review', async () => {
+    let reviewedBody: Record<string, unknown> | null = null;
+    const run = makeRun(true, {
+      requestReview: async (input: { subject: { dml?: Record<string, unknown> } }) => {
+        reviewedBody = input.subject.dml ?? null;
+        return {
+          reviewId: 'rev-dml-gov',
+          verdict: 'pass' as const,
+          findings: [],
+          model: 'claude-sonnet-5',
+          at: new Date().toISOString(),
+          notes: null,
+          hash: canonicalReviewHash({ kind: 'dml', args: input.subject.dml ?? {} }),
+        };
+      },
+    } as unknown as ReviewService);
+
+    const records = [{ Id: 'a01000000000001AAA', Status__c: 'Paid' }];
+    await run.executeCapability('request_review', {
+      connection: 'uc-org',
+      subject: { dml: { operation: 'update', object: 'Invoice__c', records } },
+    });
+    expect(reviewedBody).not.toBeNull();
+
+    // The same content plus the change record → the gate passes.
+    const ok = await run.executeCapability('dml_propose', {
+      connection: 'uc-org',
+      operation: 'update',
+      object: 'Invoice__c',
+      records,
+      ticket: 'ACME-42',
+      justification: 'The client asked for these invoices to be marked paid before month end.',
+    });
+    expect(ok.isError).toBeFalsy();
+    expect(proposed).toHaveLength(1);
+
+    // Rewording the justification still needs no new review.
+    const reworded = await run.executeCapability('dml_propose', {
+      connection: 'uc-org',
+      operation: 'update',
+      object: 'Invoice__c',
+      records,
+      justification: 'Reworded on request.',
+    });
+    expect(reworded.isError).toBeFalsy();
+    expect(proposed).toHaveLength(2);
+
+    // One record value changed → refused with the existing text.
+    const changed = await run.executeCapability('dml_propose', {
+      connection: 'uc-org',
+      operation: 'update',
+      object: 'Invoice__c',
+      records: [{ Id: 'a01000000000001AAA', Status__c: 'Void' }],
+      ticket: 'ACME-42',
+      justification: 'The client asked for these invoices to be marked paid before month end.',
+    });
+    expect(changed.isError).toBe(true);
+    expect(changed.content[0]!.text).toContain('no adversarial review');
+    expect(proposed).toHaveLength(2);
   });
 });
 

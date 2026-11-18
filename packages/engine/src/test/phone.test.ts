@@ -15,8 +15,14 @@ import {
 import { createEngineDeps, type EngineDeps } from '../core/deps.js';
 import { invokeCapability } from '../capabilities/index.js';
 import { emptyGrantSet } from '../core/grants.js';
-import type { ApprovalNotifier, NotifyOutcome } from '../core/notify.js';
-import type { ApprovalPageOptions } from '../connect/pages.js';
+import {
+  FREEZE_TAIL,
+  composePushover,
+  type ApprovalNotifier,
+  type ApprovalNotifyOptions,
+  type NotifyOutcome,
+} from '../core/notify.js';
+import { renderApprovalPage, type ApprovalPageOptions } from '../connect/pages.js';
 
 /**
  * S42 (desktop engine): the phone copy of a minted approval. The desktop
@@ -28,11 +34,12 @@ import type { ApprovalPageOptions } from '../connect/pages.js';
  */
 
 class RecordingNotifier implements ApprovalNotifier {
-  calls: Array<{ view: ApprovalPageOptions; includeCode: boolean }> = [];
-  behaviour: 'sent' | 'throw' = 'sent';
-  async notify(view: ApprovalPageOptions, opts: { includeCode: boolean }): Promise<NotifyOutcome> {
-    this.calls.push({ view, includeCode: opts.includeCode });
+  calls: Array<{ view: ApprovalPageOptions; includeCode: boolean; opts: ApprovalNotifyOptions }> = [];
+  behaviour: 'sent' | 'throw' | 'fail' = 'sent';
+  async notify(view: ApprovalPageOptions, opts: ApprovalNotifyOptions): Promise<NotifyOutcome> {
+    this.calls.push({ view, includeCode: opts.includeCode, opts });
     if (this.behaviour === 'throw') throw new Error(`boom ${view.code}`);
+    if (this.behaviour === 'fail') return { status: 'failed', reason: 'rejected' };
     return { status: 'sent' };
   }
   async sendTest() {
@@ -46,6 +53,7 @@ class RecordingNotifier implements ApprovalNotifier {
 
 /** Mimics the desktop app's NativeApprovalPresenter: no page, mode 'native'. */
 class NativePresenter implements ApprovalPresenter {
+  readonly mode = 'native' as const;
   readonly views: ApprovalRequestView[] = [];
   async present(view: ApprovalRequestView): Promise<ApprovalPresentation> {
     this.views.push(view);
@@ -55,6 +63,7 @@ class NativePresenter implements ApprovalPresenter {
 }
 
 class PagePresenter implements ApprovalPresenter {
+  readonly mode = 'page' as const;
   readonly views: ApprovalRequestView[] = [];
   private readonly inner = new ApprovalPageServer(async () => {});
   async present(
@@ -202,7 +211,9 @@ describe('S42 (desktop engine): phone copy of a minted approval', () => {
 
     expect(notifier.calls).toHaveLength(1);
     expect(notifier.calls[0]!.includeCode).toBe(false);
-    expect(notifier.calls[0]!.view.code).toBe(code); // the view is the same object the page got
+    // S46 (B): a push that carries no code is handed a view that has none.
+    expect(notifier.calls[0]!.view.code).toBe('');
+    expect(code).not.toBe('');
     const text = textOf(result);
     expect(text).toContain('"phone_notification"');
     expect(text).toContain('"status": "sent"');
@@ -256,5 +267,116 @@ describe('S42 (desktop engine): phone copy of a minted approval', () => {
     expect(text).toContain("waiting in the app's Deploy Review"); // native failure wording
     expect(text).not.toContain('The code is only on the approval page'); // the page-mode sentence
     expect(text).not.toContain(presenter.views[0]!.code);
+  });
+});
+
+describe('S46: a change freeze and a policies change on the phone', () => {
+  const FREEZE_POLICIES = {
+    rules: [
+      {
+        name: 'phone freeze',
+        freezeWindows: [
+          { name: 'always', range: { from: '2000-01-01T00:00', to: '2999-01-01T00:00' }, timeZone: 'UTC' },
+        ],
+      },
+    ],
+  };
+
+  /** The agent's phone_notification, from a validate_deploy result. */
+  function phoneOf(result: { content: Array<{ type: string; text?: string }> }): Record<string, unknown> {
+    const text = textOf(result);
+    const body = JSON.parse(text.startsWith('{') ? text : text.slice(text.indexOf('\n{') + 1)) as {
+      approval_page: { phone_notification: Record<string, unknown> };
+    };
+    return body.approval_page.phone_notification;
+  }
+
+  function pendingCode(): string {
+    const conn = db.resolveConnection('phone-org')!;
+    return db.queryDeployRequests({ connectionId: conn.id, limit: 1 })[0]!.confirmationCode;
+  }
+
+  it('frozen at mint: the notifier gets the freeze flag and a view with no code; the agent hears of a code-free push', async () => {
+    const presenter = new PagePresenter();
+    const notifier = new RecordingNotifier();
+    const deps = makeDeps(presenter, notifier);
+    deps.config.policies = FREEZE_POLICIES;
+    const result = await validate(deps);
+    expect(result.isError ?? false, textOf(result)).toBe(false);
+    const code = pendingCode();
+    // Desktop: the page presenter renders the view it is handed — no code element during a freeze.
+    expect(renderApprovalPage(presenter.views[0]!)).not.toMatch(/class="code"/);
+
+    expect(notifier.calls).toHaveLength(1);
+    expect(notifier.calls[0]!.opts).toEqual({ includeCode: false, freeze: true });
+    expect(notifier.calls[0]!.view.code).toBe('');
+    const msg = composePushover(notifier.calls[0]!.view, { ...notifier.calls[0]!.opts, summary: 'full' });
+    expect(msg.message.endsWith(FREEZE_TAIL)).toBe(true);
+    expect(msg.message).not.toContain(code);
+
+    expect(phoneOf(result)).toEqual({
+      status: 'sent',
+      note:
+        "A code-free summary was pushed to the human's phone: a change freeze is in effect, and " +
+        'while it lasts they can only approve at their desk, after typing an emergency reason there.',
+    });
+    expect(db.queryAuditEvents({ eventType: 'approval.notified' })[0]!.detail).toEqual({
+      requestId: expect.any(String),
+      kind: 'deploy',
+      method: 'pushover',
+      codeIncluded: false,
+      freeze: true,
+    });
+    expect(textOf(result)).not.toContain(code);
+    expect(JSON.stringify(db.queryAuditEvents({}))).not.toContain(code);
+  });
+
+  it('frozen at mint in Deploy Review (native), push failed: the freeze wording, pointing at the app\'s Settings', async () => {
+    // Desktop twin of the plugin's failed / held-back case. The desktop has no
+    // Remote Control gate and no open_settings: its surface is Deploy Review.
+    const presenter = new NativePresenter();
+    const notifier = new RecordingNotifier();
+    notifier.behaviour = 'fail';
+    const deps = makeDeps(presenter, notifier);
+    deps.config.policies = FREEZE_POLICIES;
+    const result = await validate(deps);
+    expect(result.isError ?? false, textOf(result)).toBe(false);
+    expect(notifier.calls[0]!.opts).toEqual({ includeCode: false, freeze: true });
+    const failed = phoneOf(result);
+    expect(failed).toEqual({
+      status: 'failed',
+      reason: 'rejected',
+      note:
+        "Phone notification failed (Pushover rejected the stored keys — the human should re-check them in the app's Settings → Notifications). " +
+        'A change freeze is in effect, so the human approves at their desk either way.',
+    });
+    const text = JSON.stringify(failed);
+    expect(text).not.toContain('open_settings');
+    expect(text).not.toContain('as always');
+    expect(text).not.toContain('The code is only on the approval page');
+    expect(text).not.toContain('nothing to do');
+  });
+
+  it('a policies change rides the next push as its own line, after the counts', async () => {
+    const presenter = new PagePresenter();
+    const notifier = new RecordingNotifier();
+    const deps = makeDeps(presenter, notifier);
+    await validate(deps);
+    expect(notifier.calls[0]!.opts).toEqual({ includeCode: true });
+
+    deps.config.policies = {
+      rules: [{ name: 'phone rule', match: { orgTypes: ['production'] }, requireTicket: true }],
+    };
+    await validate(deps);
+    expect(notifier.calls).toHaveLength(2);
+    const { view, opts } = notifier.calls[1]!;
+    expect(opts.includeCode).toBe(true);
+    expect(opts.policyChangedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(view.code).toBe(pendingCode());
+    const lines = composePushover(view, { ...opts, summary: 'minimal' }).message.split('\n');
+    expect(lines[1]).toMatch(
+      /^Contrail noticed a policies change in config\.json at \d{2}:\d{2} — read the approval page or Deploy Review before approving\.$/,
+    );
+    expect(lines.at(-1)).toBe(view.code);
   });
 });

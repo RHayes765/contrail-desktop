@@ -55,6 +55,7 @@ export function makeHandlers(health: HealthView, services: MainServices) {
     'connections:remove': (_deps: EngineDeps, req: { id: string }) => connections.remove(req.id),
     'connections:ping': (_deps: EngineDeps, req: { id: string }) => connections.ping(req.id),
     'connections:limits': (_deps: EngineDeps, req: { id: string }) => connections.limits(req.id),
+    'connections:policies': () => connections.policies(),
     'connections:setGrants': (
       _deps: EngineDeps,
       req: { id: string; grants: GrantSetView },
@@ -250,8 +251,12 @@ export function makeHandlers(health: HealthView, services: MainServices) {
     'deploys:get': (_deps: EngineDeps, req: { id: string }) => deploys.get(req.id),
     // The ONLY execute path in the app: renderer decision → main reads the
     // code from the row → engine claim machinery. The runtime never sees it.
-    'deploys:approve': (_deps: EngineDeps, req: { id: string; comment?: string }) =>
-      deploys.approve(req.id, req.comment),
+    // S46 (B): the emergency reason (the freeze break-glass) rides only this
+    // renderer channel — the agent runtime has no path to it.
+    'deploys:approve': (
+      _deps: EngineDeps,
+      req: { id: string; comment?: string; emergencyReason?: string },
+    ) => deploys.approve(req.id, req.comment, req.emergencyReason),
     'deploys:reject': (_deps: EngineDeps, req: { id: string; comment?: string }) =>
       deploys.reject(req.id, req.comment),
 

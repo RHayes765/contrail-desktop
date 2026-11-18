@@ -1,35 +1,46 @@
 import fs from 'node:fs';
 import {
   ContrailError,
+  POLICY_LIMITS,
   STAMP_NOT_QUERIED_REASON,
   STAMP_NO_ROW_REASON,
   hhmm,
   isProbeable,
+  policyChangedText,
   stampQueryFailedReason,
+  unmatchedRuleText,
   type ApprovalPresentation,
   type ApprovalPresenter,
   type ApprovalRequestView,
   type ApprovalRowDiff,
   type ComponentPreImage,
+  type ConnectionRecord,
   type DeployMovedMember,
   type DeployRequestKind,
   type DeployRequestRecord,
   type EngineDeps,
+  type ExecuteSnapshotBlock,
+  type GovernanceState,
   type LiveCheckSummary,
   type RevertPlanComponent,
   type RevertPlanMember,
   type RevertPlanReason,
   type RevertTargetCheck,
+  type SnapshotMember,
+  type StoredGovernance,
 } from '@contrail/engine';
 import type {
   ChatEvent,
   DeployChangeView,
+  DeployGovernanceView,
   DeployLiveCheckView,
   DeployPreImageView,
   DeployRequestView,
   DeployReviewRowView,
   DeployRevertPackageView,
   DeployRowDiffView,
+  DeploySnapshotMemberView,
+  DeploySnapshotRebaselineView,
   DeployTargetCheckView,
   DeployTargetMemberView,
   DeployTargetMovedView,
@@ -111,6 +122,53 @@ function executionFailedText(kind: DeployRequestKind, detail: unknown): string {
 }
 
 /**
+ * S46 (B): the codes of the engine's execute-time policy refusals
+ * (assertPolicyAtExecute; the engine's own set is module-private). Such a
+ * refusal leaves the request 'validated' and its code unused.
+ */
+const POLICY_REFUSAL_CODES: ReadonlySet<string> = new Set([
+  'policy_freeze',
+  'policy_refused',
+  'policy_unreadable',
+]);
+
+function isPolicyRefusal(err: unknown): boolean {
+  return err instanceof ContrailError && POLICY_REFUSAL_CODES.has(err.code);
+}
+
+/**
+ * S46 (B): how long after an approved deploy's first execute call its job
+ * can still be re-checking the target ahead of the claim — the engine bounds
+ * that org read at 15 s (TARGET_CHECK_DEADLINE_MS); the rest is margin.
+ */
+const GUARD_SETTLE_MS = 20_000;
+
+/**
+ * S46 (B): Deploy Review's error when the policy check at the claim refused
+ * a request just approved there — the policies or a freeze window changed
+ * after the approval's own check. Nothing ran and the request is pending
+ * again. What the policies require now follows, from the engine's live
+ * gate: the engine's refusal itself is written for the agent.
+ */
+export function executePolicyRefusalText(g: GovernanceState | null): string {
+  const lead =
+    "Not executed — as execution started, Contrail checked this connection's policies again " +
+    'and they refused this request. Nothing ran, and the request is awaiting approval again.';
+  if (g?.gate === 'frozen') {
+    return (
+      `${lead} ${g.freezeLine ?? 'A change freeze is in effect on this connection.'} ` +
+      'Approving it during the freeze needs an emergency reason.'
+    );
+  }
+  if (g?.gate === 'blocked') {
+    return g.blockedBy === 'unreadable'
+      ? `${lead} Contrail could not read the policies in config.json: ${g.blockedLines.join(' ')}`
+      : `${lead} What blocks it now: ${g.blockedLines.join('; ')}`;
+  }
+  return `${lead} The policies allow it now — approve it again to run it.`;
+}
+
+/**
  * S45 F2: ONE text for "approved, but the target moved". The held call
  * (approve) and the decided-before-execute replay (interceptAgentExecute)
  * both use it, so the two surfaces cannot drift. `engineRefusal` is the
@@ -175,12 +233,29 @@ function notExecutedText(kind: DeployRequestKind, status: string): string {
 }
 
 /**
+ * S46 (C): an approved deploy whose re-read into the local snapshot is still
+ * running in this app: the row is stored 'executed' with snapshot.status
+ * "pending" while the approval (`deciding`) waits for the engine's final
+ * result. Replaying that row would hand the agent a non-final answer.
+ */
+function rebaselineRunning(row: DeployRequestRecord, deciding: boolean): boolean {
+  if (!deciding || row.kind !== 'deploy' || row.status !== 'executed') return false;
+  const result = record(row.resultJson ? parseJson(row.resultJson) : null);
+  return record(result?.snapshot)?.status === 'pending';
+}
+
+/**
  * The agent's text for a request this session's codeless execute cannot be
  * held on (nothing is pending): the human's decision replayed, or — for a
  * request nobody decided in Deploy Review — that it did not execute. null
- * means the engine answers for itself.
+ * means the engine answers for itself. `deciding`: an approval of this row
+ * is still in flight in this app.
  */
-function replayRow(kind: DeployRequestKind, row: DeployRequestRecord): ToolResult | null {
+function replayRow(
+  kind: DeployRequestKind,
+  row: DeployRequestRecord,
+  deciding: boolean,
+): ToolResult | null {
   if (row.desktopState !== 'approved' && row.desktopState !== 'rejected') {
     // Never decided in Deploy Review. Expired or superseded: say so — it did
     // not execute. Anything else (e.g. executed with a code the human typed
@@ -200,6 +275,19 @@ function replayRow(kind: DeployRequestKind, row: DeployRequestRecord): ToolResul
       status: 'executing',
       request_id: row.id,
       note: 'The user approved it and execution is running. Call again shortly for the outcome.',
+    });
+  }
+  // S46 (C): the deploy committed, but the approval still waits for the
+  // re-read — the stored "pending" block is not the outcome (design C,
+  // decision 7: a poll in that window re-attaches; the replay waits too).
+  if (rebaselineRunning(row, deciding)) {
+    return okJson({
+      status: 'executing',
+      request_id: row.id,
+      note:
+        'The user approved it and the deploy has completed in the org; Contrail is still ' +
+        're-reading the deployed components into the local snapshot. Call again shortly for ' +
+        'the final outcome.',
     });
   }
   // S45 F2: an explicit status switch — a target-moved void (or any other
@@ -223,15 +311,17 @@ function neverApprovedText(kind: DeployRequestKind, status: string): string {
  * "stays valid" — and while a NEWER request of this (connection, kind) awaits
  * the user (the validation that superseded this one, say) it points the agent
  * there instead of "validate again", which would supersede the request the
- * human may be reviewing.
+ * human may be reviewing. `deciding`: an approval of this row is still in
+ * flight in this app.
  */
 function lapsedHoldAnswer(
   kind: DeployRequestKind,
   row: DeployRequestRecord,
   awaiting: DeployRequestRecord | null,
+  deciding: boolean,
 ): ToolResult {
   if (row.desktopState === 'approved' || row.desktopState === 'rejected') {
-    return replayRow(kind, row) ?? refusal(notExecutedText(kind, row.status));
+    return replayRow(kind, row, deciding) ?? refusal(notExecutedText(kind, row.status));
   }
   const result = row.resultJson ? parseJson(row.resultJson) : null;
   const elsewhere = 'with a confirmation code entered outside Deploy Review';
@@ -296,6 +386,11 @@ function lapsedHoldAnswer(
  * validate flows through the executor, which requires the service.
  */
 export class NativeApprovalPresenter implements ApprovalPresenter {
+  /**
+   * S46 (B): the surface every mint records as governance.surface, and what
+   * the phone push reads — native review keeps the code off the push.
+   */
+  readonly mode = 'native' as const;
   private service: DeployService | null = null;
 
   attach(service: DeployService): void {
@@ -551,11 +646,14 @@ export class DeployService {
    * THE human decision. Renderer-only path: reads the confirmation code from
    * the row in main and drives the engine's normal claim machinery. Waits
    * for the terminal outcome (long deploys poll via re-invocation).
+   * S46 (B): `comment` is also the request's justification (prefilled with
+   * the agent's draft), and `emergencyReason` — typed only on this screen —
+   * releases a request held by a change freeze, for this request only.
    */
-  async approve(id: string, comment?: string): Promise<DeployRequestView> {
+  async approve(id: string, comment?: string, emergencyReason?: string): Promise<DeployRequestView> {
     this.beginDeciding(id);
     try {
-      await this.runApproval(id, comment);
+      await this.runApproval(id, comment, emergencyReason);
     } finally {
       this.deciding.delete(id);
       // The last push inside runApproval fired while the id was still
@@ -579,7 +677,7 @@ export class DeployService {
     this.deciding.add(id);
   }
 
-  private async runApproval(id: string, comment?: string): Promise<void> {
+  private async runApproval(id: string, comment?: string, emergencyReason?: string): Promise<void> {
     const rec = this.deps.db.getDeployRequest(id);
     if (!rec) throw new Error('Deploy request not found.');
     if (rec.status !== 'validated') {
@@ -613,17 +711,43 @@ export class DeployService {
       );
     }
 
+    // S46 (B): the change record — validated first, written once, by the
+    // engine (DeployEngine.reviewGovernance). The approval comment becomes
+    // the request's justification: the agent's draft approved unchanged, a
+    // text the human typed earlier left as it is, or the human's own words.
+    // During a change freeze the emergency reason typed on this screen is
+    // recorded as a freeze override for this request only. The request is
+    // evaluated against the policies as they stand now: a policy block, or a
+    // freeze with no valid reason, refuses here with nothing written and no
+    // decision recorded — the held agent call stays held.
+    const gov = this.deps.deploys.reviewGovernance(id, {
+      comment: trimmed,
+      emergencyReason: emergencyReason?.trim() || null,
+    });
+    if (!gov.ok) throw new Error(gov.message);
+
     this.deps.db.recordDeployDecision(id, 'approved', trimmed);
     this.deps.audit.record('deploy.approved', {
       connectionId: conn.id,
       tool: 'deploy_review_screen',
       outcome: 'success',
-      detail: { requestId: id, kind: rec.kind, comment: trimmed },
+      detail: {
+        requestId: id,
+        kind: rec.kind,
+        comment: trimmed,
+        // Whether the approval comment is the agent's draft approved
+        // unchanged, a text the human typed earlier on the approval page,
+        // or typed here (now, or on an earlier attempt that did not run).
+        ...(trimmed !== null ? { comment_source: gov.commentSource } : {}),
+      },
     });
     this.push('deploys:changed', { requestId: id });
 
     // The code goes row → engine, entirely inside this process.
     const code = rec.confirmationCode;
+    // When the first execute call started: a deploy's job re-checks the
+    // target ahead of its claim for up to the engine's deadline from here.
+    const startedAt = Date.now();
     let detail: unknown;
     let failed = false;
     try {
@@ -634,7 +758,7 @@ export class DeployService {
         while (outcome.status === 'in_progress') {
           this.push('deploys:changed', { requestId: id });
           await new Promise((r) => setTimeout(r, EXECUTE_POLL_MS));
-          outcome = await this.deps.deploys.executeDeploy(conn, code);
+          outcome = await this.pollDeploy(id, conn, code, startedAt);
         }
         if (outcome.status === 'failed') {
           failed = true;
@@ -678,6 +802,23 @@ export class DeployService {
         detail = result;
       }
     } catch (err) {
+      // S46 (B): the policy check at the claim refused it — a freeze window
+      // that began, or config.json edited or unreadable, after
+      // reviewGovernance passed (for deploy, DML and activation that span
+      // includes the target guard's org read). The engine left the row
+      // 'validated' and its code unused: nothing ran, so this is no
+      // execution outcome. As when reviewGovernance refuses, the held agent
+      // call stays held and nothing is announced; the decision is withdrawn
+      // (the deploy.approved and policy.refused audit rows stay — both are
+      // true history) and Deploy Review shows the refusal.
+      if (isPolicyRefusal(err) && this.deps.db.getDeployRequest(id)?.status === 'validated') {
+        this.deps.db.clearDeployDecision(
+          id,
+          rec.desktopState === 'awaiting_approval' ? 'awaiting_approval' : null,
+        );
+        this.push('deploys:changed', { requestId: id });
+        throw new Error(executePolicyRefusalText(this.deps.deploys.governanceState(id)));
+      }
       failed = true;
       detail = {
         error: err instanceof ContrailError ? `${err.code}: ${err.message}` : String(err).slice(0, 800),
@@ -727,6 +868,35 @@ export class DeployService {
     );
   }
 
+  /**
+   * S46 (B): one poll of an approved deploy. The engine re-checks the
+   * policies on a poll before it re-attaches while the row is still
+   * 'validated' — that is, while the job the first call started may still be
+   * re-checking the target. Such a refusal does not stop that job, whose
+   * claim checks the policies once more, so it is the outcome only once that
+   * claim has been decided: wait out the guard's deadline, then re-read the
+   * row. Still 'validated': the claim was refused too, and nothing ran.
+   * Otherwise (claimed, or voided by the guard) this call re-attaches.
+   */
+  private async pollDeploy(
+    id: string,
+    conn: ConnectionRecord,
+    code: string,
+    startedAt: number,
+  ): ReturnType<EngineDeps['deploys']['executeDeploy']> {
+    try {
+      return await this.deps.deploys.executeDeploy(conn, code);
+    } catch (err) {
+      if (!isPolicyRefusal(err) || this.deps.db.getDeployRequest(id)?.status !== 'validated') {
+        throw err;
+      }
+      const wait = startedAt + GUARD_SETTLE_MS - Date.now();
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      if (this.deps.db.getDeployRequest(id)?.status === 'validated') throw err;
+      return this.deps.deploys.executeDeploy(conn, code);
+    }
+  }
+
   /** Reject: the pending code dies with the decision — nothing can execute it later. */
   async reject(id: string, comment?: string): Promise<DeployRequestView> {
     this.beginDeciding(id);
@@ -745,7 +915,14 @@ export class DeployService {
     if (rec.status !== 'validated') {
       throw new Error(`This request is ${rec.status} — only a validated request can be rejected.`);
     }
-    const trimmed = comment?.trim() || null;
+    let trimmed = comment?.trim() || null;
+    // S46 (B): the comment box is prefilled with the request's justification
+    // (the agent's draft). That draft is never recorded, or relayed to the
+    // held agent call, as the human's rejection reason — only words typed
+    // over it are.
+    if (trimmed !== null && storedJustificationTexts(rec.summaryJson).includes(folded(trimmed))) {
+      trimmed = null;
+    }
     this.deps.db.recordDeployDecision(id, 'rejected', trimmed);
     this.deps.db.updateDeployRequestStatus(id, 'superseded');
     this.deps.audit.record('deploy.rejected', {
@@ -798,7 +975,7 @@ export class DeployService {
       // from 'validated' without anyone having looked at it.
       const recent = rows.find((r) => r.sessionId === sessionId);
       if (!recent) return null;
-      const replay = replayRow(kind, recent);
+      const replay = replayRow(kind, recent, this.deciding.has(recent.id));
       return replay ? Promise.resolve(replay) : null;
     }
 
@@ -813,7 +990,9 @@ export class DeployService {
         // The row may have changed while this call waited — expired (by
         // S45's sweep, or lapsed past expires_at), superseded by a newer
         // validation, locked, run with a code entered elsewhere, or approved
-        // and executing. Say what it is now, never "stays valid".
+        // and executing. Say what it is now, never "stays valid". An
+        // approval counts as starting only while it is in flight here: a
+        // decision an app quit interrupted is still awaiting the human.
         const now = this.deps.db.getDeployRequest(pending.id);
         const lapsed =
           now !== null &&
@@ -825,8 +1004,9 @@ export class DeployService {
                 kind,
                 now.status === 'validated' ? { ...now, status: 'expired' } : now,
                 this.awaitingRequest(connectionId, kind, now.id),
+                this.deciding.has(now.id),
               )
-            : now.desktopState === 'approved'
+            : now.desktopState === 'approved' && this.deciding.has(now.id)
               ? okJson({
                   status: 'executing',
                   request_id: now.id,
@@ -947,6 +1127,8 @@ export class DeployService {
       blast?: string[];
       // S45 F1: the validate-time live check (deploys).
       live_check?: unknown;
+      // S46 (B): the change record minted with the request (absent before 0.40).
+      governance?: unknown;
       // DML summaries are a preview object, not component lists.
       operation?: string;
       object?: string;
@@ -1099,9 +1281,92 @@ export class DeployService {
         members: [...changes, ...destructive],
       }),
       agentReview: review?.agentReview ?? null,
+      // S46 (B): read live from summary_json and the policies — never copied
+      // into review_json, so an edit or an override shows on the next fetch.
+      governance:
+        rec.status === 'validated' || record(summary?.governance)
+          ? governanceView(
+              this.deps.deploys.governanceState(rec.id),
+              record(summary?.governance) as Loose<StoredGovernance> | null,
+            )
+          : null,
+      // S46 (C): the post-deploy snapshot re-read. A row stored 'executed'
+      // reads `pending` until the engine amends it; `deciding` (above) tells
+      // the panel whether that is still in flight in this app.
+      snapshotRebaseline: snapshotRebaselineView(result),
       resultSummary,
     };
   }
+}
+
+/**
+ * S46 (B): the engine's code-free GovernanceState → the review's change
+ * record. The two live lines are built here with the engine's own sentence
+ * builders, so Deploy Review prints the approval page's words; neither is
+ * ever written to summary_json.
+ */
+function governanceView(
+  g: GovernanceState | null,
+  stored: Loose<StoredGovernance> | null,
+): DeployGovernanceView | null {
+  if (!g) return null;
+  // The execute-time record (the claim's policy check), read from the
+  // stored record by name: the connection identity it also carries is the
+  // dossier's, not the review's.
+  const check = record(stored?.execute_check) as Loose<
+    NonNullable<StoredGovernance['execute_check']>
+  > | null;
+  return {
+    ticket: g.ticket,
+    justification: g.justification
+      ? { text: g.justification.text, source: g.justification.source, provenance: g.provenance }
+      : null,
+    justificationRequired: g.required,
+    policySource: g.policySource,
+    policyLines: g.policyLines,
+    unmatchedRuleLines: g.unmatchedRules.map((name) => unmatchedRuleText(name)),
+    policyChangedLine: g.policyChangedAt ? policyChangedText(g.policyChangedAt) : null,
+    gate: g.gate,
+    blockedBy: g.blockedBy,
+    blockedOnlyByJustification:
+      g.blockedBy === 'violations' &&
+      g.violationCodes.length > 0 &&
+      g.violationCodes.every((code) => code === 'justification_required'),
+    freezeLine: g.freezeLine,
+    // Blocked: the engine fills `freeze` from the live verdict, so this says
+    // whether a freeze is in effect now behind the block.
+    freezeActive: g.freeze !== null,
+    override: g.override,
+    blockedLines: g.blockedLines,
+    reasonMin: POLICY_LIMITS.freezeReasonMin,
+    executeCheck:
+      check && typeof check.at === 'string'
+        ? {
+            at: check.at,
+            rules: stringList(check.rules),
+            freezeActive: check.freeze_active === true,
+            overridden: check.overridden === true,
+          }
+        : null,
+  };
+}
+
+/** CR LF and lone CR folded to LF, then trimmed — how the engine compares texts. */
+function folded(text: string): string {
+  return text.replace(/\r\n?/g, '\n').trim();
+}
+
+/**
+ * S46 (B): the texts Deploy Review prefills its comment box with — the
+ * stored justification and the agent's draft kept beside an edited one —
+ * folded. A rejection whose comment is one of them was not typed by the human.
+ */
+function storedJustificationTexts(summaryJson: string): string[] {
+  const governance = record(record(parseJson(summaryJson))?.governance) as Loose<StoredGovernance> | null;
+  const j = record(governance?.justification);
+  return [j?.text, j?.agent_draft]
+    .filter((t): t is string => typeof t === 'string' && t.trim() !== '')
+    .map(folded);
 }
 
 // ── S45 view parsing (review_json / summary_json / result_json → views) ──
@@ -1385,6 +1650,65 @@ function revertPackageView(raw: unknown): DeployRevertPackageView | null {
     })),
     plan: str(p.plan),
     note: str(p.note),
+  };
+}
+
+const SNAPSHOT_STATUSES: ReadonlyArray<DeploySnapshotRebaselineView['status']> = [
+  'complete',
+  'partial',
+  'none',
+  'unavailable',
+  'disabled',
+  'pending',
+];
+
+/** One `{type, api_name}` of a snapshot block's member list → view. */
+function snapshotMembers(raw: unknown): Array<DeploySnapshotMemberView & { r: Record<string, unknown> }> {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((m) => {
+    const r = record(m);
+    const member = r as Loose<SnapshotMember> | null;
+    return r && member && typeof member.type === 'string'
+      ? [{ r, type: member.type, apiName: str(member.api_name) ?? '' }]
+      : [];
+  });
+}
+
+/**
+ * The engine's result note (executeSnapshotResult) when every member was
+ * skipped yet a unit was written — the one stored field that tells this
+ * `none` apart from the one that wrote nothing.
+ */
+const NONE_WROTE_DOCUMENTS = 'Contrail did write to the local snapshot';
+
+/**
+ * S46 (C): result_json.snapshot (ExecuteSnapshotBlock) → view, from the
+ * whole result: `reason` is the `unavailable` reason only, and a `none` that
+ * still wrote a document is read from the result's note. A row executed
+ * before 0.40 has no block.
+ */
+function snapshotRebaselineView(
+  result: Record<string, unknown> | null,
+): DeploySnapshotRebaselineView | null {
+  const s = record(result?.snapshot) as Loose<ExecuteSnapshotBlock> | null;
+  if (!s) return null;
+  const status = SNAPSHOT_STATUSES.find((v) => v === s.status);
+  if (!status) return null;
+  const note = str(result?.note);
+  const plain = (list: unknown) => snapshotMembers(list).map(({ type, apiName }) => ({ type, apiName }));
+  return {
+    status,
+    reason: status === 'unavailable' ? str(s.reason) : null,
+    rebaselined: plain(s.rebaselined),
+    removed: plain(s.removed),
+    skipped: snapshotMembers(s.skipped).map(({ r, type, apiName }) => ({
+      type,
+      apiName,
+      code: str(r.code) ?? '',
+      reason: str(r.reason) ?? '',
+    })),
+    note: str(s.note) ?? '',
+    wroteDocuments: status === 'none' && note !== null && note.includes(NONE_WROTE_DOCUMENTS),
   };
 }
 

@@ -133,11 +133,12 @@ If a step is not applicable, mark `N/A` with a one-line justification.
    - **Fail closed.** If the gate cannot run — no connection, or no
      `metadata_write` grant (check with `get_permissions`; never probe) — record
      `compile_check=unavailable: <reason>` and present the code as UNVERIFIED.
-7. **Approval, deploy, refresh** — by reference. Present the validation summary
+7. **Approval and deploy** — by reference. Present the validation summary
    (target org first; destructive changes and any `permission_warning` lead),
    the human reads the confirmation code from the approval page, you pass it to
-   `execute_deploy`, then run `refresh_snapshot`. Full contract:
-   **salesforce-house-rules §3**.
+   `execute_deploy` — Contrail then re-reads the deployed components into the
+   snapshot itself (`refresh_snapshot` only for what the result's `snapshot`
+   block reports as not updated). Full contract: **salesforce-house-rules §3**.
 8. **Human runtime check.** After deploy, tell the human exactly where to see
    the component (which page/action/tab, per the targets) and what to exercise.
    That check is part of verification, not an afterthought — name it in the
@@ -447,7 +448,7 @@ Usability: <isExposed/targets set; where the human will see it; grants that ship
 Workflow: all steps completed (1-8); any N/A justified
 Compile: <REQUIRED — actual validate_deploy result (incl. dry_run iterations), or "compile_check=unavailable: <reason>" after attempting>
 Verification honesty: <no test runner exists for LWC — org compile + code review done; name the runtime check the human still owes>
-Deploy: <validated, awaiting approval | executed + refresh_snapshot run | not attempted>
+Deploy: <validated, awaiting approval | executed (snapshot: <status from the result's snapshot block>) | not attempted>
 ```
 
 ---

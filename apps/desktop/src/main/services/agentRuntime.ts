@@ -435,6 +435,12 @@ export class AgentSessionRun {
       this.capabilityCalls.push({ name, refused: true });
       return refuse('In a project session, get_audit_log requires a connection argument.');
     }
+    // S46 (B): the same for the change-evidence dossier — unfiltered, a ticket
+    // or a time window would gather other projects' requests into one folder.
+    if (name === 'export_change_evidence' && (a.connection === undefined || a.connection === null)) {
+      this.capabilityCalls.push({ name, refused: true });
+      return refuse('In a project session, export_change_evidence requires a connection argument.');
+    }
 
     // bulk_load_propose names files by {folder, path} coordinates only. The
     // host resolves them HERE, against THIS session's project's linked
@@ -693,7 +699,8 @@ export class AgentSessionRun {
   }
 
   private scopedListing(name: string, a: Record<string, unknown>): BridgeToolResult {
-    const views = this.liveBindings().map((b) => ({
+    const bindings = this.liveBindings();
+    const views = bindings.map((b) => ({
       alias: b.connection.alias,
       org_name: b.connection.orgName,
       org_type: b.connection.orgType,
@@ -709,7 +716,21 @@ export class AgentSessionRun {
       const view = views.find((v) => v.alias === bound.alias);
       return okJson(view);
     }
-    return okJson({ connections: views, count: views.length });
+    // S46 (B): list_connections' policy per connection and policies_status,
+    // as the capability reports them — from ONE read of the policies
+    // (policyListing). The listing it reads is every stored connection, so
+    // a label rule matched through another connection to the same org, and
+    // the rules that match no connection on this machine, are what the
+    // policy gates themselves see; only this project's bound connections
+    // are shown.
+    const all = this.deps.db.listConnections();
+    const policy = this.deps.deploys.policyListing(all);
+    const reportOf = new Map(all.map((c, i) => [c.id, policy.reports[i] ?? null]));
+    const listed = views.map((v, i) => ({
+      ...v,
+      policy: reportOf.get(bindings[i]!.connection.id) ?? null,
+    }));
+    return okJson({ connections: listed, count: listed.length, policies_status: policy.status });
   }
 
   buildContext(

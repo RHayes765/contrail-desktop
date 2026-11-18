@@ -6,6 +6,7 @@ import type {
   MetadataTypeCountView,
 } from '@contrail/shared';
 import { ipc } from '../lib/ipc.js';
+import { changeTouchesArtifact } from '../lib/metadataChanged.js';
 import { useConnections } from '../stores/connections.js';
 import { ArtifactDetailPanel } from '../components/artifactDetail.js';
 import { useSummary } from '../components/summary.js';
@@ -77,6 +78,39 @@ export function MetadataScreen() {
     });
   }, [connectionId]);
 
+  // S46 (C): a member-scoped re-read (refresh_snapshot members, or the
+  // re-baseline after a deploy) changed components of this connection's
+  // snapshot: re-fetch the type counts and the open list, and reload the open
+  // detail when the re-read named it or re-wrote it as the document of a
+  // named component — a FlowDefinition's Flow, a CustomField's CustomObject
+  // (a removed one then says it is gone).
+  const [listTick, setListTick] = useState(0);
+  const detailRef = useRef<ArtifactDetailView | null>(null);
+  detailRef.current = detail;
+  useEffect(() => {
+    return ipc.subscribe('metadata:changed', ({ connectionId: changed, members, units }) => {
+      if (changed !== activeConnRef.current) return;
+      void ipc.invoke('metadata:types', { connectionId: changed }).then((t) => {
+        if (activeConnRef.current === changed) setTypes(t);
+      });
+      setListTick((n) => n + 1);
+      const open = detailRef.current;
+      if (open && changeTouchesArtifact(open, { members, units })) {
+        void ipc
+          .invoke('metadata:artifact', { connectionId: changed, type: open.type, apiName: open.apiName })
+          .then((d) => {
+            if (activeConnRef.current === changed) setDetail(d);
+          })
+          .catch((err) => {
+            if (activeConnRef.current === changed) {
+              setDetail(null);
+              setDetailError(String(err));
+            }
+          });
+      }
+    });
+  }, []);
+
   useEffect(() => {
     if (!connectionId || !selectedType) return;
     setRows(null);
@@ -90,7 +124,7 @@ export function MetadataScreen() {
         .then(setRows);
     }, 150);
     return () => clearTimeout(timer);
-  }, [connectionId, selectedType, query]);
+  }, [connectionId, selectedType, query, listTick]);
 
   const openArtifact = (type: string, apiName: string) => {
     if (!connectionId) return;

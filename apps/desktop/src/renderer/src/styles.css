@@ -1226,6 +1226,25 @@ button.danger {
 .deploy-destructive h3 {
   color: #ff8080;
 }
+/* S46 (B): the CHANGE FREEZE banner — the red card, heavier and louder. */
+.deploy-freeze {
+  border-width: 2px;
+  background: rgba(214, 57, 57, 0.14);
+}
+.deploy-freeze h3 {
+  font-size: 15px;
+  font-weight: 700;
+}
+.deploy-freeze .form-row textarea {
+  width: 100%;
+}
+/* S46 (B): the policies that apply to a connection, on the SF Orgs card. */
+.policy-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
 .deploy-row {
   font-family: ui-monospace, Consolas, monospace;
   font-size: 12.5px;

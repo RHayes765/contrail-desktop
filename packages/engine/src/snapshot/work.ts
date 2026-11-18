@@ -3,6 +3,7 @@ import type { FileProperties } from '../salesforce/metadataSoap.js';
 import { SnapshotStore } from './store.js';
 import { indexSnapshotFiles, type IndexedArtifact } from './indexer.js';
 import { extractAllEdges, type KnownArtifacts } from '../deps/extract.js';
+import { applyMemberUnits, type MemberApplyInput, type MemberApplyResult } from './members.js';
 
 /**
  * The snapshot pipeline's CPU-bound work units, split behind a seam so a host
@@ -138,6 +139,13 @@ export interface SnapshotWorkUnits {
   extractAndIndex(input: ExtractIndexInput): Promise<ExtractIndexResult>;
   /** Reference extraction over the freshly indexed artifacts. */
   extractEdges(input: EdgeExtractionInput): Promise<DependencyEdge[]>;
+  /**
+   * S46 (C): a member run's filesystem step (snapshot/members.ts) — refuse a
+   * child-typed manifest, index the zip, stage and swap the named units'
+   * files. Called only after the engine's commit point; a rejection (the
+   * worker's kill included) is reported as a partly updated snapshot.
+   */
+  applyMemberUnits(input: MemberApplyInput): Promise<MemberApplyResult>;
 }
 
 /**
@@ -187,5 +195,6 @@ export function inlineSnapshotWork(store: SnapshotStore): SnapshotWorkUnits {
     extractAndIndex: (input) => Promise.resolve(runExtractAndIndex(store, input)),
     extractEdges: (input) =>
       Promise.resolve(extractAllEdges(input.connectionId, input.artifacts, input.known)),
+    applyMemberUnits: (input) => Promise.resolve(applyMemberUnits(store, input)),
   };
 }

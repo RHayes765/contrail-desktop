@@ -3,12 +3,19 @@ import type {
   ConnectionView,
   GrantSetView,
   PingResultView,
+  PoliciesView,
   SnapshotStatusView,
 } from '@contrail/shared';
 import { ipc } from '../lib/ipc.js';
 
 interface ConnectionsState {
   connections: ConnectionView[] | null;
+  /**
+   * S46 (B): the policies that apply to each connection (config.json's
+   * policies section, or the built-in rule) — loaded with the list; null
+   * until the first load or when it failed.
+   */
+  policies: PoliciesView | null;
   /** Last liveness check per connection id. */
   pings: Record<string, PingResultView>;
   /** Snapshot posture per connection id (loaded with the list, updated by pushes). */
@@ -31,6 +38,7 @@ interface ConnectionsState {
 
 export const useConnections = create<ConnectionsState>((set, get) => ({
   connections: null,
+  policies: null,
   pings: {},
   snapshots: {},
   syncErrors: {},
@@ -40,6 +48,10 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
   refresh: async () => {
     const connections = await ipc.invoke('connections:list', {});
     set({ connections });
+    // S46 (B): config.json is re-read here, so an edit shows on the next
+    // refresh. A failure leaves the cards without a policy line.
+    const policies = await ipc.invoke('connections:policies', {}).catch(() => null);
+    set({ policies });
     // Snapshot posture rides along; failures leave the previous entry.
     const statuses = await Promise.all(
       connections.map((c) =>
@@ -156,6 +168,7 @@ ipc.subscribe('metadata:progress', ({ connectionId, progress, elapsedMs, done, e
             artifactCount: 0,
             edgeCount: 0,
             lastIndexedAt: null,
+            syncedAt: null,
             syncing: true,
             progress,
             syncElapsedMs: elapsedMs,
@@ -164,4 +177,11 @@ ipc.subscribe('metadata:progress', ({ connectionId, progress, elapsedMs, done, e
           },
     },
   });
+});
+
+// S46 (C): a member-scoped re-read (refresh_snapshot members, or the
+// re-baseline after a deploy) changed some components — the counts and the
+// newest index time moved, while "synced … ago" (syncedAt) did not.
+ipc.subscribe('metadata:changed', ({ connectionId }) => {
+  void useConnections.getState().refreshSnapshotStatus(connectionId);
 });

@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react';
 import type { ConnectionView, GrantSetView, OrgLimitsView } from '@contrail/shared';
 import { ipc } from '../lib/ipc.js';
+import {
+  freezeNowLabel,
+  policiesUnreadableText,
+  policyLine,
+  policySourceLabel,
+} from '../lib/policies.js';
 import { useConnections } from '../stores/connections.js';
 
 /**
@@ -243,6 +249,7 @@ function cleanPhase(progress: string): string {
 export function ConnectionsScreen() {
   const {
     connections,
+    policies,
     pings,
     snapshots,
     syncErrors,
@@ -285,6 +292,22 @@ export function ConnectionsScreen() {
         </div>
       )}
 
+      {/* S46 (B): the policies are the human's, in config.json — shown here,
+          never edited here. */}
+      {policies?.status === 'unreadable' && (
+        <div className="notice">{policiesUnreadableText(policies.problem ?? 'unknown problem')}</div>
+      )}
+      {policies?.status === 'ok' && connections && connections.length > 0 && (
+        <p className="hint">
+          Policies: {policySourceLabel(policies.source)}. Edit config.json to change them.
+        </p>
+      )}
+      {policies?.unmatchedRuleLines.map((line, i) => (
+        <div key={i} className="hint">
+          {line}
+        </div>
+      ))}
+
       {connections === null ? (
         <div className="empty">Loading…</div>
       ) : connections.length === 0 ? (
@@ -315,6 +338,20 @@ export function ConnectionsScreen() {
                       {c.orgName ?? 'unnamed org'} · {c.username ?? 'unknown user'} · {c.instanceUrl}
                     </div>
                     {(() => {
+                      // S46 (B): what the policies require of this connection now.
+                      const p = policies?.byConnection[c.id];
+                      if (!p) return null;
+                      const line = policyLine(p);
+                      const freeze = freezeNowLabel(p);
+                      if (!line && !freeze) return null;
+                      return (
+                        <div className="conn-detail policy-line">
+                          {freeze && <span className="stale-badge">{freeze}</span>}
+                          {line && <span>{line}</span>}
+                        </div>
+                      );
+                    })()}
+                    {(() => {
                       const snap = snapshots[c.id];
                       const syncError = syncErrors[c.id];
                       if (!snap && !syncError) return null;
@@ -338,10 +375,12 @@ export function ConnectionsScreen() {
                                 </span>
                               )}
                             </span>
-                          ) : snap?.lastIndexedAt ? (
+                          ) : snap?.syncedAt ? (
                             <>
                               <span>
-                                synced {agoLabel(snap.lastIndexedAt)} ·{' '}
+                                {/* S46 (C): the oldest whole-type refresh — a
+                                    re-baseline after a deploy never moves it. */}
+                                synced {agoLabel(snap.syncedAt)} ·{' '}
                                 {snap.artifactCount.toLocaleString()} artifacts ·{' '}
                                 {snap.edgeCount.toLocaleString()} refs
                               </span>

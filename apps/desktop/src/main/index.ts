@@ -1403,6 +1403,10 @@ ${logFilePath()}`,
   // backfills history from executed request rows on boot (idempotent).
   const manifestService = new ManifestService(boot.deps, push, metadata, summaryService);
   boot.deps.deploys.setExecutionObserver((info) => manifestService.capture(info));
+  // S46 (C): a member-scoped re-read (refresh_snapshot members, or the
+  // re-baseline that runs after the observer above has read the pre-deploy
+  // snapshot) tells the renderer which components changed.
+  boot.deps.engine.setMembersObserver((info) => snapshots.onMembersChanged(info));
   manifestService.ensureBackfill();
 
   const services: MainServices = {

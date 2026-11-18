@@ -35,6 +35,7 @@ let toolingFails: boolean;
 let lastToolingQueries: string[];
 
 class RecordingPresenter implements ApprovalPresenter {
+  readonly mode = 'page' as const;
   readonly views: ApprovalRequestView[] = [];
   private readonly inner = new ApprovalPageServer(async () => {});
   async present(

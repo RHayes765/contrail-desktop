@@ -14,6 +14,7 @@ import {
   clampContent,
   fetchArtifactContent,
 } from '../metadata/read.js';
+import type { MemberRefreshSummary } from '../snapshot/members.js';
 import type { Capability } from './types.js';
 import { ok, fail, guarded } from './result.js';
 
@@ -49,6 +50,20 @@ const ORG_CHANGES_CHILD_TYPES = new Set([
   // drift for them rides the Bot document.
   'BotVersion',
 ]);
+
+/** S46 Part C: refresh_snapshot's message for a finished member-scoped refresh. */
+function memberCompleteMessage(summary: MemberRefreshSummary): string {
+  const { refreshed, removed, skipped } = summary.counts;
+  return `Member refresh complete: ${refreshed} refreshed, ${removed} removed, ${skipped} skipped.`;
+}
+
+/** S46 Part C: refresh_snapshot's message for a member-scoped refresh still running. */
+function memberRunningMessage(jobId: string): string {
+  return (
+    `Member refresh is still running — poll with {connection, job_id: "${jobId}"}, ` +
+    'or re-send the same members (which attaches to this same job).'
+  );
+}
 
 export function requireConnection(
   deps: Pick<EngineDeps, 'db' | 'audit'>,
@@ -480,7 +495,14 @@ export const metadataCapabilities: Capability[] = [
     description:
       'Manifest-driven re-retrieve of the org\'s metadata into the local snapshot + index ' +
       '+ dependency graph. Long-running on big orgs: an in-progress result means call ' +
-      'refresh_snapshot again to check on it. check_only=true just reports staleness.',
+      'refresh_snapshot again to check on it. check_only=true just reports staleness. ' +
+      'members re-reads only the named components (a child such as a CustomField re-reads ' +
+      'its whole parent object; a bundle is replaced whole) into an EXISTING snapshot — use ' +
+      'it for what an execute_deploy result reports as not re-baselined, or to pick up one ' +
+      'change made in the org. A member whose type this snapshot does not cover is skipped, ' +
+      'unless the org\'s listing shows no unpackaged component of that type other than the ' +
+      'named ones (never for foldered types). A member-scoped refresh never re-queries the ' +
+      'org-computed dependency data and does not see anything else that changed in the org.',
     grant: 'metadata_read',
     writeClass: false,
     inputSchema: {
@@ -498,9 +520,22 @@ export const metadataCapabilities: Capability[] = [
         .optional()
         .describe(
           'Poll a RUNNING refresh by the job_id an earlier call returned — pass ' +
-            '{connection, job_id} ALONE. Jobs are keyed by their requested type set, ' +
-            'so a poll only ever returns the refresh it names (re-sending the same ' +
-            'types attaches to the same job too).',
+            '{connection, job_id} ALONE. Jobs are keyed by their requested type set (or ' +
+            'member set), so a poll only ever returns the refresh it names (re-sending the ' +
+            'same types or members attaches to the same job too).',
+        ),
+      // S46 Part C: a member-scoped re-read into an existing snapshot.
+      members: z
+        .array(z.object({ type: z.string(), api_name: z.string() }))
+        .min(1)
+        .max(100)
+        .optional()
+        .describe(
+          'Re-read ONLY these components — [{type, api_name}], at most 100, passed ALONE ' +
+            'with connection (not with types, check_only or job_id). Children are dotted ' +
+            '(Account.My_Field__c) and re-read their parent document; a FlowDefinition name ' +
+            're-reads the Flow. Each member comes back refreshed, removed (no longer in what ' +
+            'the org returned for it) or skipped with the reason.',
         ),
     },
     handler: (deps, rawArgs) =>
@@ -510,8 +545,45 @@ export const metadataCapabilities: Capability[] = [
           types?: string[];
           check_only?: boolean;
           job_id?: string;
+          members?: Array<{ type: string; api_name: string }>;
         };
         const conn = requireConnection(deps, args.connection, 'refresh_snapshot');
+        if (args.members !== undefined) {
+          if (args.types !== undefined || args.check_only !== undefined || args.job_id !== undefined) {
+            return fail('Pass members ALONE with connection — not with types, check_only or job_id.');
+          }
+          const bad = args.members.find((m) => !TYPE_RE.test(m.type) || !nameOk(m.api_name));
+          if (bad) {
+            return fail(
+              `invalid member "${bad.type}:${bad.api_name}" — expected a metadata type name and a ` +
+                'full API name (children dotted, foldered names "Folder/Name").',
+            );
+          }
+          const members = args.members.map((m) => ({ type: m.type, api_name: m.api_name }));
+          const run = await deps.engine.refreshMembers(conn, members);
+          switch (run.status) {
+            case 'complete':
+              return ok(run.summary, memberCompleteMessage(run.summary));
+            case 'failed':
+              // The desktop's failed outcome names its run by jobId; it is
+              // absent only when no run was started.
+              return fail(
+                run.jobId !== undefined
+                  ? `Member refresh failed (job ${run.jobId}): ${run.error}`
+                  : `Member refresh failed: ${run.error}`,
+              );
+            case 'in_progress':
+              return ok(
+                { job_id: run.state.jobId, ...run.state },
+                memberRunningMessage(run.state.jobId),
+              );
+            case 'locked':
+              return fail(
+                'Another Contrail process is already refreshing this connection. ' +
+                  'Wait for it to finish and try again.',
+              );
+          }
+        }
         if (args.job_id !== undefined && (args.types !== undefined || args.check_only)) {
           return fail('Pass job_id ALONE to poll a running refresh.');
         }
@@ -525,12 +597,31 @@ export const metadataCapabilities: Capability[] = [
           args.types,
           args.job_id !== undefined ? { observeJobId: args.job_id } : undefined,
         );
+        // A members-… id names a member job (the desktop's member runs are
+        // `members-<conn>:<time>:<n>`, run-unique).
+        const memberPoll = args.job_id?.startsWith('members-') === true;
         switch (outcome.status) {
           case 'complete':
-            return ok(outcome.summary, 'Snapshot refreshed.');
+            // A job_id poll serves type jobs and member jobs alike: the
+            // message follows the outcome's kind, never the summary's shape.
+            return outcome.kind === 'members'
+              ? ok(outcome.summary, memberCompleteMessage(outcome.summary))
+              : ok(outcome.summary, 'Snapshot refreshed.');
           case 'failed':
-            return fail(`Snapshot refresh failed: ${outcome.error}`);
+            // A members-… id names a member job: the members call's wording.
+            return fail(
+              memberPoll
+                ? `Member refresh failed (job ${args.job_id}): ${outcome.error}`
+                : `Snapshot refresh failed: ${outcome.error}`,
+            );
           case 'in_progress':
+            // A member job's state carries its members (re-sending types would not attach to it).
+            if (outcome.state.members !== undefined) {
+              return ok(
+                { job_id: outcome.state.jobId, ...outcome.state },
+                memberRunningMessage(outcome.state.jobId),
+              );
+            }
             return ok(
               { job_id: outcome.state.jobId, ...outcome.state },
               `Refresh is still running — poll with {connection, job_id: ` +
@@ -543,10 +634,13 @@ export const metadataCapabilities: Capability[] = [
                 'Wait for it to finish and try again.',
             );
           case 'gone':
+            // A members-… id names a member set: re-sending types would start a whole-type refresh.
             return fail(
               `No running or uncollected refresh job "${args.job_id ?? ''}" on ` +
                 `"${conn.alias}" — its result may already have been collected. ` +
-                'Re-send types to start a new refresh.',
+                (memberPoll
+                  ? 'Re-send the same members to start a new member refresh.'
+                  : 'Re-send types to start a new refresh.'),
             );
         }
       }),

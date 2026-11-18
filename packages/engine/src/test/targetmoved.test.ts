@@ -13,6 +13,7 @@ import { invokeCapability, type ToolResult } from '../capabilities/index.js';
 import { renderApprovalPage } from '../connect/pages.js';
 import { emptyGrantSet } from '../core/grants.js';
 import { hhmm } from '../deploy/preimage.js';
+import { freezeExecuteRefusalText } from '../core/policy.js';
 import type { ApprovalNotifier, NotifyOutcome } from '../core/notify.js';
 import type { DeployRequestRecord } from '../core/types.js';
 
@@ -112,6 +113,8 @@ let client: {
   close(): Promise<void>;
 };
 let config: ContrailConfig;
+/** Desktop: the engine itself, for the human-only Deploy Review calls (reviewGovernance). */
+let deps: EngineDeps;
 let connId: string;
 let presentedPages: string[];
 /** Desktop: what approvals.present received — the native Deploy Review screen's view. */
@@ -514,11 +517,12 @@ beforeEach(async () => {
   config = {
     ...DEFAULT_CONFIG,
     salesforce: { ...DEFAULT_CONFIG.salesforce },
-    snapshot: { ...DEFAULT_CONFIG.snapshot, pollIntervalMs: 5 },
+    // S46 (C): these stubs model no post-execute re-read.
+    snapshot: { ...DEFAULT_CONFIG.snapshot, pollIntervalMs: 5, rebaselineAfterDeploy: false },
     deploy: { ...DEFAULT_CONFIG.deploy, pollIntervalMs: 5, toolWaitMs: 10_000 },
   };
   store = new SnapshotStore(path.join(tmp, 'snapshots'));
-  const deps = createEngineDeps({
+  deps = createEngineDeps({
     db,
     tokens,
     config,
@@ -885,8 +889,89 @@ describe('S45 F2: deploy — the guard inside the deploy-exec job', () => {
     // Desktop seam: the verdict is persisted on the claimed row (summary_json)
     // for the startup reconcile of a deploy a quit strands — never the code.
     const row = db.getDeployRequest(req.id)!;
-    expect(JSON.parse(row.summaryJson).execute_target_check).toEqual(result.target_check);
+    const summary = JSON.parse(row.summaryJson);
+    expect(summary.execute_target_check).toEqual(result.target_check);
+    // S46 (B3′): that merge is made into the row claimCode re-read after its
+    // execute_check patch, so the governance check survives beside it.
+    expect(summary.governance.execute_check).toEqual({
+      at: expect.any(String),
+      rules: [],
+      freeze_active: false,
+      overridden: false,
+      org_id: '00DM',
+      username: null,
+    });
     expect(row.summaryJson).not.toContain(req.code);
+  });
+
+  it('desktop seam (S46 B3′): a freeze after the mint refuses with no org read; the Deploy Review reason releases it and both checks are kept', async () => {
+    const req = await validate();
+    const FREEZE_RULE = 'moved freeze';
+    config.policies = {
+      rules: [
+        {
+          name: FREEZE_RULE,
+          match: { connections: ['moved-*'] },
+          freezeWindows: [
+            {
+              name: 'always',
+              range: { from: '2000-01-01T00:00', to: '2999-01-01T00:00' },
+              timeZone: 'UTC',
+            },
+          ],
+        },
+      ],
+    };
+    const freeze = { rule: FREEZE_RULE, window: 'always', until: '2999-01-01 00:00 UTC' };
+
+    // Branch B's check runs before the job: no org read, no attempt counted,
+    // nothing voided — the code stays usable.
+    const listsBefore = listCalls.length;
+    const refused = await execute(req.code);
+    expect(refused.isError).toBe(true);
+    expect(textOf(refused)).toBe(freezeExecuteRefusalText('moved-org', freeze, 'page'));
+    expect(listCalls.length).toBe(listsBefore);
+    expect(db.getDeployRequestStatus(req.id)).toBe('validated');
+    expect(audits('deploy.refused')).toHaveLength(0);
+    expect(audits('policy.refused').map((e) => e.detail)).toEqual([
+      {
+        phase: 'execute',
+        requestId: req.id,
+        kind: 'deploy',
+        reason: 'freeze',
+        rule: FREEZE_RULE,
+        window: 'always',
+      },
+    ]);
+    expect(realDeploys).toBe(0);
+
+    // The human types the emergency reason in Deploy Review (human-only IPC).
+    const reason = 'Checkout is down for every customer of the client.';
+    expect(deps.deploys.reviewGovernance(req.id, { comment: null, emergencyReason: reason })).toEqual({
+      ok: true,
+      commentSource: null,
+    });
+
+    const result = jsonOf(await execute(req.code));
+    expect(result.deployed).toBe(true);
+    expect(realDeploys).toBe(1);
+    const summary = JSON.parse(db.getDeployRequest(req.id)!.summaryJson);
+    expect(summary.execute_target_check).toEqual(result.target_check);
+    expect(summary.governance.freeze_override).toMatchObject({
+      reason,
+      surface: 'deploy_review',
+      rule: FREEZE_RULE,
+      window: 'always',
+    });
+    expect(summary.governance.execute_check).toEqual({
+      at: expect.any(String),
+      rules: [FREEZE_RULE],
+      freeze_active: true,
+      overridden: true,
+      org_id: '00DM',
+      username: null,
+    });
+    expect(JSON.stringify(summary)).not.toContain(req.code);
   });
 
   it('a wrong code with the pre-step still decrements attempts_remaining and audits no_matching_code — no org read', async () => {

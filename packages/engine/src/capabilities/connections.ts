@@ -176,14 +176,38 @@ export const connectionCapabilities: Capability[] = [
     title: 'List connected orgs',
     description:
       'List every connected org with its alias, org identity, type, and grants. Zero-cost ' +
-      'local read — call this instead of guessing which orgs exist.',
+      'local read — call this instead of guessing which orgs exist. ' +
+      'Also reports, per connection, policy: the rules that apply to it — from the ' +
+      "human's config.json, or Contrail's built-in default when that file has no policies " +
+      'section (policies_status.source says which) — whether a justification or ticket is ' +
+      'required (and the ticket pattern), what is denied, the minimum test_level, its ' +
+      'freeze windows and whether one is in effect right now — so a proposal can comply ' +
+      'the first time; policies_status.unmatched_rules names rules whose label or org id ' +
+      'matches no connection on this machine — tell the human, a re-created connection may ' +
+      'have left a rule behind; policies_status also says whether the rules could be read, ' +
+      'and when they could not, every write proposal is refused until the human fixes the ' +
+      'file.',
     grant: null,
     writeClass: false,
     inputSchema: {},
     handler: (deps) =>
       guarded(() => {
-        const list = deps.db.listConnections().map(connectionSummary);
-        return ok({ connections: list, count: list.length });
+        // S46 (B): each connection carries the policy that applies to it now
+        // (null when the policies cannot be read — policies_status says why),
+        // all from ONE read of the policies over ONE listing of connections.
+        const conns = deps.db.listConnections();
+        const policy = deps.deploys.policyListing(conns);
+        const list = conns.map((rec, i) => ({
+          ...connectionSummary(rec),
+          policy: policy.reports[i] ?? null,
+        }));
+        return ok({
+          connections: list,
+          count: list.length,
+          // S46 (B): whether the policies could be read, where they came
+          // from, and any rule that matches no connection on this machine.
+          policies_status: policy.status,
+        });
       }),
   },
   {
@@ -222,8 +246,9 @@ export const connectionCapabilities: Capability[] = [
     name: 'get_audit_log',
     title: 'Read the local audit log',
     description:
-      'Query the local audit log: connection lifecycle, OAuth flows, grant refusals, and ' +
-      '(from later milestones) every deploy and DML decision. Local and exportable.',
+      'Query the local audit log: connection lifecycle, OAuth flows, grant and policy ' +
+      'refusals, freeze overrides, and every deploy, data, Apex, bulk and agent-activation ' +
+      'decision. Local; export_change_evidence writes a per-request dossier from it.',
     grant: null,
     writeClass: false,
     inputSchema: {
@@ -235,11 +260,40 @@ export const connectionCapabilities: Capability[] = [
         .string()
         .optional()
         .describe('ISO 8601 timestamp; only events at or after this instant.'),
+      // S46 (B): the rows that name one request, one event type or family, and an end bound.
+      request_id: z
+        .string()
+        .optional()
+        .describe(
+          'Only events that name this request id (the request_id a validate or propose result ' +
+            'returned) — among them its proposal, phone push, refusals (an execute refused by a ' +
+            'policy included), freeze override, justification edits, execution, and the sweep ' +
+            'that expired it. Supersession by a newer validation is recorded per connection and ' +
+            'is not included; a policy check that passes is recorded on the request, not in the log.',
+        ),
+      event_type: z
+        .string()
+        .optional()
+        .describe(
+          'Only this event type (for example policy.refused), or every type under a prefix ' +
+            'ending in a dot (for example policy.).',
+        ),
+      until: z
+        .string()
+        .optional()
+        .describe('ISO 8601 timestamp; only events at or before this instant.'),
       limit: z.number().int().min(1).max(1000).optional().describe('Max events (default 100).'),
     },
     handler: (deps, rawArgs) =>
       guarded(() => {
-        const args = rawArgs as { connection?: string; since?: string; limit?: number };
+        const args = rawArgs as {
+          connection?: string;
+          since?: string;
+          request_id?: string;
+          event_type?: string;
+          until?: string;
+          limit?: number;
+        };
         let connectionId: string | undefined;
         if (args.connection) {
           const rec = deps.db.resolveConnection(args.connection);
@@ -250,7 +304,16 @@ export const connectionCapabilities: Capability[] = [
           }
           connectionId = rec.id;
         }
-        const events = deps.audit.query({ connectionId, since: args.since, limit: args.limit });
+        // A request_id that is not a request id, or a malformed event_type, is
+        // refused by the query itself — never matched loosely.
+        const events = deps.audit.query({
+          connectionId,
+          since: args.since,
+          until: args.until,
+          requestId: args.request_id,
+          eventType: args.event_type,
+          limit: args.limit,
+        });
         // Snake_case for model consistency with every other capability's output.
         return ok({
           events: events.map((e) => ({

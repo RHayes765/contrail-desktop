@@ -40,6 +40,7 @@ let patches: Array<{ jobId: string; state: string }>;
 let failedRowsByJobIndex: Map<number, number>;
 
 class RecordingPresenter implements ApprovalPresenter {
+  readonly mode = 'page' as const;
   readonly views: ApprovalRequestView[] = [];
   private readonly inner = new ApprovalPageServer(async () => {});
   async present(

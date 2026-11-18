@@ -2,10 +2,18 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ContrailDb, type EngineDeps, type GrantSet } from '@contrail/engine';
+import { fileURLToPath } from 'node:url';
+import {
+  ContrailDb,
+  type AuditLog,
+  type ContrailConfig,
+  type EngineDeps,
+  type GrantSet,
+} from '@contrail/engine';
 import { DeployService } from '../main/services/deploys.js';
 import { AgentSessionRun, type SessionSpec } from '../main/services/agentRuntime.js';
 import { ProjectService } from '../main/services/projects.js';
+import { freezeOn, governanceEngine } from './governance-engine.js';
 
 /**
  * S10 — the M5 adversarial write-safety suite. Every test here is an ATTACK:
@@ -24,6 +32,9 @@ let bulkExecutedOk: boolean;
 let activationExecutedOk: boolean;
 let deps: EngineDeps;
 let service: DeployService;
+/** S46: the real governance engine's config (mutate `config.policies`) and audit log. */
+let config: ContrailConfig;
+let audit: AuditLog;
 
 function grants(over: Partial<GrantSet> = {}): GrantSet {
   return {
@@ -105,7 +116,13 @@ beforeEach(() => {
       db.finishDeployRequest(row.id, 'executed', JSON.stringify(payload));
     }
   };
-  const engine = {
+  // S46 (B): a REAL engine answers the change record and the policy gate
+  // (governanceState, reviewGovernance) — the freeze break-glass is the code
+  // under attack here, never a fake. Only the org-facing calls are stubs.
+  const gov = governanceEngine(db, tmp);
+  config = gov.config;
+  audit = gov.audit;
+  const engine = Object.assign(gov.engine, {
     executeDeploy: async (conn: { id: string }, code: string) => {
       executed.push({ connId: conn.id, code, kind: 'deploy' });
       const result = { deployed: true, id: `deploy-${executed.length}` };
@@ -147,8 +164,8 @@ beforeEach(() => {
       finish(code, result);
       return { status: 'complete', result };
     },
-  };
-  deps = { db, audit: { record: () => undefined }, deploys: engine } as unknown as EngineDeps;
+  });
+  deps = { db, audit, deploys: engine } as unknown as EngineDeps;
   service = new DeployService(deps, () => undefined);
 });
 
@@ -312,7 +329,17 @@ describe('agent-side unreachability of approve/reject', () => {
 
   it('no capability by any approve-ish name exists for the runtime to call', async () => {
     const run = makeRun();
-    for (const name of ['approve', 'reject', 'deploys:approve', 'approve_deploy']) {
+    for (const name of [
+      'approve',
+      'reject',
+      'deploys:approve',
+      'approve_deploy',
+      // S46 (B): the freeze break-glass and the justification edit are the
+      // human's — Deploy Review (and the localhost page) only.
+      'override_freeze',
+      'record_freeze_override',
+      'save_justification',
+    ]) {
       const result = await run.executeCapability(name, { requestId: 'anything', comment: 'x' });
       expect(result.isError, `${name} must not be invocable`).toBe(true);
     }
@@ -651,5 +678,169 @@ describe('agent activation through the native approval seam', () => {
     const connId = seedConnection('developer', 'dev');
     seedRequest(connId, { kind: 'activation', code: 'ACTV-0004', sessionId: 's-z' });
     expect(service.interceptAgentExecute('s-z', 'deploy', connId)).toBeNull();
+  });
+});
+
+// ── S46 (B): the change freeze and its break-glass ───────────────────────
+
+describe('a change freeze holds a request until the human types an emergency reason (S46)', () => {
+  const REASON = 'P1 outage, checkout is down';
+
+  it('approve without a reason is refused: nothing executes, no decision, the held agent call stays held', async () => {
+    config.policies = freezeOn('acme-*');
+    const connId = seedConnection('developer', 'acme-dev');
+    const id = seedRequest(connId, { code: 'FRZN-0001', sessionId: 's-frz' });
+    const held = service.interceptAgentExecute('s-frz', 'deploy', connId);
+    expect(held).not.toBeNull();
+    let settled = false;
+    void held!.then(() => (settled = true));
+    const summaryBefore = db.getDeployRequest(id)!.summaryJson;
+
+    const view = service.get(id);
+    expect(view.governance!.gate).toBe('frozen');
+    expect(JSON.stringify(view)).not.toContain('FRZN-0001');
+
+    await expect(service.approve(id, 'why')).rejects.toThrow(/freeze/i);
+    // 14 characters is one short.
+    await expect(service.approve(id, 'why', 'x'.repeat(14))).rejects.toThrow(/freeze/i);
+    expect(executed).toHaveLength(0);
+    const row = db.getDeployRequest(id)!;
+    expect(row.desktopState).toBeNull();
+    expect(row.status).toBe('validated');
+    expect(row.summaryJson).toBe(summaryBefore);
+    expect(audit.query({ eventType: 'policy.freeze_overridden' })).toEqual([]);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(settled).toBe(false);
+
+    // The human's emergency reason releases THIS request: it executes, and
+    // the override is audited with the surface it was typed on.
+    await service.approve(id, 'why', REASON);
+    expect(executed).toEqual([{ connId, code: 'FRZN-0001', kind: 'deploy' }]);
+    const overridden = audit.query({ eventType: 'policy.freeze_overridden' });
+    expect(overridden).toHaveLength(1);
+    expect(overridden[0]!.detail).toMatchObject({
+      requestId: id,
+      kind: 'deploy',
+      surface: 'deploy_review',
+      rule: 'acme freeze',
+      window: 'always',
+      reason: REASON,
+    });
+    expect(JSON.parse(db.getDeployRequest(id)!.summaryJson).governance.freeze_override).toMatchObject({
+      reason: REASON,
+      surface: 'deploy_review',
+    });
+    const result = await held!;
+    expect(result.isError).not.toBe(true);
+    expect(result.content[0]!.text).toContain('"approved": true');
+    // No audit row, result or view carries the code.
+    expect(JSON.stringify(audit.query({ limit: 1000 }))).not.toContain('FRZN-0001');
+    expect(JSON.stringify(service.get(id))).not.toContain('FRZN-0001');
+  });
+
+  it('the override is for this request only — the next one is frozen again', async () => {
+    config.policies = freezeOn('acme-*');
+    const connId = seedConnection('developer', 'acme-dev');
+    const first = seedRequest(connId, { code: 'FRZN-0002' });
+    await service.approve(first, 'ok', REASON);
+    expect(executed).toHaveLength(1);
+    const second = seedRequest(connId, { code: 'FRZN-0003' });
+    expect(service.get(second).governance!.gate).toBe('frozen');
+    await expect(service.approve(second, 'ok')).rejects.toThrow(/freeze/i);
+    expect(executed).toHaveLength(1);
+  });
+
+  it('no agent-side path reaches the break-glass: the runtime has no such capability and no emergencyReason argument', async () => {
+    config.policies = freezeOn('acme-*');
+    const connId = seedConnection('developer', 'acme-dev');
+    const id = seedRequest(connId, { code: 'FRZN-0004', sessionId: 's-agent' });
+    const run = new AgentSessionRun(
+      { db: { ...worldFor() } } as never,
+      {
+        project: { id: 'p1', name: 'P', description: null, instructions: null },
+        bindings: [],
+        model: 'claude-haiku-4-5',
+        maxTurns: 10,
+        maxBudgetUsd: 0.5,
+      },
+      's-agent',
+      {} as never,
+      () => service,
+    );
+    for (const name of ['override_freeze', 'record_freeze_override', 'save_justification']) {
+      const result = await run.executeCapability(name, {
+        requestId: id,
+        reason: REASON,
+        emergencyReason: REASON,
+        justification: 'x',
+      });
+      expect(result.isError, name).toBe(true);
+    }
+    expect(executed).toHaveLength(0);
+    expect(JSON.parse(db.getDeployRequest(id)!.summaryJson)).not.toHaveProperty('governance');
+    expect(audit.query({ eventType: 'policy.freeze_overridden' })).toEqual([]);
+  });
+
+  function worldFor() {
+    return {
+      resolveConnection: (ref: string) => db.resolveConnection(ref),
+      listProjectBindings: () => [],
+      getProject: (pid: string) => ({ id: pid, name: 'P', description: null, instructions: null }),
+      getServerToggles: () => [],
+    };
+  }
+});
+
+// ── S46 (B): the human-surface allow-list (integration §4.5) ─────────────
+
+describe('the freeze break-glass and the justification edit are human-surface only (source scan)', () => {
+  const HERE = path.dirname(fileURLToPath(import.meta.url));
+  const REPO = path.resolve(HERE, '../../../..');
+  const IDENTIFIERS = /\b(recordFreezeOverride|saveJustification|reviewGovernance)\b/;
+  const ALLOWED = new Set(
+    [
+      'packages/engine/src/deploy/engine.ts',
+      'packages/engine/src/deploy/approval.ts',
+      'apps/desktop/src/main/services/deploys.ts',
+    ].map((p) => path.join(REPO, p)),
+  );
+
+  function walk(dir: string, out: string[]): string[] {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        // Test files may name them; nothing else may.
+        if (entry.name === 'test' || entry.name === 'node_modules' || entry.name === 'dist') continue;
+        walk(full, out);
+      } else if (/\.(ts|tsx|mts|cts|js|mjs)$/.test(entry.name) && !/\.test\.[a-z]+$/.test(entry.name)) {
+        out.push(full);
+      }
+    }
+    return out;
+  }
+
+  it('recordFreezeOverride, saveJustification and reviewGovernance appear only in the engine and the Deploy Review service', () => {
+    const roots = [
+      'packages/engine/src',
+      'packages/agent-runtime/src',
+      'packages/shared/src',
+      'apps/desktop/src/main',
+      'apps/desktop/src/preload',
+      'apps/desktop/src/renderer',
+    ].map((p) => path.join(REPO, p));
+    const files = roots.flatMap((r) => walk(r, []));
+    // The scan really walked the code (a wrong root would pass vacuously).
+    expect(files).toContain(path.join(REPO, 'packages/engine/src/deploy/engine.ts'));
+    expect(files).toContain(path.join(REPO, 'apps/desktop/src/main/services/agentRuntime.ts'));
+    expect(files).toContain(path.join(REPO, 'packages/agent-runtime/src/mint.ts'));
+    expect(files).toContain(path.join(REPO, 'apps/desktop/src/main/ipc/handlers.ts'));
+    const offenders = files.filter(
+      (f) => !ALLOWED.has(f) && IDENTIFIERS.test(fs.readFileSync(f, 'utf8')),
+    );
+    expect(offenders).toEqual([]);
+    // And the allowed files do hold them (the scan is not vacuous).
+    expect(fs.readFileSync(path.join(REPO, 'apps/desktop/src/main/services/deploys.ts'), 'utf8')).toMatch(
+      /reviewGovernance/,
+    );
   });
 });

@@ -5,20 +5,42 @@ import path from 'node:path';
 import {
   ContrailDb,
   ContrailError,
+  REBASELINE_PROGRESS,
   hhmm,
+  policyChangedText,
+  unmatchedRuleText,
   type ApprovalRequestView,
+  type AuditLog,
+  type ContrailConfig,
   type EngineDeps,
+  type GovernanceState,
 } from '@contrail/engine';
+// The engine's own execute-result builder (not re-exported by the package
+// index): the re-baseline note Deploy Review reads is the engine's text.
+import { executeSnapshotResult } from '@contrail/engine/dist/snapshot/members.js';
 import type { ChatEvent, DeployChangeView } from '@contrail/shared';
+import { freezeOn, governanceEngine } from './governance-engine.js';
 import {
   DeployService,
   NativeApprovalPresenter,
+  executePolicyRefusalText,
   targetMovedRefusal,
 } from '../main/services/deploys.js';
 import {
   TARGET_MOVED_LEAD,
+  approveDisabled,
+  blockedAlsoFrozen,
+  blockedClosingText,
+  commentHint,
+  commentLabel,
+  commentPrefill,
+  executeCheckText,
+  expiredReviewText,
+  freezeReviewNote,
   localStamp,
+  rejectComment,
   revertDeleteLabel,
+  snapshotRebaselineLines,
   stateLabel,
   structuredRow,
   targetCheckHeadline,
@@ -43,6 +65,9 @@ let executed: Array<{ connId: string; code: string }>;
 let strandedFinalized: Array<{ requestId: string; error: string; statusAtCall: string | null }>;
 let deps: EngineDeps;
 let service: DeployService;
+/** S46: the real governance engine's config (mutate `config.policies`) and audit log. */
+let config: ContrailConfig;
+let realAudit: AuditLog;
 
 function seedConnection(orgType: string, alias: string): string {
   const grants = {
@@ -86,7 +111,13 @@ beforeEach(() => {
   pushes = [];
   executed = [];
   strandedFinalized = [];
-  const audit = { record: () => undefined };
+  // S46 (B): a REAL engine answers Deploy Review's change record and the
+  // policy gate (governanceState, reviewGovernance) under the built-in rule;
+  // only its org-facing execute calls are the stubs below.
+  const gov = governanceEngine(db, tmp);
+  config = gov.config;
+  realAudit = gov.audit;
+  const audit = gov.audit;
   /**
    * A FAITHFUL engine stub: it claims the row and writes the terminal
    * result exactly as DeployEngine does (validated → executing → executed),
@@ -104,7 +135,7 @@ beforeEach(() => {
       );
     }
   };
-  const deploysEngine = {
+  const deploysEngine = Object.assign(gov.engine, {
     executeDeploy: async (conn: { id: string }, code: string) => {
       executed.push({ connId: conn.id, code });
       const result = { deployed: true, id: 'deploy-1' };
@@ -134,7 +165,7 @@ beforeEach(() => {
         },
       };
     },
-  };
+  });
   deps = { db, audit, deploys: deploysEngine } as unknown as EngineDeps;
   service = new DeployService(deps, (channel, payload) => {
     pushes.push({ channel, payload });
@@ -151,6 +182,9 @@ describe('the code never reaches the renderer (invariant 1)', () => {
     const connId = seedConnection('developer', 'dev-org');
     const requestId = seedRequest(connId, 'QQQQ-WWWW');
     const presenter = new NativeApprovalPresenter();
+    // S46 (B): the mode the engine reads at mint — native keeps the code off
+    // the phone push and records governance.surface 'native'.
+    expect(presenter.mode).toBe('native');
     presenter.attach(service);
     service.expectPresentation('session-1', connId);
     void presenter.present({
@@ -2283,5 +2317,1182 @@ describe('S46 D: stamp sources, absent members and the one dates line in the rev
     }
     // Only absent members is still a check that ran, never "nothing could be compared".
     expect(onlyAbsent).not.toContain('nothing could be compared');
+  });
+});
+
+// ── S46 (B): the change record in Deploy Review ─────────────────────────
+
+describe('S46 B: the change record — the justification is the approval comment', () => {
+  const DRAFT = 'The client asked for the invoice fix to reach their org before month end.';
+  const RULE = 'acme justification';
+  const JUSTIFY = { rules: [{ name: RULE, match: { connections: ['acme-*'] }, requireJustification: true }] };
+
+  /** A request minted by 0.40: its governance record as mintGovernance stores it. */
+  function seedGoverned(
+    connId: string,
+    over: {
+      justification?: Record<string, unknown> | null;
+      ticket?: string | null;
+      destructive?: boolean;
+      code?: string;
+      sessionId?: string;
+      expiresAt?: string;
+    } = {},
+  ): string {
+    const conn = db.getConnection(connId)!;
+    const rec = db.insertDeployRequest({
+      connectionId: connId,
+      kind: 'deploy',
+      confirmationCode: over.code ?? 'GOVR-NNCE',
+      expiresAt: over.expiresAt ?? new Date(Date.now() + 3_600_000).toISOString(),
+      summaryJson: JSON.stringify({
+        changes: [{ type: 'ApexClass', api_name: 'InvoiceService', change: 'modify', warnings: [] }],
+        destructive: [],
+        blast: [],
+        governance: {
+          v: 1,
+          surface: 'native',
+          target: {
+            alias: conn.alias,
+            org_id: conn.orgId,
+            org_name: conn.orgName,
+            org_type: conn.orgType,
+            username: conn.username,
+          },
+          ticket: over.ticket ?? null,
+          justification:
+            over.justification === undefined ? { text: DRAFT, source: 'agent' } : over.justification,
+          inputs: { destructive: over.destructive ?? false, test_level: null },
+          policy: {
+            evaluated_at: new Date().toISOString(),
+            source: 'config',
+            sha256: 'x'.repeat(64),
+            rules: [],
+            requirements: {
+              justification: false,
+              ticket: false,
+              ticketPatterns: [],
+              denyDestructiveMetadata: false,
+              denyDataDeletes: false,
+              denyAnonymousApex: false,
+              minTestLevel: null,
+            },
+            lines: [],
+          },
+          freeze: null,
+          freeze_override: null,
+          execute_check: null,
+        },
+      }),
+    });
+    if (over.sessionId) db.setDeployRequestDesktopFields(rec.id, { sessionId: over.sessionId });
+    return rec.id;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const governanceOf = (id: string) => JSON.parse(db.getDeployRequest(id)!.summaryJson).governance as any;
+  const detailOf = (eventType: string) =>
+    realAudit.query({ eventType }).map((e) => e.detail as Record<string, unknown>);
+
+  it('view().governance carries the agent draft, its provenance, the ticket and the policies — never the code', () => {
+    config.policies = JUSTIFY;
+    const connId = seedConnection('developer', 'acme-dev');
+    const id = seedGoverned(connId, { ticket: 'ACME-42', code: 'VIEW-CODE' });
+    const view = service.get(id);
+    const g = view.governance!;
+    expect(g.ticket).toBe('ACME-42');
+    expect(g.justification).toEqual({
+      text: DRAFT,
+      source: 'agent',
+      provenance: 'Drafted by the agent. Edit it if it is not what you would say.',
+    });
+    expect(g.justificationRequired).toBe(true);
+    expect(g.policySource).toBe('config');
+    expect(g.policyLines).toEqual([`A justification is required (rule "${RULE}").`]);
+    expect(g.gate).toBe('open');
+    expect(g.blockedBy).toBeNull();
+    expect(g.reasonMin).toBe(15);
+    expect(JSON.stringify(view)).not.toContain('VIEW-CODE');
+    // The list carries it too (deploys:changed refreshes read it).
+    expect(service.list().find((r) => r.id === id)!.governance!.ticket).toBe('ACME-42');
+
+    // The review prefills the comment with the draft and says whose it is.
+    expect(commentPrefill(g)).toBe(DRAFT);
+    expect(commentLabel(false, g)).toBe('Approval comment (REQUIRED by policy)');
+    expect(commentLabel(true, g)).toBe('Approval comment (REQUIRED for production)');
+    expect(commentHint(g, DRAFT)).toBe(
+      'Drafted by the agent — edit it if it is not what you would say. Approving records it as ' +
+        'your approval comment; Reject sends a reason only if you type one over it.',
+    );
+    expect(commentHint(g, 'Something else.')).toBe('Edited — recorded as typed in Deploy Review.');
+    expect(commentHint(g, '')).toBeNull();
+  });
+
+  it('approving the draft unchanged confirms it — source agent, confirmed_at, comment_source agent_draft_unchanged', async () => {
+    config.policies = JUSTIFY;
+    const connId = seedConnection('developer', 'acme-dev');
+    const id = seedGoverned(connId, { code: 'CONF-IRMD' });
+    await service.approve(id, DRAFT);
+    expect(executed).toEqual([{ connId, code: 'CONF-IRMD' }]);
+    const j = governanceOf(id).justification;
+    expect(j).toMatchObject({ text: DRAFT, source: 'agent' });
+    expect(typeof j.confirmed_at).toBe('string');
+    expect(detailOf('deploy.approved')[0]).toMatchObject({
+      requestId: id,
+      comment: DRAFT,
+      comment_source: 'agent_draft_unchanged',
+    });
+    expect(detailOf('approval.justification_edited')).toEqual([]);
+    expect(service.get(id).governance!.justification!.provenance).toMatch(
+      /^Drafted by the agent; approved unchanged in Deploy Review at \d\d:\d\d\.$/,
+    );
+  });
+
+  it("approving edited text records the human's words — source page, surface deploy_review, the draft kept", async () => {
+    config.policies = JUSTIFY;
+    const connId = seedConnection('developer', 'acme-dev');
+    const id = seedGoverned(connId);
+    const words = 'Finance signed off on this fix today; it unblocks the month-end run.';
+    await service.approve(id, words);
+    const j = governanceOf(id).justification;
+    expect(j).toMatchObject({
+      text: words,
+      source: 'page',
+      surface: 'deploy_review',
+      agent_draft: DRAFT,
+    });
+    expect(typeof j.edited_at).toBe('string');
+    expect(detailOf('deploy.approved')[0]).toMatchObject({ comment_source: 'typed' });
+    const edited = detailOf('approval.justification_edited');
+    expect(edited).toEqual([
+      {
+        requestId: id,
+        kind: 'deploy',
+        surface: 'deploy_review',
+        chars: words.length,
+        had_agent_draft: true,
+      },
+    ]);
+    // The audit row carries the length, never the text.
+    expect(JSON.stringify(edited)).not.toContain('Finance signed off');
+    // Like every other Deploy Review audit row, its tool is the screen; the
+    // surface in its detail stays 'deploy_review'.
+    expect(realAudit.query({ eventType: 'approval.justification_edited' }).map((e) => e.tool)).toEqual([
+      'deploy_review_screen',
+    ]);
+  });
+
+  it('a text typed earlier on the approval page, approved unchanged, is left as it is — human_text_unchanged', async () => {
+    config.policies = JUSTIFY;
+    const connId = seedConnection('developer', 'acme-dev');
+    const typed = {
+      text: 'Typed by the human on the localhost page.',
+      source: 'page',
+      surface: 'approval_page',
+      edited_at: '2026-11-18T09:03:00.000Z',
+      agent_draft: DRAFT,
+    };
+    const id = seedGoverned(connId, { justification: typed });
+    const g = service.get(id).governance!;
+    expect(commentPrefill(g)).toBe(typed.text);
+    expect(commentHint(g, typed.text)).toBe(
+      `${g.justification!.provenance} Reject sends a reason only if you type one over it.`,
+    );
+    expect(g.justification!.provenance).toMatch(/^Typed on the approval page at \d\d:\d\d\.$/);
+    await service.approve(id, typed.text);
+    expect(governanceOf(id).justification).toEqual(typed);
+    expect(detailOf('deploy.approved')[0]).toMatchObject({ comment_source: 'human_text_unchanged' });
+    expect(detailOf('approval.justification_edited')).toEqual([]);
+  });
+
+  it('a text typed earlier in Deploy Review itself, approved unchanged, is typed — never "typed on the approval page"', async () => {
+    // An earlier approval stored the human's words, then did not reach
+    // execution (an execute-time refusal, or the app quit); the retry
+    // prefills them and the human approves them as they are.
+    config.policies = JUSTIFY;
+    const connId = seedConnection('developer', 'acme-dev');
+    const typed = {
+      text: 'Typed by the human in Deploy Review on the first attempt.',
+      source: 'page',
+      surface: 'deploy_review',
+      edited_at: '2026-11-18T09:03:00.000Z',
+      agent_draft: DRAFT,
+    };
+    const id = seedGoverned(connId, { justification: typed, code: 'RETR-YTYP' });
+    expect(commentPrefill(service.get(id).governance!)).toBe(typed.text);
+    await service.approve(id, typed.text);
+    expect(executed).toEqual([{ connId, code: 'RETR-YTYP' }]);
+    // Nothing new is written: the stored record already says where it was typed.
+    expect(governanceOf(id).justification).toEqual(typed);
+    expect(detailOf('deploy.approved')[0]).toMatchObject({
+      requestId: id,
+      comment: typed.text,
+      comment_source: 'typed',
+    });
+    expect(detailOf('approval.justification_edited')).toEqual([]);
+  });
+
+  it('deleting the prefilled draft and approving with no comment records the justification as cleared in Deploy Review', async () => {
+    // No rule requires a justification here, so an empty comment is allowed.
+    config.policies = { rules: [] };
+    const connId = seedConnection('developer', 'acme-dev');
+    const id = seedGoverned(connId, { code: 'CLER-DRFT' });
+    const g = service.get(id).governance!;
+    expect(g.justificationRequired).toBe(false);
+    expect(approveDisabled({ busy: false, isProd: false, governance: g, comment: '', reason: '' })).toBe(false);
+    await service.approve(id);
+    expect(executed).toEqual([{ connId, code: 'CLER-DRFT' }]);
+    const j = governanceOf(id).justification;
+    expect(j).toMatchObject({ text: '', source: 'page', surface: 'deploy_review', agent_draft: DRAFT });
+    expect(typeof j.edited_at).toBe('string');
+    expect(detailOf('approval.justification_edited')).toEqual([
+      { requestId: id, kind: 'deploy', surface: 'deploy_review', chars: 0, had_agent_draft: true },
+    ]);
+    const approved = detailOf('deploy.approved')[0]!;
+    expect(approved).toMatchObject({ requestId: id, comment: null });
+    expect('comment_source' in approved).toBe(false);
+    expect(service.get(id).governance!.justification!.provenance).toMatch(
+      /^Cleared in Deploy Review at \d\d:\d\d\.$/,
+    );
+  });
+
+  it('validate first, write once: a frozen request approved with no reason is refused and NOTHING is written', async () => {
+    config.policies = { rules: [...JUSTIFY.rules, ...freezeOn('acme-*').rules] };
+    const connId = seedConnection('developer', 'acme-dev');
+    const id = seedGoverned(connId, { sessionId: 's-frozen' });
+    const before = db.getDeployRequest(id)!.summaryJson;
+    const held = service.interceptAgentExecute('s-frozen', 'deploy', connId);
+    expect(held).not.toBeNull();
+    let settled = false;
+    void held!.then(() => (settled = true));
+
+    const g = service.get(id).governance!;
+    expect(g.gate).toBe('frozen');
+    expect(g.freezeLine).toContain('acme freeze');
+    const gate = (reason: string) =>
+      approveDisabled({ busy: false, isProd: false, governance: g, comment: DRAFT, reason });
+    expect(gate('')).toBe(true);
+    expect(gate('x'.repeat(14))).toBe(true);
+    expect(gate('x'.repeat(15))).toBe(false);
+
+    await expect(service.approve(id, DRAFT)).rejects.toThrow(/freeze/i);
+    await expect(service.approve(id, DRAFT, 'too short 14ch')).rejects.toThrow(/at least 15 characters/);
+    expect(executed).toEqual([]);
+    // Byte-identical: no confirmed_at, no override, no decision.
+    expect(db.getDeployRequest(id)!.summaryJson).toBe(before);
+    expect(db.getDeployRequest(id)!.desktopState).toBe(null);
+    expect(detailOf('approval.justification_edited')).toEqual([]);
+    expect(detailOf('policy.freeze_overridden')).toEqual([]);
+    expect(detailOf('deploy.approved')).toEqual([]);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(settled).toBe(false); // the held agent call stays held
+    service.releaseHeldForSession('s-frozen');
+  });
+
+  it('validate first, write once: a blocked gate refuses an edited comment with the policy lines, writing nothing', async () => {
+    config.policies = {
+      rules: [{ name: 'acme no deletes', match: { connections: ['acme-*'] }, denyDestructiveMetadata: true }],
+    };
+    const connId = seedConnection('developer', 'acme-dev');
+    const id = seedGoverned(connId, { destructive: true });
+    const before = db.getDeployRequest(id)!.summaryJson;
+    const g = service.get(id).governance!;
+    expect(g.gate).toBe('blocked');
+    expect(g.blockedBy).toBe('violations');
+    expect(g.blockedOnlyByJustification).toBe(false);
+    expect(g.blockedLines).toHaveLength(1);
+    expect(
+      approveDisabled({ busy: false, isProd: false, governance: g, comment: 'edited words', reason: '' }),
+    ).toBe(true);
+    await expect(service.approve(id, 'Edited words, typed by the human.')).rejects.toThrow(
+      g.blockedLines[0]!,
+    );
+    expect(executed).toEqual([]);
+    expect(db.getDeployRequest(id)!.summaryJson).toBe(before);
+    expect(detailOf('approval.justification_edited')).toEqual([]);
+  });
+
+  it('a row with no justification under a rule that now requires one is approved once the human types a comment', async () => {
+    config.policies = JUSTIFY;
+    const connId = seedConnection('developer', 'acme-dev');
+    const id = seedGoverned(connId, { justification: null, code: 'TYPE-DONE' });
+    const g = service.get(id).governance!;
+    expect(g.justification).toBeNull();
+    expect(g.gate).toBe('blocked');
+    expect(g.blockedOnlyByJustification).toBe(true);
+    // No freeze behind the block: the comment alone releases it.
+    expect(g.freezeActive).toBe(false);
+    expect(blockedAlsoFrozen(g)).toBe(false);
+    expect(blockedClosingText(g, true)).not.toContain('freeze');
+    expect(commentPrefill(g)).toBe('');
+    expect(approveDisabled({ busy: false, isProd: false, governance: g, comment: '', reason: '' })).toBe(true);
+    expect(approveDisabled({ busy: false, isProd: false, governance: g, comment: 'why', reason: '' })).toBe(
+      false,
+    );
+
+    // No comment: the policy refuses, nothing is written.
+    const before = db.getDeployRequest(id)!.summaryJson;
+    await expect(service.approve(id)).rejects.toThrow(/requires a justification/);
+    expect(db.getDeployRequest(id)!.summaryJson).toBe(before);
+
+    const words = 'The client needs this before their auditors arrive on Monday.';
+    await service.approve(id, words);
+    expect(executed).toEqual([{ connId, code: 'TYPE-DONE' }]);
+    const j = governanceOf(id).justification;
+    expect(j).toMatchObject({ text: words, source: 'page', surface: 'deploy_review' });
+    expect('agent_draft' in j).toBe(false);
+  });
+
+  it('a pre-0.40 production row (no governance) still needs the comment, which the built-in rule then takes as its justification', async () => {
+    const connId = seedConnection('production', 'client-prod');
+    const id = seedRequest(connId);
+    const g = service.get(id).governance!;
+    expect(g.policySource).toBe('config');
+    expect(g.gate).toBe('blocked');
+    expect(g.blockedOnlyByJustification).toBe(true);
+    await expect(service.approve(id, '  ')).rejects.toThrow(
+      'Production deploys require an approval comment.',
+    );
+    await service.approve(id, 'change window approved by client');
+    expect(executed).toHaveLength(1);
+    expect(governanceOf(id).justification).toMatchObject({
+      text: 'change window approved by client',
+      source: 'page',
+      surface: 'deploy_review',
+    });
+  });
+
+  it('a pre-0.40 production row blocked only for its justification during a freeze asks for the emergency reason too, and approves with both', async () => {
+    // The built-in rule (production needs a justification) plus a freeze:
+    // the row predates 0.40, so it has no justification and is blocked; the
+    // freeze is in effect behind the block.
+    config.policies = { rules: [...config.policies.rules, ...freezeOn('client-*').rules] };
+    const REASON = 'P1 outage, checkout is down';
+    const words = 'The client needs this before their auditors arrive on Monday.';
+    const connId = seedConnection('production', 'client-prod');
+    const id = seedRequest(connId, 'FRZN-JUST');
+    const g = service.get(id).governance!;
+    expect(g.gate).toBe('blocked');
+    expect(g.blockedOnlyByJustification).toBe(true);
+    expect(g.freezeActive).toBe(true);
+    expect(g.override).toBeNull();
+    expect(g.freezeLine).toContain('acme freeze');
+    expect(blockedAlsoFrozen(g)).toBe(true);
+    expect(blockedClosingText(g, true)).toBe(
+      "This request does not satisfy this connection's policies as they stand now: it needs a " +
+        'justification. Type it as the approval comment below — Approve records it with the ' +
+        'request. A change freeze is also in effect on this connection, so Approve also needs an ' +
+        'emergency reason, typed below. It is recorded in the audit log as a freeze override for ' +
+        'this request only; the freeze itself stays configured.',
+    );
+    // Approve waits for both: the justification and an emergency reason long enough.
+    const gate = (comment: string, reason: string) =>
+      approveDisabled({ busy: false, isProd: true, governance: g, comment, reason });
+    expect(gate('', REASON)).toBe(true);
+    expect(gate(words, '')).toBe(true);
+    expect(gate(words, 'x'.repeat(14))).toBe(true);
+    expect(gate(words, 'x'.repeat(15))).toBe(false);
+
+    // The justification alone: main re-evaluates, the freeze holds it — refused, nothing written.
+    const before = db.getDeployRequest(id)!.summaryJson;
+    await expect(service.approve(id, words)).rejects.toThrow(/freeze/i);
+    expect(executed).toEqual([]);
+    expect(db.getDeployRequest(id)!.summaryJson).toBe(before);
+    expect(db.getDeployRequest(id)!.desktopState).toBe(null);
+    expect(detailOf('approval.justification_edited')).toEqual([]);
+    expect(detailOf('policy.freeze_overridden')).toEqual([]);
+    expect(detailOf('deploy.approved')).toEqual([]);
+
+    // Both: ONE write records the justification and the freeze override, then it executes.
+    await service.approve(id, words, REASON);
+    expect(executed).toEqual([{ connId, code: 'FRZN-JUST' }]);
+    const recorded = governanceOf(id);
+    expect(recorded.justification).toMatchObject({
+      text: words,
+      source: 'page',
+      surface: 'deploy_review',
+    });
+    expect(recorded.freeze_override).toMatchObject({
+      reason: REASON,
+      surface: 'deploy_review',
+      rule: 'acme freeze',
+    });
+    expect(detailOf('approval.justification_edited')).toHaveLength(1);
+    expect(detailOf('policy.freeze_overridden')).toEqual([
+      expect.objectContaining({ requestId: id, surface: 'deploy_review', reason: REASON }),
+    ]);
+    // Both rows are labelled with the screen, like every other Deploy Review row.
+    expect(realAudit.query({ eventType: 'policy.freeze_overridden' }).map((e) => e.tool)).toEqual([
+      'deploy_review_screen',
+    ]);
+    expect(realAudit.query({ eventType: 'approval.justification_edited' }).map((e) => e.tool)).toEqual([
+      'deploy_review_screen',
+    ]);
+    expect(detailOf('deploy.approved')[0]).toMatchObject({ requestId: id, comment_source: 'typed' });
+  });
+
+  it('Reject never relays the prefilled draft as the reason; words typed over it are relayed', async () => {
+    config.policies = JUSTIFY;
+    const connId = seedConnection('developer', 'acme-dev');
+    const id = seedGoverned(connId, { sessionId: 's-rej' });
+    const held = service.interceptAgentExecute('s-rej', 'deploy', connId);
+    await service.reject(id, DRAFT);
+    const result = await held!;
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('REJECTED');
+    expect(result.content[0]!.text).not.toContain('reason:');
+    expect(db.getDeployRequest(id)!.approvedComment).toBeNull();
+    expect(detailOf('deploy.rejected')[0]).toMatchObject({ requestId: id, comment: null });
+    // The renderer sends '' for an untouched draft anyway.
+    expect(rejectComment(DRAFT, DRAFT)).toBe('');
+    expect(rejectComment(`  ${DRAFT}  `, DRAFT)).toBe('');
+    expect(rejectComment('wrong org', DRAFT)).toBe('wrong org');
+
+    const id2 = seedGoverned(connId, { sessionId: 's-rej2', code: 'REJE-CTED' });
+    const held2 = service.interceptAgentExecute('s-rej2', 'deploy', connId);
+    await service.reject(id2, 'wrong org');
+    expect((await held2!).content[0]!.text).toContain('reason: wrong org');
+    expect(db.getDeployRequest(id2)!.approvedComment).toBe('wrong org');
+
+    // An edited justification's agent_draft is never a reason either.
+    const id3 = seedGoverned(connId, {
+      code: 'REJE-DRFT',
+      justification: { text: 'typed', source: 'page', surface: 'approval_page', agent_draft: DRAFT },
+    });
+    await service.reject(id3, DRAFT);
+    expect(db.getDeployRequest(id3)!.approvedComment).toBeNull();
+
+    // No comment at all: unchanged.
+    const id4 = seedGoverned(connId, { code: 'REJE-NONE' });
+    await service.reject(id4);
+    expect(db.getDeployRequest(id4)!.approvedComment).toBeNull();
+    expect(executed).toEqual([]);
+  });
+
+  it('views: the policies-changed line and the unmatched-rule lines are live state — never in summary_json', () => {
+    config.policies = JUSTIFY;
+    const connId = seedConnection('developer', 'acme-dev');
+    const id = seedGoverned(connId);
+    // The first policies ever seen are not a change.
+    expect(service.get(id).governance!.policyChangedLine).toBeNull();
+
+    config.policies = {
+      rules: [
+        ...JUSTIFY.rules,
+        { name: 'old client rule', match: { connections: ['globex-*'] }, requireTicket: true },
+      ],
+    };
+    const g = service.get(id).governance!;
+    const seen = realAudit
+      .query({ eventType: 'policy.config_seen' })
+      .find((e) => e.detail?.changed === true)!;
+    expect(g.policyChangedLine).toBe(policyChangedText(seen.ts));
+    expect(g.unmatchedRuleLines).toEqual([unmatchedRuleText('old client rule')]);
+    const stored = db.getDeployRequest(id)!.summaryJson;
+    expect(stored).not.toContain('Contrail noticed');
+    expect(stored).not.toContain('Not applied to any connection');
+  });
+
+  it("an executed request's view carries its execute-time policy check and the recorded override", async () => {
+    config.policies = { rules: [...JUSTIFY.rules, ...freezeOn('acme-*').rules] };
+    const connId = seedConnection('developer', 'acme-dev');
+    const id = seedGoverned(connId, { code: 'EXCK-0001' });
+    expect(service.get(id).governance!.executeCheck).toBeNull();
+    // The stub execute records what claimCode's patch records (the engine
+    // twins pin that write; this pins what Deploy Review does with it).
+    const stubExecute = (deps.deploys as unknown as { executeDeploy: (c: { id: string }, code: string) => Promise<unknown> })
+      .executeDeploy;
+    (deps.deploys as unknown as { executeDeploy: unknown }).executeDeploy = async (
+      c: { id: string },
+      code: string,
+    ) => {
+      db.patchDeployRequestSummary(id, (s) => ({
+        ...s,
+        governance: {
+          ...(s.governance as Record<string, unknown>),
+          execute_check: {
+            at: '2026-11-18T09:30:00.000Z',
+            rules: [RULE, 'acme freeze'],
+            freeze_active: true,
+            overridden: true,
+            org_id: '00D-acme-dev',
+            username: null,
+          },
+        },
+      }));
+      return stubExecute(c, code);
+    };
+    await service.approve(id, DRAFT, 'P1 outage, checkout is down');
+    const g = service.get(id).governance!;
+    expect(g.gate).toBe('overridden');
+    expect(g.override).toMatchObject({ reason: 'P1 outage, checkout is down' });
+    expect(g.executeCheck).toEqual({
+      at: '2026-11-18T09:30:00.000Z',
+      rules: [RULE, 'acme freeze'],
+      freezeActive: true,
+      overridden: true,
+    });
+    expect(executeCheckText(g)).toBe(
+      `Policies re-checked when it executed (${localStamp('2026-11-18T09:30:00.000Z')}): rules ` +
+        `"${RULE}", "acme freeze"; a change freeze was in effect, released for this request by the ` +
+        'emergency reason.',
+    );
+    expect(executeCheckText(null)).toBeNull();
+  });
+
+  it('built-in default policies say so; a decided row reports what was recorded', async () => {
+    // A wired engine reads config.json, where no policies section means the
+    // built-in rule with source 'default'.
+    (deps.deploys as unknown as { setPolicySource: (f: () => unknown) => void }).setPolicySource(() => ({
+      ok: true,
+      policies: { rules: [] },
+      source: 'default',
+    }));
+    const connId = seedConnection('developer', 'acme-dev');
+    const id = seedGoverned(connId);
+    const g = service.get(id).governance!;
+    expect(g.policySource).toBe('default');
+    expect(g.policyLines).toEqual([]);
+    await service.approve(id, DRAFT);
+    const decided = service.get(id).governance!;
+    expect(decided.gate).toBe('open');
+    expect(decided.justification!.text).toBe(DRAFT);
+    // A pre-0.40 row that is no longer pending has nothing to show.
+    const old = seedRequest(connId, 'OLDR-OWWW');
+    db.updateDeployRequestStatus(old, 'expired');
+    expect(service.get(old).governance).toBeNull();
+  });
+
+  it('a request past its expiry, not yet swept: its gate cards never point at a form that is not shown', () => {
+    // The row stays 'validated' until the next validation's sweep, so its
+    // live gate still renders a card — but Deploy Review shows no comment
+    // box, emergency-reason field or Approve for it.
+    config.policies = { rules: [...JUSTIFY.rules, ...freezeOn('acme-*').rules] };
+    const connId = seedConnection('developer', 'acme-dev');
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const frozen = service.get(seedGoverned(connId, { code: 'EXPD-FRZN', expiresAt: past }));
+    expect(frozen.status).toBe('validated');
+    expect(frozen.governance!.gate).toBe('frozen');
+    expect(stateLabel(frozen)).toBe('Expired');
+    expect(stateLabel({ ...frozen, expiresAt: new Date(Date.now() + 60_000).toISOString() })).toBe(
+      'Awaiting approval',
+    );
+    expect(expiredReviewText(frozen.kind)).toBe(
+      'This request has expired and can no longer be approved — ask the agent to validate it again.',
+    );
+    expect(expiredReviewText('dml')).toBe(
+      'This request has expired and can no longer be approved — ask the agent to propose it again.',
+    );
+    expect(freezeReviewNote(false)).toBeNull();
+    expect(freezeReviewNote(true)).toBe(
+      'While the freeze lasts, Approve stays disabled until you type an emergency reason. It is ' +
+        'recorded in the audit log as a freeze override for this request only; the freeze itself ' +
+        'stays configured.',
+    );
+
+    // Blocked only for its justification, with a freeze behind the block.
+    const blockedId = seedGoverned(connId, { code: 'EXPD-BLKD', expiresAt: past, justification: null });
+    const blocked = service.get(blockedId).governance!;
+    expect(blocked.gate).toBe('blocked');
+    expect(blockedAlsoFrozen(blocked)).toBe(true);
+    expect(blockedClosingText(blocked, false)).toBe(
+      "This request does not satisfy this connection's policies as they stand now: it needs a " +
+        'justification. A change freeze is also in effect on this connection.',
+    );
+    expect(blockedClosingText(blocked, true)).toContain('emergency reason, typed below');
+    // Without the freeze: the missing justification alone.
+    config.policies = JUSTIFY;
+    const alone = service.get(blockedId).governance!;
+    expect(blockedAlsoFrozen(alone)).toBe(false);
+    expect(blockedClosingText(alone, false)).toBe(
+      "This request does not satisfy this connection's policies as they stand now: it needs a " +
+        'justification.',
+    );
+    for (const text of [blockedClosingText(blocked, false), blockedClosingText(alone, false)]) {
+      expect(text).not.toMatch(/below|Approve|Type it/);
+    }
+  });
+
+  describe('a policy refusal at the claim, after the approval in Deploy Review', () => {
+    type EngineSeams = {
+      reviewGovernance: (id: string, input: unknown) => unknown;
+      executeApex: (c: { id: string }, code: string) => Promise<unknown>;
+      executeDeploy: (c: { id: string }, code: string) => Promise<unknown>;
+      setPolicySource: (f: () => unknown) => void;
+    };
+    const engineOf = () => deps.deploys as unknown as EngineSeams;
+    const UNREADABLE = 'policies.rules[0]: unknown key "requireTickets"';
+
+    it('a freeze that begins between the approval and the claim: refused in Deploy Review, nothing runs, the held call stays held', async () => {
+      const REASON = 'P1 outage, checkout is down';
+      const connId = seedConnection('developer', 'acme-dev');
+      const conn = db.resolveConnection(connId)!;
+      db.updateGrants(connId, { ...conn.grants, data_write: true });
+      const id = db.insertDeployRequest({
+        connectionId: connId,
+        kind: 'apex',
+        confirmationCode: 'APEX-FRZN',
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        payloadJson: JSON.stringify({ apex: true, code: 'System.debug(1);' }),
+        summaryJson: JSON.stringify({ changes: [], destructive: [], blast: [] }),
+      }).id;
+      db.setDeployRequestDesktopFields(id, {
+        sessionId: 's-claim',
+        origin: 'desktop',
+        desktopState: 'awaiting_approval',
+      });
+      const events: ChatEvent[] = [];
+      service.attachSessions({ announce: (_s, e) => events.push(e) });
+      const engine = engineOf();
+      // The window: the approval's own check passes, then a freeze window
+      // opens before the claim checks the policies again.
+      const realReview = engine.reviewGovernance.bind(engine);
+      let reviews = 0;
+      engine.reviewGovernance = (rid, input) => {
+        const r = realReview(rid, input);
+        reviews += 1;
+        if (reviews === 1) config.policies = freezeOn('acme-*');
+        return r;
+      };
+      // The engine's REAL claim refuses the first call (assertPolicyAtExecute);
+      // the retry's run is a faithful stub — there is no org here.
+      const realApex = engine.executeApex.bind(engine);
+      let apexCalls = 0;
+      engine.executeApex = async (c, code) => {
+        apexCalls += 1;
+        if (apexCalls === 1) return realApex(c, code);
+        executed.push({ connId: c.id, code });
+        const result = { executed: true };
+        db.claimRequestForExecution(id);
+        db.finishDeployRequest(id, 'executed', JSON.stringify(result));
+        return result;
+      };
+      const held = service.interceptAgentExecute('s-claim', 'apex', connId);
+      expect(held).not.toBeNull();
+      let settled = false;
+      void held!.then(() => (settled = true));
+
+      const refused = await service.approve(id, 'ship it').then(
+        () => null,
+        (err: Error) => err.message,
+      );
+      expect(refused).toMatch(
+        /^Not executed — as execution started, Contrail checked this connection's policies again and they refused this request\. /,
+      );
+      expect(refused).toContain('Nothing ran, and the request is awaiting approval again.');
+      expect(refused).toContain('FREEZE — policy rule "acme freeze" freezes changes to "acme-dev"');
+      expect(refused).toContain('Approving it during the freeze needs an emergency reason.');
+      expect(refused).not.toContain('execution failed');
+      expect(refused).not.toContain('APEX-FRZN');
+      expect(apexCalls).toBe(1);
+      expect(executed).toEqual([]);
+      // Still pending, its code unused, the decision withdrawn.
+      const row = db.getDeployRequest(id)!;
+      expect(row).toMatchObject({
+        status: 'validated',
+        desktopState: 'awaiting_approval',
+        approvedAt: null,
+        approvedComment: null,
+        resultJson: null,
+      });
+      const view = service.get(id);
+      expect(stateLabel(view)).toBe('Awaiting approval');
+      expect(view.deciding).toBe(false);
+      expect(view.governance!.gate).toBe('frozen');
+      // Nothing announced; the held agent call stays held.
+      expect(events).toEqual([]);
+      await new Promise((r) => setTimeout(r, 10));
+      expect(settled).toBe(false);
+      // Both audit rows are true history: the approval, and the claim's refusal.
+      expect(detailOf('deploy.approved')).toHaveLength(1);
+      expect(detailOf('policy.refused')).toEqual([
+        expect.objectContaining({ phase: 'execute', requestId: id, kind: 'apex', reason: 'freeze' }),
+      ]);
+
+      // The human records an emergency reason: the same request runs once,
+      // and the held call gets the real outcome.
+      await service.approve(id, 'ship it', REASON);
+      expect(executed).toEqual([{ connId, code: 'APEX-FRZN' }]);
+      const result = await held!;
+      expect(result.isError).not.toBe(true);
+      expect(result.content[0]!.text).toContain('"approved": true');
+      expect(events).toEqual([{ type: 'approval_resolved', requestId: id, outcome: 'executed' }]);
+      expect(db.getDeployRequest(id)!.desktopState).toBe('approved');
+    });
+
+    it('config.json unreadable at a deploy claim: pending again, and the timed-out hold says it awaits the user', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout'] });
+      try {
+        config.policies = { rules: [] };
+        const connId = seedConnection('developer', 'acme-dev');
+        const id = seedGoverned(connId, { code: 'UNRD-CNFG', sessionId: 's-unrd' });
+        const engine = engineOf();
+        const stubDeploy = engine.executeDeploy;
+        // The engine's REAL execute: its policy check runs before any job.
+        engine.executeDeploy = Object.getPrototypeOf(engine).executeDeploy.bind(engine);
+        const realReview = engine.reviewGovernance.bind(engine);
+        engine.reviewGovernance = (rid, input) => {
+          const r = realReview(rid, input);
+          engine.setPolicySource(() => ({ ok: false, problem: UNREADABLE }));
+          return r;
+        };
+        const events: ChatEvent[] = [];
+        service.attachSessions({ announce: (_s, e) => events.push(e) });
+        const held = service.interceptAgentExecute('s-unrd', 'deploy', connId)!;
+
+        const refused = await service.approve(id, DRAFT).then(
+          () => null,
+          (err: Error) => err.message,
+        );
+        expect(refused).toMatch(/^Not executed — /);
+        expect(refused).toContain(
+          'Nothing ran, and the request is awaiting approval again. Contrail could not read the ' +
+            `policies in config.json: ${UNREADABLE}`,
+        );
+        expect(db.getDeployRequest(id)).toMatchObject({
+          status: 'validated',
+          desktopState: null,
+          approvedAt: null,
+          approvedComment: null,
+        });
+        expect(executed).toEqual([]);
+        expect(events).toEqual([]);
+        expect(detailOf('policy.refused')).toEqual([
+          expect.objectContaining({ phase: 'execute', requestId: id, reason: 'config_unreadable' }),
+        ]);
+
+        vi.advanceTimersByTime(5 * 60_000);
+        const answer = await held;
+        expect(answer.isError).toBeUndefined();
+        expect(JSON.parse(answer.content[0]!.text)).toMatchObject({
+          status: 'awaiting_approval',
+          request_id: id,
+        });
+        expect(answer.content[0]!.text).not.toContain('execution is starting');
+        expect(answer.content[0]!.text).not.toContain('execution failed');
+
+        // The file fixed, the same request approves and runs once.
+        engine.reviewGovernance = realReview;
+        engine.setPolicySource(() => ({ ok: true, policies: config.policies, source: 'config' }));
+        engine.executeDeploy = stubDeploy;
+        await service.approve(id, DRAFT);
+        expect(executed).toEqual([{ connId, code: 'UNRD-CNFG' }]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a deploy poll's refusal while the job still re-checks the target is not the outcome — the job's claim decides", async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout'] });
+      try {
+        config.policies = { rules: [] };
+        const connId = seedConnection('developer', 'acme-dev');
+        const scenario = async (code: string, sessionId: string, jobClaims: boolean) => {
+          const id = seedGoverned(connId, { code, sessionId });
+          let calls = 0;
+          // The first call starts the job (its target re-check outlives the
+          // soft-wait); a poll's own policy check meets config.json mid-save
+          // and refuses, while the job goes on to its claim.
+          engineOf().executeDeploy = async (c, used) => {
+            calls += 1;
+            if (calls === 1) {
+              return {
+                status: 'in_progress',
+                progress: 're-checking the target org before claiming the code',
+                started_at: new Date().toISOString(),
+              };
+            }
+            if (calls === 2) {
+              if (jobClaims) setTimeout(() => db.claimRequestForExecution(id), 5_000);
+              throw new ContrailError(
+                `POLICY CHECK FAILED CLOSED — not executed. Contrail could not read the policies in config.json: ${UNREADABLE}.`,
+                'policy_unreadable',
+              );
+            }
+            // Re-attached to the job, which claimed the code and ran it.
+            executed.push({ connId: c.id, code: used });
+            const result = { deployed: true, id: 'deploy-race' };
+            db.finishDeployRequest(id, 'executed', JSON.stringify(result));
+            return { status: 'complete', result };
+          };
+          const held = service.interceptAgentExecute(sessionId, 'deploy', connId)!;
+          const approving = service.approve(id, DRAFT).then(
+            () => null,
+            (err: Error) => err.message,
+          );
+          await vi.advanceTimersByTimeAsync(2_500);
+          expect(calls).toBe(2);
+          await vi.advanceTimersByTimeAsync(25_000);
+          return { id, held, refused: await approving, calls };
+        };
+
+        // The job claimed despite the poll's refusal: it ran, and says so.
+        const ran = await scenario('RACE-RANN', 's-ran', true);
+        expect(ran.refused).toBeNull();
+        expect(ran.calls).toBe(3);
+        expect(executed).toEqual([{ connId, code: 'RACE-RANN' }]);
+        expect(db.getDeployRequest(ran.id)).toMatchObject({ status: 'executed', desktopState: 'approved' });
+        expect((await ran.held).content[0]!.text).toContain('"approved": true');
+
+        // The job's claim was refused too: nothing ran, once its claim is decided.
+        const stopped = await scenario('RACE-STOP', 's-stop', false);
+        expect(stopped.calls).toBe(2);
+        expect(stopped.refused).toMatch(/^Not executed — /);
+        expect(executed).toHaveLength(1);
+        expect(db.getDeployRequest(stopped.id)).toMatchObject({ status: 'validated', desktopState: null });
+        service.releaseHeldForSession('s-stop');
+        expect((await stopped.held).content[0]!.text).toContain('session ended');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('the refusal says what the policies require now, from the live gate (no org)', () => {
+      const lead =
+        "Not executed — as execution started, Contrail checked this connection's policies again " +
+        'and they refused this request. Nothing ran, and the request is awaiting approval again.';
+      const g = (over: Partial<GovernanceState>) =>
+        ({ gate: 'open', blockedBy: null, blockedLines: [], freezeLine: null, ...over }) as GovernanceState;
+      expect(
+        executePolicyRefusalText(
+          g({
+            gate: 'blocked',
+            blockedBy: 'violations',
+            blockedLines: [
+              'policy rule "a" requires a ticket for every change to "acme-dev"',
+              'policy rule "b" denies anonymous Apex on "acme-dev"',
+            ],
+          }),
+        ),
+      ).toBe(
+        `${lead} What blocks it now: policy rule "a" requires a ticket for every change to ` +
+          '"acme-dev"; policy rule "b" denies anonymous Apex on "acme-dev"',
+      );
+      expect(executePolicyRefusalText(g({ gate: 'frozen', freezeLine: 'FREEZE — rule x.' }))).toBe(
+        `${lead} FREEZE — rule x. Approving it during the freeze needs an emergency reason.`,
+      );
+      for (const gate of ['open', 'overridden'] as const) {
+        expect(executePolicyRefusalText(g({ gate }))).toBe(
+          `${lead} The policies allow it now — approve it again to run it.`,
+        );
+      }
+    });
+
+    it('a hold that times out on an approved request says "execution is starting" only while the approval is in flight', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout'] });
+      try {
+        // An approval an app quit interrupted: recorded, nothing in flight.
+        const connId = seedConnection('developer', 'dev-org');
+        const quit = seedRequest(connId, 'QUIT-APPR');
+        db.setDeployRequestDesktopFields(quit, { sessionId: 's-quit', origin: 'desktop' });
+        db.recordDeployDecision(quit, 'approved', 'go');
+        const idle = service.interceptAgentExecute('s-quit', 'deploy', connId)!;
+        vi.advanceTimersByTime(5 * 60_000);
+        const idleText = (await idle).content[0]!.text;
+        expect(JSON.parse(idleText)).toMatchObject({ status: 'awaiting_approval', request_id: quit });
+        expect(idleText).not.toContain('execution is starting');
+
+        // An approval in flight (its target re-check still running): starting.
+        const conn2 = seedConnection('developer', 'dev-org-2');
+        const live = seedRequest(conn2, 'LIVE-APPR');
+        db.setDeployRequestDesktopFields(live, { sessionId: 's-live', origin: 'desktop' });
+        let release!: () => void;
+        const guard = new Promise<void>((r) => (release = r));
+        const stub = engineOf().executeDeploy;
+        engineOf().executeDeploy = async (c, code) => {
+          await guard;
+          return stub(c, code);
+        };
+        const held = service.interceptAgentExecute('s-live', 'deploy', conn2)!;
+        const approving = service.approve(live, 'go');
+        vi.advanceTimersByTime(5 * 60_000);
+        expect(JSON.parse((await held).content[0]!.text)).toEqual({
+          status: 'executing',
+          request_id: live,
+          note: 'The user approved it and execution is starting. Call again shortly for the outcome.',
+        });
+        release();
+        await approving;
+        expect(executed).toEqual([{ connId: conn2, code: 'LIVE-APPR' }]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+});
+
+// ── S46 (C): the snapshot re-baseline after an executed deploy ──────────
+
+describe('S46 C: the re-baseline result in Deploy Review', () => {
+  const member = (type: string, api_name: string) => ({ type, api_name });
+  const block = (over: Record<string, unknown>) => ({
+    status: 'complete',
+    rebaselined: [member('ApexClass', 'Foo')],
+    removed: [],
+    skipped: [],
+    note: 'The local snapshot was updated for this deploy.',
+    ...over,
+  });
+  let seq = 0;
+
+  function seedExecuted(connId: string, snapshot: Record<string, unknown>): string {
+    seq += 1;
+    const id = seedRequest(connId, `EXEC-${String(seq).padStart(4, '0')}`);
+    db.claimRequestForExecution(id);
+    db.finishDeployRequest(id, 'executed', JSON.stringify({ deployed: true, id: 'd', snapshot }));
+    return id;
+  }
+
+  it('approve() during the re-baseline window shows pending while deciding, then resolves the held call with the FINAL block', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    try {
+      const connId = seedConnection('developer', 'dev-org');
+      const id = seedRequest(connId, 'REBA-SELN');
+      db.setDeployRequestDesktopFields(id, { sessionId: 's-rb' });
+      const held = service.interceptAgentExecute('s-rb', 'deploy', connId);
+      const pendingBlock = block({ status: 'pending', rebaselined: [], note: 'still re-reading' });
+      const finalBlock = block({});
+      let calls = 0;
+      let midView: ReturnType<DeployService['get']> | null = null;
+      (deps.deploys as unknown as { executeDeploy: unknown }).executeDeploy = async () => {
+        calls += 1;
+        if (calls === 1) {
+          // finishExecution stored the row 'executed' with snapshot pending;
+          // the engine is still re-reading — the call returns in-progress.
+          db.claimRequestForExecution(id);
+          db.finishDeployRequest(id, 'executed', JSON.stringify({ deployed: true, snapshot: pendingBlock }));
+          midView = service.get(id);
+          return { status: 'in_progress', job_id: 'x', progress: 'deployed — re-reading' };
+        }
+        const result = { deployed: true, snapshot: finalBlock };
+        db.amendDeployRequestResult(id, JSON.stringify(result));
+        return { status: 'complete', result };
+      };
+      const approving = service.approve(id, 'go');
+      await vi.advanceTimersByTimeAsync(3_000);
+      const view = await approving;
+
+      expect(calls).toBe(2);
+      expect(midView!.deciding).toBe(true);
+      expect(midView!.snapshotRebaseline!.status).toBe('pending');
+      expect(snapshotRebaselineLines(midView!.snapshotRebaseline, midView!.deciding)).toEqual({
+        notice: false,
+        text: 'Updating the local snapshot for this deploy…',
+        rows: [],
+      });
+      expect(view.deciding).toBe(false);
+      expect(view.snapshotRebaseline!.status).toBe('complete');
+      const result = await held!;
+      expect(result.isError).not.toBe(true);
+      expect(result.content[0]!.text).toContain('"status": "complete"');
+      expect(result.content[0]!.text).not.toContain('"pending"');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a pending row with no approval in flight reads deciding false and says the snapshot may be stale', () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const id = seedExecuted(connId, block({ status: 'pending', rebaselined: [], note: 'n' }));
+    const view = service.get(id);
+    expect(view.deciding).toBe(false);
+    expect(view.snapshotRebaseline!.status).toBe('pending');
+    expect(snapshotRebaselineLines(view.snapshotRebaseline, view.deciding)).toEqual({
+      notice: true,
+      text:
+        'No finished snapshot update is recorded for this deploy — the snapshot may be stale for ' +
+        'its components.',
+      rows: [],
+    });
+  });
+
+  it('a failed_after_write view carries the reason and says the snapshot may be only partly updated', () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const note = 'the re-read stopped while writing; run refresh_snapshot with members to repair it.';
+    const id = seedExecuted(
+      connId,
+      block({ status: 'unavailable', reason: 'failed_after_write', rebaselined: [], note }),
+    );
+    const view = service.get(id);
+    expect(view.snapshotRebaseline).toMatchObject({
+      status: 'unavailable',
+      reason: 'failed_after_write',
+      note,
+    });
+    expect(snapshotRebaselineLines(view.snapshotRebaseline, false)).toEqual({
+      notice: true,
+      text: `Local snapshot may be only partly updated — ${note}`,
+      rows: [],
+    });
+    const timeout = service.get(
+      seedExecuted(connId, block({ status: 'unavailable', reason: 'timeout', rebaselined: [], note: 'n1' })),
+    );
+    expect(timeout.snapshotRebaseline!.reason).toBe('timeout');
+    expect(snapshotRebaselineLines(timeout.snapshotRebaseline, false)!.text).toBe(
+      'Local snapshot NOT updated — n1',
+    );
+  });
+
+  it('complete, partial, none and disabled say what was updated (renderer-free)', () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const complete = service.get(
+      seedExecuted(connId, block({ removed: [member('ApexClass', 'Old')] })),
+    ).snapshotRebaseline;
+    expect(complete!.reason).toBeNull();
+    expect(snapshotRebaselineLines(complete, false)).toEqual({
+      notice: false,
+      text: 'Local snapshot updated for 2 component(s).',
+      rows: [],
+    });
+    const skipped = [
+      { ...member('Layout', 'Account-Account Layout'), code: 'not_confirmed', reason: 'not confirmed' },
+    ];
+    const partial = service.get(seedExecuted(connId, block({ status: 'partial', skipped }))).snapshotRebaseline;
+    expect(partial!.skipped).toEqual([
+      { type: 'Layout', apiName: 'Account-Account Layout', code: 'not_confirmed', reason: 'not confirmed' },
+    ]);
+    expect(snapshotRebaselineLines(partial, false)).toEqual({
+      notice: false,
+      text: 'Local snapshot updated for 1 of 2 component(s). Not updated:',
+      rows: ['Layout Account-Account Layout — not confirmed'],
+    });
+    const none = service.get(
+      seedExecuted(connId, block({ status: 'none', rebaselined: [], skipped })),
+    ).snapshotRebaseline;
+    expect(snapshotRebaselineLines(none, false)).toEqual({
+      notice: false,
+      text: 'Local snapshot not updated for this deploy:',
+      rows: ['Layout Account-Account Layout — not confirmed'],
+    });
+    const disabled = service.get(
+      seedExecuted(connId, block({ status: 'disabled', rebaselined: [] })),
+    ).snapshotRebaseline;
+    expect(disabled!.status).toBe('disabled');
+    expect(snapshotRebaselineLines(disabled, false)).toBeNull();
+    // A pre-0.40 result has no block.
+    const plain = seedRequest(connId, 'PLAI-NRES');
+    db.claimRequestForExecution(plain);
+    db.finishDeployRequest(plain, 'executed', JSON.stringify({ deployed: true }));
+    expect(service.get(plain).snapshotRebaseline).toBeNull();
+    expect(snapshotRebaselineLines(null, false)).toBeNull();
+  });
+
+  it("a 'none' that still re-wrote a parent document says so — never 'not updated' over rows that contradict it", () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const field = member('CustomField', 'Invoice__c.Due__c');
+    // The engine's own result for a deployed field its re-read object no
+    // longer holds: the field is skipped, yet the object's document was
+    // written (`units`) — or, with no unit written, nothing was.
+    const ran = (units: string[]) =>
+      executeSnapshotResult(
+        {
+          status: 'ran',
+          summary: {
+            connection: 'dev-org',
+            members: [
+              { ...field, outcome: 'skipped', unit: 'CustomObject:Invoice__c', reason: 'child_not_in_parent' },
+            ],
+            counts: { refreshed: 0, removed: 0, skipped: 1 },
+            units,
+            artifact_counts: {},
+            edge_counts: { extractor: 0 },
+            retrieved_at: '2026-11-18T09:00:00.000Z',
+            notes: [],
+            duration_ms: 5,
+          },
+        },
+        [field],
+        60_000,
+      );
+    const seed = (r: { snapshot: unknown; note: string }, code: string) => {
+      const id = seedRequest(connId, code);
+      db.claimRequestForExecution(id);
+      db.finishDeployRequest(id, 'executed', JSON.stringify({ deployed: true, id: 'd', ...r }));
+      return id;
+    };
+    const wrote = service.get(seed(ran(['CustomObject:Invoice__c']), 'NONE-WROT')).snapshotRebaseline!;
+    expect(wrote.status).toBe('none');
+    expect(wrote.wroteDocuments).toBe(true);
+    expect(wrote.skipped).toHaveLength(1);
+    expect(snapshotRebaselineLines(wrote, false)).toEqual({
+      notice: false,
+      text:
+        'No component in this deploy was re-baselined, but Contrail re-wrote in the local snapshot ' +
+        'a parent document or folder it re-read for them:',
+      rows: [`CustomField Invoice__c.Due__c — ${wrote.skipped[0]!.reason}`],
+    });
+    const nothing = service.get(seed(ran([]), 'NONE-NOTH')).snapshotRebaseline!;
+    expect(nothing.status).toBe('none');
+    expect(nothing.wroteDocuments).toBe(false);
+    expect(snapshotRebaselineLines(nothing, false)!.text).toBe('Local snapshot not updated for this deploy:');
+    // Only a 'none' can carry it.
+    const complete = service.get(seedExecuted(connId, block({}))).snapshotRebaseline!;
+    expect(complete.wroteDocuments).toBe(false);
+  });
+
+  it('an agent call during the re-baseline window waits for the final block — never the stored "pending" one', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    try {
+      const connId = seedConnection('developer', 'dev-org');
+      const id = seedRequest(connId, 'REPL-AYRB');
+      db.setDeployRequestDesktopFields(id, { sessionId: 's-rp' });
+      // Held now; its hold lapses inside the re-read window below.
+      const held = service.interceptAgentExecute('s-rp', 'deploy', connId)!;
+      const pendingBlock = block({ status: 'pending', rebaselined: [], note: 'still re-reading' });
+      const finalBlock = block({});
+      let calls = 0;
+      let finishReread!: () => void;
+      const reread = new Promise<void>((r) => (finishReread = r));
+      (deps.deploys as unknown as { executeDeploy: unknown }).executeDeploy = async () => {
+        calls += 1;
+        if (calls === 1) {
+          // finishExecution stored the row 'executed' with snapshot pending.
+          db.claimRequestForExecution(id);
+          db.finishDeployRequest(id, 'executed', JSON.stringify({ deployed: true, snapshot: pendingBlock }));
+          return { status: 'in_progress', job_id: 'x', progress: REBASELINE_PROGRESS };
+        }
+        await reread;
+        const result = { deployed: true, snapshot: finalBlock };
+        db.amendDeployRequestResult(id, JSON.stringify(result));
+        return { status: 'complete', result };
+      };
+      const approving = service.approve(id, 'go');
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(calls).toBe(2);
+
+      const REREAD = {
+        status: 'executing',
+        request_id: id,
+        note:
+          'The user approved it and the deploy has completed in the org; Contrail is still ' +
+          're-reading the deployed components into the local snapshot. Call again shortly for ' +
+          'the final outcome.',
+      };
+      // Nothing is pending, so a codeless call replays the row — but not its pending block.
+      const replay = await service.interceptAgentExecute('s-rp', 'deploy', connId)!;
+      expect(JSON.parse(replay.content[0]!.text)).toEqual(REREAD);
+      // The earlier call's hold lapses in the same window: the same answer.
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(JSON.parse((await held).content[0]!.text)).toEqual(REREAD);
+
+      finishReread();
+      await approving;
+      const after = (await service.interceptAgentExecute('s-rp', 'deploy', connId)!).content[0]!.text;
+      expect(after).toContain('"approved": true');
+      expect(after).toContain('"status": "complete"');
+      expect(after).not.toContain('"pending"');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a stored "pending" block with no approval in flight is replayed as stored (its note says it may be stale)', async () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const id = seedExecuted(connId, block({ status: 'pending', rebaselined: [], note: 'may be stale' }));
+    db.setDeployRequestDesktopFields(id, { sessionId: 's-st' });
+    db.recordDeployDecision(id, 'approved', 'go');
+    const text = (await service.interceptAgentExecute('s-st', 'deploy', connId)!).content[0]!.text;
+    expect(text).toContain('"approved": true');
+    expect(text).toContain('"status": "pending"');
   });
 });

@@ -248,7 +248,9 @@ code, so iterate deliberately, not reflexively:
 Follow **salesforce-house-rules §3**: present the validate summary (target org named
 first; destructive changes and any `permission_warning` leading), the human reads the
 confirmation code from the approval page in their browser, then `execute_deploy` with
-the code they give you, then `refresh_snapshot`.
+the code they give you — Contrail then re-reads the deployed components into the
+snapshot itself (`refresh_snapshot` only for what the result's `snapshot` block
+reports as not updated).
 
 ## Coverage expectations
 

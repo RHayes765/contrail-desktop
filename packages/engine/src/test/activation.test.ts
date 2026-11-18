@@ -35,6 +35,7 @@ let postResult: { isActivated: boolean; messages: string[]; success: boolean };
 let getResult: { isActivated: boolean; messages: string[]; success: boolean };
 
 class RecordingPresenter implements ApprovalPresenter {
+  readonly mode = 'page' as const;
   readonly views: ApprovalRequestView[] = [];
   private readonly inner = new ApprovalPageServer(async () => {});
   async present(

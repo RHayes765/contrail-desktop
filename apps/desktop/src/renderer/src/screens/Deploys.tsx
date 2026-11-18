@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type {
+  DeployGovernanceView,
   DeployRequestView,
   DeployReviewRowView,
   DeployRowDiffView,
@@ -7,9 +8,23 @@ import type {
   ObjectAutomationView,
 } from '@contrail/shared';
 import {
+  EMERGENCY_REASON_LABEL,
   TARGET_MOVED_LEAD,
+  approveDisabled,
+  blockedAlsoFrozen,
+  blockedClosingText,
+  commentHint,
+  commentLabel,
+  commentPrefill,
+  executeCheckText,
+  expiredReviewText,
+  freezeReviewNote,
   localStamp,
+  overrideRecordedText,
+  policyHeading,
+  rejectComment,
   revertDeleteLabel,
+  snapshotRebaselineLines,
   stateLabel,
   structuredRow,
   targetCheckHeadline,
@@ -246,9 +261,182 @@ function TargetCheckSection({
   );
 }
 
+/**
+ * S46 (B): the emergency-reason field — the human's break-glass for this
+ * request only. Rendered by the frozen card, and by the blocked card when
+ * the only thing missing is a justification while a freeze is also in effect.
+ */
+function EmergencyReasonField({
+  reasonMin,
+  reason,
+  setReason,
+}: {
+  reasonMin: number;
+  reason: string;
+  setReason: (value: string) => void;
+}) {
+  return (
+    <div className="form-row">
+      <label>{EMERGENCY_REASON_LABEL}</label>
+      <textarea
+        rows={3}
+        maxLength={1000}
+        value={reason}
+        onChange={(e) => setReason(e.target.value)}
+        placeholder="Why this cannot wait until the freeze ends"
+      />
+      <p className="hint">
+        At least {reasonMin} characters. Kept with this request in the audit log and the
+        change-evidence dossier.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * S46 (B): the gate card under the target — a change freeze (with the
+ * emergency-reason field, the human's break-glass for this request only),
+ * a freeze overridden for this request, or a policy block. A request
+ * blocked only for a missing justification while a freeze is also in
+ * effect asks for the emergency reason in its blocked card too: once the
+ * justification is typed, the freeze holds it. Nothing for an open gate.
+ * `approvable`: the comment form is on the screen — the cards point at its
+ * fields only then. Every value renders as text.
+ */
+function GateSection({
+  governance,
+  approvable,
+  reason,
+  setReason,
+}: {
+  governance: DeployGovernanceView;
+  approvable: boolean;
+  reason: string;
+  setReason: (value: string) => void;
+}) {
+  if (governance.gate === 'frozen') {
+    const note = freezeReviewNote(approvable);
+    return (
+      <div className="deploy-section deploy-destructive deploy-freeze">
+        <h3>CHANGE FREEZE</h3>
+        {governance.freezeLine && <div className="deploy-row">{governance.freezeLine}</div>}
+        {note && <div className="deploy-row">{note}</div>}
+        {approvable && (
+          <EmergencyReasonField
+            reasonMin={governance.reasonMin}
+            reason={reason}
+            setReason={setReason}
+          />
+        )}
+      </div>
+    );
+  }
+  if (governance.gate === 'overridden') {
+    return (
+      <div className="deploy-section deploy-destructive deploy-freeze">
+        <h3>CHANGE FREEZE — OVERRIDDEN FOR THIS REQUEST</h3>
+        {governance.freezeLine && <div className="deploy-row">{governance.freezeLine}</div>}
+        {governance.override && (
+          <div className="deploy-row">{overrideRecordedText(governance.override)}</div>
+        )}
+      </div>
+    );
+  }
+  if (governance.gate === 'blocked') {
+    const alsoFrozen = blockedAlsoFrozen(governance);
+    return (
+      <div className={`deploy-section deploy-destructive${alsoFrozen ? ' deploy-freeze' : ''}`}>
+        <h3>BLOCKED BY POLICY</h3>
+        {governance.blockedLines.map((line, i) => (
+          <div key={i} className="deploy-warning">
+            ⚠ {line}
+          </div>
+        ))}
+        <div className="deploy-row">{blockedClosingText(governance, approvable)}</div>
+        {alsoFrozen && governance.freezeLine && (
+          <div className="deploy-row">{governance.freezeLine}</div>
+        )}
+        {alsoFrozen && approvable && (
+          <EmergencyReasonField
+            reasonMin={governance.reasonMin}
+            reason={reason}
+            setReason={setReason}
+          />
+        )}
+      </div>
+    );
+  }
+  return null;
+}
+
+/**
+ * S46 (B): the Change record — the policies-changed sentence, the ticket
+ * (read-only), the justification and whose words it is, and the policies
+ * that apply to this connection now. A pending request edits its
+ * justification through the approval comment below; a decided one shows
+ * what was recorded.
+ */
+function ChangeRecordSection({
+  governance,
+  pending,
+  editable,
+}: {
+  governance: DeployGovernanceView;
+  /** The request is still 'validated': the policies are evaluated now. */
+  pending: boolean;
+  /** The approval comment below holds the justification (the form is shown). */
+  editable: boolean;
+}) {
+  const j = governance.justification;
+  return (
+    <div className="deploy-section">
+      <h3>Change record</h3>
+      {governance.policyChangedLine && (
+        <div className="deploy-warning">⚠ {governance.policyChangedLine}</div>
+      )}
+      <div className="deploy-row">Ticket: {governance.ticket ?? 'none given'}</div>
+      {!editable && (
+        <div className="deploy-row">
+          <div>Justification: {j && j.text !== '' ? j.text : 'none given'}</div>
+          {j && <div className="deploy-source">{j.provenance}</div>}
+        </div>
+      )}
+      {!pending && executeCheckText(governance) && (
+        <div className="deploy-source">{executeCheckText(governance)}</div>
+      )}
+      {pending && governance.blockedBy !== 'unreadable' && (
+        <div className="deploy-row">
+          <div className="meter-dim">{policyHeading(governance.policySource)}</div>
+          {governance.policyLines.length > 0 ? (
+            <ul className="deploy-nc">
+              {governance.policyLines.map((line, i) => (
+                <li key={i}>{line}</li>
+              ))}
+            </ul>
+          ) : (
+            <div className="deploy-source">No policy rule applies to this connection.</div>
+          )}
+        </div>
+      )}
+      {pending &&
+        governance.unmatchedRuleLines.map((line, i) => (
+          <div key={i} className="deploy-source">
+            {line}
+          </div>
+        ))}
+    </div>
+  );
+}
+
 function ReviewPanel({ request }: { request: DeployRequestView }) {
   const { approve, reject, deciding, error, clearError } = useDeploys();
-  const [comment, setComment] = useState('');
+  // S46 (B): the comment box starts with the request's justification — the
+  // agent's draft — so approving it unchanged confirms the draft; the panel
+  // is keyed by request id, so the prefill is per request.
+  const governance = request.governance;
+  const prefill = commentPrefill(governance);
+  const [comment, setComment] = useState(prefill);
+  const [reason, setReason] = useState('');
   const isProd = request.orgType === 'production';
   const expired = new Date(request.expiresAt).getTime() < Date.now();
   // `deciding`: an approve/reject is already in flight in main — a reloaded
@@ -287,6 +475,10 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
     request.automation.length > 0 ||
     (request.kind === 'apex' && request.automationNotCovered.length > 0);
   const revert = request.revertPackage;
+  const hint = commentHint(governance, comment);
+  // S46 (C): the post-deploy snapshot re-read; `pending` reads by whether
+  // this app's approval is still in flight.
+  const snapshotLines = snapshotRebaselineLines(request.snapshotRebaseline, request.deciding);
 
   return (
     <div className="panel">
@@ -310,6 +502,15 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
           {stateLabel(request)} · expires {new Date(request.expiresAt).toLocaleTimeString()}
         </div>
       </div>
+
+      {governance && (
+        <GateSection
+          governance={governance}
+          approvable={approvable && describable}
+          reason={reason}
+          setReason={setReason}
+        />
+      )}
 
       {request.warnings.length > 0 && (
         <div className="notice">
@@ -417,6 +618,14 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
         </div>
       )}
 
+      {governance && (
+        <ChangeRecordSection
+          governance={governance}
+          pending={request.status === 'validated'}
+          editable={approvable && describable}
+        />
+      )}
+
       {request.approvedAt && (
         <p className="conn-detail meter-dim">
           {request.desktopState === 'rejected' ? 'Rejected' : 'Approved'}{' '}
@@ -458,6 +667,17 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
       {request.resultSummary && (
         <div className="deploy-section">
           <h3>Result</h3>
+          {snapshotLines &&
+            (snapshotLines.notice ? (
+              <div className="notice">⚠ {snapshotLines.text}</div>
+            ) : (
+              <div className="deploy-row">{snapshotLines.text}</div>
+            ))}
+          {snapshotLines?.rows.map((row, i) => (
+            <div key={i} className="deploy-source">
+              {row}
+            </div>
+          ))}
           <pre className="diff-raw">{request.resultSummary}</pre>
         </div>
       )}
@@ -510,6 +730,11 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
         </div>
       )}
 
+      {/* Past its expiry but not yet closed by the engine: no form below. */}
+      {request.status === 'validated' && request.desktopState !== 'rejected' && expired && (
+        <div className="notice">{expiredReviewText(request.kind)}</div>
+      )}
+
       {approvable && !describable && (
         <div className="notice">
           This request carries no reviewable detail in Contrail — it was created outside this app
@@ -521,30 +746,33 @@ function ReviewPanel({ request }: { request: DeployRequestView }) {
       {approvable && describable && (
         <>
           <div className="form-row">
-            <label>
-              {isProd
-                ? 'Approval comment (REQUIRED for production)'
-                : 'Approval comment (optional)'}
-            </label>
+            <label>{commentLabel(isProd, governance)}</label>
             <textarea
               rows={2}
+              maxLength={1000}
               value={comment}
               onChange={(e) => setComment(e.target.value)}
-              placeholder={isProd ? 'Why this is going to production now' : ''}
+              placeholder={
+                isProd || governance?.justificationRequired
+                  ? 'Why this change is being made now'
+                  : ''
+              }
             />
+            {hint && <p className="hint">{hint}</p>}
           </div>
           <div className="form-actions">
             <button
               className="primary"
-              disabled={busy || (isProd && !comment.trim())}
-              onClick={() => void approve(request.id, comment)}
+              disabled={approveDisabled({ busy, isProd, governance, comment, reason })}
+              onClick={() => void approve(request.id, comment, reason)}
             >
               {busy ? 'Executing…' : `Approve & execute on ${request.alias}`}
             </button>
             <button
               className="ghost-danger"
               disabled={busy}
-              onClick={() => void reject(request.id, comment)}
+              // S46 (B): the prefilled draft is never sent as the reason.
+              onClick={() => void reject(request.id, rejectComment(comment, prefill))}
             >
               Reject
             </button>
@@ -582,7 +810,9 @@ export function DeploysScreen() {
           <button className="crumb" onClick={close}>
             ← All requests
           </button>
-          <ReviewPanel request={current} />
+          {/* Keyed by request: the comment prefill and the emergency reason
+              belong to one request and never carry over to the next. */}
+          <ReviewPanel key={current.id} request={current} />
         </>
       ) : requests === null ? (
         <div className="empty">Loading…</div>

@@ -23,6 +23,7 @@ import type {
   NotificationTestView,
   OrgLimitsView,
   PingResultView,
+  PoliciesView,
   ProjectDocView,
   ProjectFolderView,
   ProjectMcpView,
@@ -63,6 +64,8 @@ export const REQUEST_SCHEMAS = {
   'connections:remove': z.object({ id: ID }),
   'connections:ping': z.object({ id: ID }),
   'connections:limits': z.object({ id: ID }),
+  // S46 (B): the policies that apply to each connection (read-only).
+  'connections:policies': z.object({}),
   'connections:setGrants': z.object({
     id: ID,
     grants: z.object({
@@ -209,7 +212,13 @@ export const REQUEST_SCHEMAS = {
 
   'deploys:list': z.object({ connectionId: ID.optional() }),
   'deploys:get': z.object({ id: ID }),
-  'deploys:approve': z.object({ id: ID, comment: z.string().max(1000).optional() }),
+  // S46 (B): `emergencyReason` is the human's freeze break-glass — typed in
+  // Deploy Review, recorded as a freeze override for this request only.
+  'deploys:approve': z.object({
+    id: ID,
+    comment: z.string().max(1000).optional(),
+    emergencyReason: z.string().max(1000).optional(),
+  }),
   'deploys:reject': z.object({ id: ID, comment: z.string().max(1000).optional() }),
 
   // Project manifest (S28): what this project's sessions changed, through
@@ -250,6 +259,7 @@ export interface Contracts {
   'connections:remove': { req: { id: string }; res: { ok: boolean; detail: string | null } };
   'connections:ping': { req: { id: string }; res: PingResultView };
   'connections:limits': { req: { id: string }; res: OrgLimitsView };
+  'connections:policies': { req: Record<string, never>; res: PoliciesView };
   'connections:setGrants': {
     req: { id: string; grants: GrantSetView };
     res: ConnectionView;
@@ -402,7 +412,10 @@ export interface Contracts {
 
   'deploys:list': { req: { connectionId?: string }; res: DeployRequestView[] };
   'deploys:get': { req: { id: string }; res: DeployRequestView };
-  'deploys:approve': { req: { id: string; comment?: string }; res: DeployRequestView };
+  'deploys:approve': {
+    req: { id: string; comment?: string; emergencyReason?: string };
+    res: DeployRequestView;
+  };
   'deploys:reject': { req: { id: string; comment?: string }; res: DeployRequestView };
 
   'manifest:list': { req: { projectId: string }; res: ProjectManifestView };
@@ -458,6 +471,24 @@ export interface PushEvents {
   'deploys:changed': { requestId: string | null };
   /** An execution landed in the project manifest — its Manifest tab is stale. */
   'manifest:changed': { projectId: string };
+  /**
+   * S46 (C): a member-scoped re-read (refresh_snapshot members, or the
+   * re-baseline after a deploy) changed these components in a connection's
+   * snapshot — its status, type counts and open lists are stale. A member's
+   * `unit` is the document re-read for it, `Type:Name` (a FlowDefinition's
+   * Flow, a child's parent CustomObject), null when none was; `units` lists
+   * every document the run wrote or removed, members or not.
+   */
+  'metadata:changed': {
+    connectionId: string;
+    members: Array<{
+      type: string;
+      apiName: string;
+      outcome: 'refreshed' | 'removed';
+      unit: string | null;
+    }>;
+    units: string[];
+  };
 }
 
 export type PushChannel = keyof PushEvents;

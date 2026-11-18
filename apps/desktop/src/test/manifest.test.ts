@@ -1,11 +1,18 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { strToU8, zipSync } from 'fflate';
 import {
+  AccessTokenManager,
+  AuditLog,
   ContrailDb,
+  DEFAULT_CONFIG,
+  DeployEngine,
+  MemoryTokenStore,
   SnapshotStore,
+  type ApprovalPresenter,
+  type ContrailConfig,
   type DeployRequestRecord,
   type EngineDeps,
 } from '@contrail/engine';
@@ -130,6 +137,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   db.close();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -394,6 +402,170 @@ describe('capture (the execution observer body)', () => {
       service.capture({ request, payload: { deployed: true }, payloadPath: null }),
     ).not.toThrow();
     expect(db.listManifestEntries(projectId)).toHaveLength(0);
+  });
+});
+
+describe('S46 C: the re-baseline after execute leaves the captured before-side alone', () => {
+  const MD = 'xmlns="http://soap.sforce.com/2006/04/metadata"';
+
+  function soapEnvelope(inner: string): string {
+    return (
+      '<?xml version="1.0" encoding="UTF-8"?>\n' +
+      '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">' +
+      `<soapenv:Body>${inner}</soapenv:Body></soapenv:Envelope>`
+    );
+  }
+
+  /**
+   * The org a real execute_deploy talks to: a token, the real deploy and its
+   * status. Every other read (the execute-time target check's) answers 404,
+   * so that guard fails open with disclosure and the deploy proceeds.
+   */
+  function stubOrg(): void {
+    vi.stubGlobal('fetch', async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/services/oauth2/token')) {
+        return new Response(
+          JSON.stringify({
+            access_token: 'AT-stub',
+            instance_url: 'https://mani.stub.salesforce.com',
+            id: 'https://login.example.invalid/id/00DM/005M',
+            token_type: 'Bearer',
+          }),
+        );
+      }
+      const body = String(init?.body ?? '');
+      if (url.includes('/services/Soap/m/') && body.includes('<met:deploy>')) {
+        return new Response(
+          soapEnvelope(`<deployResponse ${MD}><result><id>0Af-real-1</id></result></deployResponse>`),
+        );
+      }
+      if (url.includes('/services/Soap/m/') && body.includes('<met:checkDeployStatus>')) {
+        return new Response(
+          soapEnvelope(
+            `<checkDeployStatusResponse ${MD}><result>` +
+              '<done>true</done><status>Succeeded</status><success>true</success>' +
+              '<checkOnly>false</checkOnly><createdDate>2026-11-18T09:00:01.000Z</createdDate>' +
+              '<completedDate>2026-11-18T09:00:09.000Z</completedDate>' +
+              '<numberComponentsTotal>1</numberComponentsTotal>' +
+              '<numberComponentsDeployed>1</numberComponentsDeployed>' +
+              '<numberComponentErrors>0</numberComponentErrors><numberTestsTotal>0</numberTestsTotal>' +
+              '<numberTestsCompleted>0</numberTestsCompleted><numberTestErrors>0</numberTestErrors>' +
+              '<details><runTestResult><numTestsRun>0</numTestsRun><numFailures>0</numFailures>' +
+              '</runTestResult></details></result></checkDeployStatusResponse>',
+          ),
+        );
+      }
+      return new Response('not found', { status: 404 });
+    });
+  }
+
+  /** A presenter that never presents — this case executes a seeded request. */
+  const noPresenter: ApprovalPresenter = {
+    mode: 'native',
+    present: () => Promise.resolve({ url: null, opened: false, mode: 'native' }),
+    close: () => {},
+  };
+
+  it("capture's before-side is the pre-deploy snapshot: the observer runs before the re-baseline rewrites it, and the snapshot holds the new bytes once execute resolves", async () => {
+    const tokens = new MemoryTokenStore();
+    tokens.setRefreshToken(connId, 'RT-stub');
+    const config: ContrailConfig = {
+      ...DEFAULT_CONFIG,
+      salesforce: { ...DEFAULT_CONFIG.salesforce },
+      oauth: { ...DEFAULT_CONFIG.oauth },
+      deploy: { ...DEFAULT_CONFIG.deploy, pollIntervalMs: 5, toolWaitMs: 10_000 },
+    };
+    // The re-baseline is on by default — the hook this case orders capture against.
+    expect(config.snapshot.rebaselineAfterDeploy).toBe(true);
+    const engine = new DeployEngine(
+      db,
+      store,
+      new AccessTokenManager(db, tokens, config),
+      config,
+      new AuditLog(db),
+      noPresenter,
+      { deploysDir: path.join(tmp, 'deploys') },
+    );
+    const order: string[] = [];
+    // Wired exactly as main/index.ts wires it.
+    engine.setExecutionObserver((info) => {
+      order.push('capture');
+      service.capture(info);
+    });
+    // Stands in for the snapshot engine's member re-read (the engine twin
+    // rebaseline.test.ts pins that one): it rewrites the deployed class in
+    // the snapshot through the same store call, the moment it is called — so
+    // a capture that read the snapshot any later would read the new bytes.
+    engine.setSnapshotRebaseliner(async ({ members }) => {
+      order.push('rebaseline');
+      store.replaceCurrentUnits(connId, {
+        removeFiles: [],
+        removeDirs: [],
+        bundleTypeDirs: [],
+        files: new Map([['classes/InvoiceService.cls', strToU8(NEW_CLASS)]]),
+      });
+      return {
+        status: 'ran',
+        summary: {
+          connection: 'mani-org',
+          members: members.map((m) => ({
+            type: m.type,
+            api_name: m.api_name,
+            outcome: 'refreshed' as const,
+            unit: `${m.type}:${m.api_name}`,
+          })),
+          counts: { refreshed: members.length, removed: 0, skipped: 0 },
+          units: members.map((m) => `${m.type}:${m.api_name}`),
+          artifact_counts: { ApexClass: 1 },
+          edge_counts: { extractor: 0 },
+          retrieved_at: new Date().toISOString(),
+          notes: [],
+          duration_ms: 1,
+        },
+      };
+    });
+    stubOrg();
+
+    const payloadPath = path.join(tmp, 'deploys', 'frozen-execute.zip');
+    fs.mkdirSync(path.dirname(payloadPath), { recursive: true });
+    fs.writeFileSync(
+      payloadPath,
+      zipSync({
+        'classes/InvoiceService.cls': strToU8(NEW_CLASS),
+        'package.xml': strToU8('<Package/>'),
+      }),
+    );
+    const rec = db.insertDeployRequest({
+      connectionId: connId,
+      kind: 'deploy',
+      confirmationCode: 'MANI-FEST',
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      payloadPath,
+      payloadJson: JSON.stringify({ testLevel: 'NoTestRun' }),
+      summaryJson: JSON.stringify({
+        changes: [{ type: 'ApexClass', api_name: 'InvoiceService', change: 'modify', warnings: [] }],
+        destructive: [],
+        blast: [],
+      }),
+    });
+    db.setDeployRequestDesktopFields(rec.id, { sessionId });
+
+    const outcome = await engine.executeDeploy(db.getConnection(connId)!, 'MANI-FEST');
+    expect(outcome.status).toBe('complete');
+    const result = (outcome as { result: Record<string, unknown> }).result;
+    expect(result.deployed).toBe(true);
+    expect((result.snapshot as { status: string }).status).toBe('complete');
+    expect(order).toEqual(['capture', 'rebaseline']);
+
+    // The manifest's before is what the snapshot held before the deploy.
+    const [entry] = db.listManifestEntries(projectId);
+    expect(entry!.apiName).toBe('InvoiceService');
+    expect(entry!.beforeContent).toBe(OLD_CLASS);
+    expect(entry!.afterContent).toBe(NEW_CLASS);
+    expect(JSON.parse(entry!.detailJson!).baseline).toBe('snapshot');
+    // …and the snapshot itself holds the deployed bytes once the call resolves.
+    expect(store.readCurrentFile(connId, 'classes/InvoiceService.cls')).toBe(NEW_CLASS);
   });
 });
 

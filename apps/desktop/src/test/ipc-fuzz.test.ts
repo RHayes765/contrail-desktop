@@ -123,4 +123,40 @@ describe('representative typed-field enforcement', () => {
     expect(notif.safeParse({ method: 'pushover', summary: 'full', pushoverUser: 'u'.repeat(30) }).success).toBe(true);
     expect(notif.safeParse({ method: 'none', summary: 'minimal' }).success).toBe(true);
   });
+
+  it('S46: the approve channel bounds the emergency reason; the policies channel takes no input', () => {
+    const approve = REQUEST_SCHEMAS['deploys:approve'] as z.ZodTypeAny;
+    expect(approve.safeParse({ id: 'r1' }).success).toBe(true);
+    expect(approve.safeParse({ id: 'r1', comment: 'why', emergencyReason: 'P1 outage, checkout is down' }).success).toBe(
+      true,
+    );
+    expect(approve.safeParse({ id: 'r1', emergencyReason: 'x'.repeat(1001) }).success).toBe(false);
+    expect(approve.safeParse({ id: 'r1', emergencyReason: 42 }).success).toBe(false);
+    expect(approve.safeParse({ id: 'r1', comment: 'x'.repeat(1001) }).success).toBe(false);
+    expect(approve.safeParse({ emergencyReason: 'P1 outage, checkout is down' }).success).toBe(false);
+
+    const policies = REQUEST_SCHEMAS['connections:policies'] as z.ZodTypeAny;
+    expect(policies.safeParse({}).success).toBe(true);
+    expect(policies.safeParse('config.json').success).toBe(false);
+  });
+
+  it('S46: an over-long emergency reason never reaches the approve handler', async () => {
+    const spies = new Map<string, ReturnType<typeof vi.fn>>();
+    const handlers: Record<string, unknown> = {};
+    for (const channel of channels) {
+      const spy = vi.fn(() => ({ ok: true }));
+      spies.set(channel, spy);
+      handlers[channel] = spy;
+    }
+    registerHandlers({} as EngineDeps, handlers as never);
+    await expect(
+      stub._invoke('deploys:approve', { id: 'r1', emergencyReason: 'x'.repeat(1001) }),
+    ).rejects.toThrow(/Invalid request/);
+    expect(spies.get('deploys:approve')!).not.toHaveBeenCalled();
+    await stub._invoke('deploys:approve', { id: 'r1', emergencyReason: 'P1 outage, checkout is down' });
+    expect(spies.get('deploys:approve')!.mock.calls[0]![1]).toEqual({
+      id: 'r1',
+      emergencyReason: 'P1 outage, checkout is down',
+    });
+  });
 });

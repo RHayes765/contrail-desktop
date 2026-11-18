@@ -1,7 +1,7 @@
 import { ContrailDb } from './db.js';
 import { KeychainTokenStore, type TokenStore } from './keychain.js';
 import { AuditLog } from './audit.js';
-import { loadConfig, readConfigSection, type ContrailConfig } from './config.js';
+import { loadConfig, loadPolicies, readConfigSection, type ContrailConfig } from './config.js';
 import { deploysDir } from './paths.js';
 import { ConnectFlowManager, type FlowOps } from '../connect/flow.js';
 import { AccessTokenManager } from '../salesforce/tokens.js';
@@ -47,6 +47,12 @@ export interface EngineDeps {
    * (which reads its status, tests it, and resets its circuit breaker).
    */
   notifier: ApprovalNotifier;
+  /**
+   * S46 (B): the host's release version, printed in the change-evidence
+   * dossier (the plugin prints its ENGINE_VERSION). The engine package has no
+   * release version of its own; the desktop host passes app.getVersion().
+   */
+  appVersion?: string;
 }
 
 /** Injection seams. Every field optional; defaults reproduce production wiring. */
@@ -63,6 +69,8 @@ export interface EngineOverrides {
   localDiag?: LocalDiagRunner;
   /** S42: tests inject a fake; the default is the real Pushover client. */
   notifier?: ApprovalNotifier;
+  /** S46 (B): the host's release version (EngineDeps.appVersion). */
+  appVersion?: string;
 }
 
 export function createEngineDeps(overrides?: EngineOverrides): EngineDeps {
@@ -77,6 +85,18 @@ export function createEngineDeps(overrides?: EngineOverrides): EngineDeps {
   const deploys = new DeployEngine(db, store, tokenMgr, config, audit, overrides?.approvals, {
     deploysDir: overrides?.deploysDir ?? deploysDir(),
   });
+  // S46: after a successful deploy, re-read its components into the local
+  // snapshot (snapshot.rebaselineAfterDeploy; a test harness opts out there).
+  deploys.setSnapshotRebaseliner((i) =>
+    engine.rebaselineMembers(i.conn, i.members, {
+      timeoutMs: i.timeoutMs,
+      requestId: i.requestId,
+      deleted: i.deleted,
+    }),
+  );
+  // S46: policies are re-read from config.json at every check, so an edit
+  // applies without a restart; an injected config (tests) keeps its own.
+  if (!overrides?.config) deploys.setPolicySource(loadPolicies);
   // An injected config object is authoritative (tests); the loaded one is
   // re-synced from disk per send so a change saved on the plugin's page lands.
   const notifier =
@@ -93,5 +113,18 @@ export function createEngineDeps(overrides?: EngineOverrides): EngineDeps {
       timeoutMs: config.localDiagnostics.timeoutMs,
       workspaceRoot: path.join(dataDir(), 'localdiag-workspace'),
     });
-  return { db, tokens, audit, config, flows, tokenMgr, store, engine, deploys, localDiag, notifier };
+  return {
+    db,
+    tokens,
+    audit,
+    config,
+    flows,
+    tokenMgr,
+    store,
+    engine,
+    deploys,
+    localDiag,
+    notifier,
+    ...(overrides?.appVersion !== undefined ? { appVersion: overrides.appVersion } : {}),
+  };
 }

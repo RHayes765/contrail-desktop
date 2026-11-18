@@ -181,6 +181,10 @@ describe('request-keyed refresh jobs', () => {
         types,
         observeJobId !== undefined ? { observeJobId } : undefined,
       );
+      // S46: an observeJobId poll may deliver a member job; every job here is a type refresh.
+      if (outcome.status === 'complete' && outcome.kind !== 'types') {
+        throw new Error(`job ${observeJobId ?? '(by types)'} completed as a member refresh`);
+      }
       if (outcome.status !== 'in_progress') return outcome;
       await new Promise((r) => setTimeout(r, 10));
     }

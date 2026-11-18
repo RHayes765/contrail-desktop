@@ -45,6 +45,35 @@ export interface ConnectionView {
   lastUsedAt: string | null;
 }
 
+/**
+ * S46 (B): the policies that apply to one connection right now (the
+ * engine's list_connections report, read-only). From the human's
+ * config.json, or Contrail's built-in rule when it has no policies section.
+ */
+export interface ConnectionPolicyView {
+  rules: string[];
+  requiresJustification: boolean;
+  requiresTicket: boolean;
+  ticketPatterns: string[];
+  denies: Array<'destructive_metadata' | 'data_deletes' | 'anonymous_apex'>;
+  minTestLevel: string | null;
+  freezeWindows: Array<{ rule: string; name: string; when: string; timeZone: string }>;
+  freezeNow: { rule: string; window: string; until: string } | null;
+}
+
+/** S46 (B): every connection's policy from ONE read of config.json's policies. */
+export interface PoliciesView {
+  status: 'ok' | 'unreadable';
+  /** ok: where the rules came from ('default' = the built-in rule). null when unreadable. */
+  source: 'default' | 'config' | null;
+  /** unreadable: why config.json's policies could not be read. */
+  problem: string | null;
+  /** One sentence per rule whose label or org id matches no connection on this machine. */
+  unmatchedRuleLines: string[];
+  /** connection id → its policy; absent when unreadable. */
+  byConnection: Record<string, ConnectionPolicyView>;
+}
+
 export interface HealthView {
   ok: boolean;
   appVersion: string;
@@ -134,8 +163,19 @@ export interface SnapshotStatusView {
   connectionId: string;
   artifactCount: number;
   edgeCount: number;
-  /** Newest indexed artifact's retrieval time — null when never synced. */
+  /**
+   * Newest indexed artifact's retrieval time — null when never synced. It
+   * moves on ANY index change — cache keys and "results are historical"
+   * checks (always together with artifactCount: a removal-only member run
+   * moves no timestamp, only the count).
+   */
   lastIndexedAt: string | null;
+  /**
+   * S46 (C): oldest whole-type refresh among the default sync types — what
+   * "synced … ago" and `stale` report; a re-baseline after a deploy never
+   * moves it. null when never synced.
+   */
+  syncedAt: string | null;
   /** A sync is running right now (this app instance). */
   syncing: boolean;
   /** Live progress line while syncing. */
@@ -909,8 +949,101 @@ export interface DeployRequestView {
     at: string;
     notes: string | null;
   } | null;
+  /**
+   * S46 (B): the change record and the policy state — ticket, justification
+   * and who wrote it, the policies that apply now, and the gate (open,
+   * frozen, overridden, blocked). Evaluated live for a pending request; a
+   * decided one reports what was recorded. null for a request with nothing
+   * recorded that is no longer pending. Code-free.
+   */
+  governance: DeployGovernanceView | null;
+  /**
+   * S46 (C): what the automatic re-read of the deployed components into the
+   * local snapshot did (result_json.snapshot). null when the result carries
+   * no snapshot block (not a deploy, not executed, or executed before 0.40).
+   */
+  snapshotRebaseline: DeploySnapshotRebaselineView | null;
   /** Human summary of the terminal outcome; null while pending. */
   resultSummary: string | null;
+}
+
+/**
+ * S46 (B): a request's change record and policy state as Deploy Review
+ * shows it. Every line is composed in main from the engine's own sentence
+ * builders (core/policy.ts), so the review prints the approval page's words.
+ * policyChangedLine and unmatchedRuleLines are live state — never stored.
+ */
+export interface DeployGovernanceView {
+  ticket: string | null;
+  /** null: no justification was given. `source` says who wrote the stored text. */
+  justification: {
+    text: string;
+    source: 'agent' | 'page';
+    /** The hint under the text (engine justificationProvenance). */
+    provenance: string;
+  } | null;
+  /** The policies require a justification for this request. */
+  justificationRequired: boolean;
+  /** 'default' = Contrail's built-in rule (config.json has no policies section). */
+  policySource: 'default' | 'config';
+  policyLines: string[];
+  unmatchedRuleLines: string[];
+  /** The policies-changed sentence, while Contrail noticed a change in the last 24 hours. */
+  policyChangedLine: string | null;
+  gate: 'open' | 'frozen' | 'overridden' | 'blocked';
+  blockedBy: 'unreadable' | 'violations' | null;
+  /** Blocked only because a required justification is missing — typing one releases it. */
+  blockedOnlyByJustification: boolean;
+  /** The freeze banner's line (frozen; overridden while the freeze lasts or as recorded). */
+  freezeLine: string | null;
+  /**
+   * A change freeze applies to this request: frozen, overridden, or — the
+   * case this flag exists for — blocked while a freeze is also in effect
+   * now (the live verdict). Typing a missing justification then leaves the
+   * request frozen, so Approve needs an emergency reason as well.
+   */
+  freezeActive: boolean;
+  /** The emergency reason the human recorded, and when. */
+  override: { reason: string; at: string } | null;
+  /** blocked: each violation, or why the policies could not be read. */
+  blockedLines: string[];
+  /** The shortest emergency reason accepted (characters). */
+  reasonMin: number;
+  /**
+   * The policy check recorded when the request executed (governance.
+   * execute_check): when, the rules that applied, and whether a change
+   * freeze was in effect and released by an emergency reason. null until
+   * the request executes, and for a request executed before 0.40.
+   */
+  executeCheck: {
+    at: string;
+    rules: string[];
+    freezeActive: boolean;
+    overridden: boolean;
+  } | null;
+}
+
+/** S46 (C): one component a post-deploy snapshot re-read names. */
+export interface DeploySnapshotMemberView {
+  type: string;
+  apiName: string;
+}
+
+/** S46 (C): result_json.snapshot of an executed deploy. */
+export interface DeploySnapshotRebaselineView {
+  status: 'complete' | 'partial' | 'none' | 'unavailable' | 'disabled' | 'pending';
+  /** The `unavailable` reason (timeout, locked, failed_after_write, …); null otherwise. */
+  reason: string | null;
+  rebaselined: DeploySnapshotMemberView[];
+  removed: DeploySnapshotMemberView[];
+  skipped: Array<DeploySnapshotMemberView & { code: string; reason: string }>;
+  note: string;
+  /**
+   * `none` only: no component was re-baselined, yet Contrail re-wrote in the
+   * snapshot a document it re-read for them (a parent document or a folder).
+   * false for every other status.
+   */
+  wroteDocuments: boolean;
 }
 
 /**

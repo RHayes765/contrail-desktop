@@ -299,7 +299,10 @@ export class DiffService {
     if (a.id === b.id) throw new Error('Pick two different connections to diff.');
 
     // Cache key: both orgs' newest indexed timestamps AND row counts — a
-    // delete-only re-sync moves no timestamp, but it moves the count.
+    // delete-only re-sync moves no timestamp, but it moves the count. S46
+    // (C): the pair, never syncedAt — a member-scoped re-read (the
+    // re-baseline after a deploy) changes content without moving syncedAt,
+    // and a removal-only one moves only the count.
     const statusA = this.deps.db.getSnapshotStatus(a.id);
     const statusB = this.deps.db.getSnapshotStatus(b.id);
     if (statusA.artifactCount === 0 || statusB.artifactCount === 0) {

@@ -46,6 +46,43 @@ describe('canonicalReviewHash', () => {
     expect(c).not.toBe(a);
   });
 
+  it('S46 dml: the top-level ticket and justification are not reviewed content', () => {
+    const base = { operation: 'update', object: 'Invoice__c', records: [{ Id: 'a01x', Status__c: 'Paid' }] };
+    const reviewed = canonicalReviewHash({ kind: 'dml', args: base });
+    // Adding the change record, or rewording the justification, needs no new review.
+    expect(
+      canonicalReviewHash({
+        kind: 'dml',
+        args: { ...base, ticket: 'ACME-42', justification: 'Month-end close needs these paid.' },
+      }),
+    ).toBe(reviewed);
+    expect(
+      canonicalReviewHash({
+        kind: 'dml',
+        args: { ...base, justification: 'Reworded: the client asked for these to be marked paid.' },
+      }),
+    ).toBe(reviewed);
+    // A record value, an id, the operation or the object still changes it.
+    for (const args of [
+      { ...base, records: [{ Id: 'a01x', Status__c: 'Void' }] },
+      { ...base, records: [{ Id: 'a01y', Status__c: 'Paid' }] },
+      { ...base, operation: 'delete' },
+      { ...base, object: 'Account' },
+    ]) {
+      expect(canonicalReviewHash({ kind: 'dml', args: { ...args, ticket: 'ACME-42' } })).not.toBe(
+        reviewed,
+      );
+    }
+    // Only TOP-LEVEL keys are dropped: a field named justification inside a
+    // record is a value the reviewer saw.
+    expect(
+      canonicalReviewHash({
+        kind: 'dml',
+        args: { ...base, records: [{ Id: 'a01x', Status__c: 'Paid', justification: 'x' }] },
+      }),
+    ).not.toBe(reviewed);
+  });
+
   it('deploy: component listing order is irrelevant; content vs content_file with the same bytes is identical', () => {
     const file = path.join(tmp, 'Thing.cls');
     fs.writeFileSync(file, 'public class Thing { }');

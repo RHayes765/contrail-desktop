@@ -55,8 +55,29 @@ function fakeWorld() {
     getProject: (id: string) =>
       projects.has(id) ? { id, name: 'P', description: null, instructions: null } : null,
     getServerToggles: (projectId: string) => (projectId === 'p1' ? [...toggles] : []),
+    listConnections: () => [...connections.values()],
   };
-  return { connections, bindings, projects, toggles, deps: { db } as unknown as EngineDeps };
+  // S46 (B): list_connections' policy fields. A fake of the engine's ONE-read
+  // listing: what it was asked about is recorded, and each connection's
+  // report names the connection, so a test sees which report landed where.
+  const policyCalls: Array<string[]> = [];
+  const deploys = {
+    policyListing: (conns: ConnectionRecord[]) => {
+      policyCalls.push(conns.map((c) => c.id));
+      return {
+        reports: conns.map((c) => ({ rules: [`rule for ${c.alias}`], requires_justification: true })),
+        status: { status: 'ok', source: 'config', unmatched_rules: ['orphan rule'] },
+      };
+    },
+  };
+  return {
+    connections,
+    bindings,
+    projects,
+    toggles,
+    policyCalls,
+    deps: { db, deploys } as unknown as EngineDeps,
+  };
 }
 
 const SPEC_PROJECT = { id: 'p1', name: 'P', description: null, instructions: null };
@@ -179,6 +200,65 @@ describe('silo enforcement reads LIVE bindings (never a session-start snapshot)'
     const run = makeRun(world);
     const result = await run.executeCapability('get_audit_log', {});
     expect(result.isError).toBe(true);
+  });
+
+  it('S46: export_change_evidence without a connection is refused; a foreign connection is not part of this project', async () => {
+    const world = fakeWorld();
+    world.connections.set('c-dev', conn('c-dev', 'acme-dev'));
+    world.connections.set('c-other', conn('c-other', 'globex-prod'));
+    world.bindings.set('p1', [{ connectionId: 'c-dev', envRole: 'dev' }]);
+    const run = makeRun(world);
+
+    // A ticket or a time window alone would gather every project's requests.
+    for (const args of [{}, { ticket: 'ACME-42' }, { since: '2026-11-01T00:00:00Z' }, { connection: undefined }]) {
+      const result = await run.executeCapability('export_change_evidence', { ...args });
+      expect(result.isError, JSON.stringify(args)).toBe(true);
+      expect(result.content[0]?.text).toBe(
+        'In a project session, export_change_evidence requires a connection argument.',
+      );
+    }
+    const foreign = await run.executeCapability('export_change_evidence', {
+      connection: 'globex-prod',
+      ticket: 'ACME-42',
+    });
+    expect(foreign.isError).toBe(true);
+    expect(foreign.content[0]?.text).toContain('Connection "globex-prod" is not part of this project.');
+  });
+
+  it("S46: list_connections carries each bound connection's policy and policies_status from ONE policy read", async () => {
+    const world = fakeWorld();
+    world.connections.set('c-dev', conn('c-dev', 'acme-dev'));
+    world.connections.set('c-uat', conn('c-uat', 'acme-uat'));
+    world.connections.set('c-other', conn('c-other', 'globex-prod'));
+    world.bindings.set('p1', [
+      { connectionId: 'c-uat', envRole: 'uat' },
+      { connectionId: 'c-dev', envRole: 'dev' },
+    ]);
+    const run = makeRun(world);
+    const listing = await run.executeCapability('list_connections', {});
+    expect(listing.isError).toBeFalsy();
+    const body = JSON.parse(listing.content[0]!.text) as {
+      connections: Array<{ alias: string; policy: { rules: string[] } | null }>;
+      count: number;
+      policies_status: unknown;
+    };
+    // One read over every stored connection (label rules on a sibling
+    // connection to the same org, and unmatched rules, see them all)…
+    expect(world.policyCalls).toEqual([['c-dev', 'c-uat', 'c-other']]);
+    // …and only this project's connections are shown, each with its own report.
+    expect(body.count).toBe(2);
+    expect(body.connections.map((c) => [c.alias, c.policy?.rules])).toEqual([
+      ['acme-uat', ['rule for acme-uat']],
+      ['acme-dev', ['rule for acme-dev']],
+    ]);
+    expect(body.policies_status).toEqual({ status: 'ok', source: 'config', unmatched_rules: ['orphan rule'] });
+    expect(listing.content[0]!.text).not.toContain('globex-prod');
+
+    // get_permissions stays the plain grants view (no policy read).
+    const perms = await run.executeCapability('get_permissions', { connection: 'acme-dev' });
+    expect(perms.isError).toBeFalsy();
+    expect(perms.content[0]!.text).not.toContain('policy');
+    expect(world.policyCalls).toHaveLength(1);
   });
 });
 

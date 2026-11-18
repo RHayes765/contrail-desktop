@@ -791,6 +791,13 @@ export const dataCapabilities: Capability[] = [
           );
         }
 
+        // S46 (B): a start is the one write with no approval page, so a change
+        // freeze on this connection — or policies Contrail cannot read —
+        // refuses it here, before the runner probe and the submit (the
+        // refusal is audited as policy.refused, phase start). A poll of an
+        // existing run_id (above) is never checked.
+        deps.deploys.assertPolicyForStart(conn, 'run_agent_eval');
+
         // S44: pick the runner. Explicit wins; otherwise ONE live listMetadata
         // probe across both types — a Metadata-API read, so it sits behind
         // metadata_read like list_metadata does (the layer-2 rule; a code

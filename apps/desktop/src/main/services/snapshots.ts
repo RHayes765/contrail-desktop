@@ -1,11 +1,15 @@
 import { utilityProcess, type UtilityProcess } from 'electron';
 import {
   log,
+  withChildTypes,
   type DependencyEdge,
   type EdgeExtractionInput,
   type EngineDeps,
   type ExtractIndexInput,
   type ExtractIndexResult,
+  type MemberApplyInput,
+  type MemberApplyResult,
+  type MemberOutcome,
   type SnapshotWorkUnits,
 } from '@contrail/engine';
 import type { PushChannel, PushEvents, SnapshotStatusView } from '@contrail/shared';
@@ -77,7 +81,7 @@ export class SnapshotWorkerBridge implements SnapshotWorkUnits {
   }
 
   private call<T>(
-    kind: 'extractAndIndex' | 'extractEdges' | 'diffPairs',
+    kind: 'extractAndIndex' | 'extractEdges' | 'diffPairs' | 'applyMemberUnits',
     input: unknown,
   ): Promise<T> {
     const worker = this.ensureWorker();
@@ -105,6 +109,15 @@ export class SnapshotWorkerBridge implements SnapshotWorkUnits {
 
   extractEdges(input: EdgeExtractionInput): Promise<DependencyEdge[]> {
     return this.call('extractEdges', input);
+  }
+
+  /**
+   * S46 (C): a member run's filesystem step, after the engine's commit
+   * point. A kill on timeout rejects it, which the engine reports as a
+   * partly updated snapshot — never as nothing written.
+   */
+  applyMemberUnits(input: MemberApplyInput): Promise<MemberApplyResult> {
+    return this.call('applyMemberUnits', input);
   }
 
   diffPairs(
@@ -135,21 +148,57 @@ export class SnapshotService {
   ) {}
 
   status(connectionId: string): SnapshotStatusView {
-    const s = this.deps.db.getSnapshotStatus(connectionId);
+    // S46 (C): "synced … ago" and the stale badge report the oldest
+    // whole-type refresh among the default sync types (syncedAt). A
+    // member-scoped re-read — the re-baseline after a deploy — rewrites only
+    // some rows, so it never makes a snapshot look freshly synced.
+    // lastIndexedAt (the newest row) still moves on any index change.
+    const s = this.deps.db.getSnapshotStatus(
+      connectionId,
+      withChildTypes(this.deps.config.snapshot.types),
+    );
     const activeSync = this.active.get(connectionId);
     const stale =
-      s.lastIndexedAt != null && Date.now() - new Date(s.lastIndexedAt).getTime() > STALE_AFTER_MS;
+      s.syncedAt != null && Date.now() - new Date(s.syncedAt).getTime() > STALE_AFTER_MS;
     return {
       connectionId,
       artifactCount: s.artifactCount,
       edgeCount: s.edgeCount,
       lastIndexedAt: s.lastIndexedAt,
+      syncedAt: s.syncedAt,
       syncing: activeSync != null,
       progress: activeSync?.progress ?? null,
       syncElapsedMs: activeSync ? Date.now() - activeSync.startedAt : null,
       typicalDurationMs: s.typicalDurationMs,
       stale,
     };
+  }
+
+  /**
+   * S46 (C): the engine's members observer (SnapshotEngine.setMembersObserver,
+   * wired at startup beside the execution observer). A member-scoped re-read
+   * — refresh_snapshot with members, or the re-baseline after a deploy —
+   * changed these components; the renderer re-reads the connection's status,
+   * its type counts and any open list or detail that names one of them. A
+   * run that skipped every member but wrote a unit (a parent document
+   * re-read for a child it no longer holds) changed the snapshot too: it
+   * pushes with an empty member list. Each member carries the document
+   * re-read for it (`unit`), and the push every document written, so an
+   * open Flow or CustomObject reloads after a FlowDefinition or CustomField
+   * member re-read it.
+   */
+  onMembersChanged(info: { connectionId: string; members: MemberOutcome[]; units: string[] }): void {
+    const members = info.members.flatMap((m) =>
+      m.outcome === 'skipped'
+        ? []
+        : [{ type: m.type, apiName: m.api_name, outcome: m.outcome, unit: m.unit ?? null }],
+    );
+    if (members.length === 0 && info.units.length === 0) return;
+    this.push('metadata:changed', {
+      connectionId: info.connectionId,
+      members,
+      units: [...info.units],
+    });
   }
 
   /** Fresh connects get a baseline automatically — but never a re-sync storm. */
@@ -217,14 +266,22 @@ export class SnapshotService {
           observeJobId: jobId,
           waitMs: 0,
         });
-        if (result.status === 'gone') {
+        if (
+          result.status === 'gone' ||
+          (result.status === 'complete' && result.kind === 'members')
+        ) {
           // Another observer (an agent's refresh_snapshot poll) collected the
-          // completion. The work happened; report from the database.
+          // completion — or, S46 (C), the run observed is a member run, which
+          // records no metadata_snapshots row. The work happened; report
+          // from the database.
           const s = this.deps.db.getSnapshotStatus(connectionId);
           this.emit(connectionId, `synced ${s.artifactCount} artifacts`, true, null);
           return;
         }
-        if (result.status === 'complete' || result.status === 'failed') {
+        if (
+          result.status === 'failed' ||
+          (result.status === 'complete' && result.kind === 'types')
+        ) {
           this.settle(connectionId, kind, result);
           return;
         }

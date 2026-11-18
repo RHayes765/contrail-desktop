@@ -6,6 +6,7 @@ import {
   PROJECT_TOOL_NAMES,
   PROJECT_TOOLS,
   SESSION_EXCLUDED_CAPABILITIES,
+  ULTRACODE_TOOLS,
 } from '../mint.js';
 import type { BindingWithGrants, SessionContext } from '../types.js';
 
@@ -82,6 +83,7 @@ describe('tool manifest (THE isolation snapshot)', () => {
       'dml_propose',
       'execute_deploy',
       'explain_access',
+      'export_change_evidence',
       'get_audit_log',
       'get_debug_logs',
       'get_dependencies',
@@ -104,6 +106,22 @@ describe('tool manifest (THE isolation snapshot)', () => {
     ]);
   });
 
+  it('S46 size pin: every tool description a session can mint fits the 2,000-byte cut', () => {
+    // The SDK cuts an MCP tool description at 2 KB, and an appended S46
+    // paragraph sits exactly at the tail. Capabilities pass through verbatim
+    // (options.ts), so the minted text IS the engine's description.
+    const LIMIT = 2000;
+    const defs = [
+      ...mintableCapabilities([FULL]).map((c) => ({ name: c.name, description: c.description })),
+      ...PROJECT_TOOLS,
+      ...ULTRACODE_TOOLS,
+    ];
+    expect(defs.length).toBe(36 + PROJECT_TOOLS.length + ULTRACODE_TOOLS.length);
+    for (const d of defs) {
+      expect(Buffer.byteLength(d.description, 'utf8'), d.name).toBeLessThanOrEqual(LIMIT);
+    }
+  });
+
   it('connection lifecycle is NEVER minted into a session', () => {
     const names = mintableCapabilities([FULL]).map((c) => c.name);
     for (const excluded of SESSION_EXCLUDED_CAPABILITIES) {
@@ -119,6 +137,8 @@ describe('tool manifest (THE isolation snapshot)', () => {
       'describe_schema',
       'diff_artifact',
       'diff_orgs',
+      // S46 (B): grant null, like get_audit_log — Contrail's own local record.
+      'export_change_evidence',
       'get_audit_log',
       'get_dependencies',
       'get_org_changes',
@@ -431,6 +451,28 @@ describe('subagents + Ultracode (S28) — the fan-out stays caged', () => {
     expect(agents['test-critic']!.tools).toContain('mcp__contrail__run_apex_tests');
     expect(agents['deploy-reviewer']!.tools).not.toContain('mcp__contrail__run_apex_tests');
     expect(agents['scout']!.tools).not.toContain('mcp__contrail__run_apex_tests');
+  });
+
+  it('S46: export_change_evidence is banned for every subagent (positive pin)', async () => {
+    const { SUBAGENT_BANNED_TOOLS, SUBAGENT_READ_TOOLS } = await import('../agents.js');
+    expect(SUBAGENT_BANNED_TOOLS).toHaveLength(20);
+    expect(SUBAGENT_BANNED_TOOLS).toContain('export_change_evidence');
+    expect(SUBAGENT_READ_TOOLS.size).toBe(25);
+    expect(SUBAGENT_READ_TOOLS.has('export_change_evidence')).toBe(false);
+    for (const bindings of [[FULL], [READ_ONLY]]) {
+      const options = buildSessionOptions({ ...ctxWith(bindings), ultracode: true }, invoke);
+      // The session itself mints it (grant null)…
+      expect(options.allowedTools).toContain('mcp__contrail__export_change_evidence');
+      const agents =
+        (options as { agents?: Record<string, { tools?: string[]; disallowedTools?: string[] }> })
+          .agents ?? {};
+      expect(Object.keys(agents).length).toBe(4);
+      // …and no subagent holds it, and every one restates the ban.
+      for (const [name, def] of Object.entries(agents)) {
+        expect(def.tools, name).not.toContain('mcp__contrail__export_change_evidence');
+        expect(def.disallowedTools, name).toContain('mcp__contrail__export_change_evidence');
+      }
+    }
   });
 
   it('subagent tools shrink with the session grants (intersection with minting)', () => {

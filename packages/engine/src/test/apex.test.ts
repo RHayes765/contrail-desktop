@@ -55,6 +55,7 @@ let postedTraceFlag: Record<string, unknown> | null;
 let patchedTraceFlag: { id: string; body: Record<string, unknown> } | null;
 
 class RecordingPresenter implements ApprovalPresenter {
+  readonly mode = 'page' as const;
   readonly views: ApprovalRequestView[] = [];
   private readonly inner = new ApprovalPageServer(async () => {});
   async present(

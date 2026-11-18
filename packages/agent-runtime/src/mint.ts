@@ -204,7 +204,9 @@ export const ULTRACODE_TOOLS: ProjectToolDef[] = [
             .optional()
             .describe(
               'dml_propose: the exact arguments object you will send (operation/object/' +
-                'records/ids, or steps/all_or_none) — minus connection.',
+                'records/ids, or steps/all_or_none) — minus connection. ticket and ' +
+                'justification are not reviewed content: leave them out; adding or ' +
+                'rewording them later needs no new review.',
             ),
           bulk_steps: z
             .array(
