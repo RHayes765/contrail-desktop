@@ -54,3 +54,39 @@ describe('parsePermissionSet', () => {
     expect(parsePermissionSet('not xml at all').label).toBeNull();
   });
 });
+
+describe('parsePermissionSet in linear time (slow-path follow-up)', () => {
+  // The Manifest view parses the bytes of a deployed permission set, which
+  // an agent wrote. The pattern this parser used started again from every
+  // opener with no closer after it and read to the end (quadratic: seconds
+  // for 1 MB of such openers). It must parse in well under a second, and the
+  // same.
+  const MB = 1_000_000;
+  const fill = (unit: string, bytes = MB) => unit.repeat(Math.floor(bytes / unit.length));
+
+  it('description and grant openers with no closer, packed close together', () => {
+    const xml =
+      '<PermissionSet><label>Ops</label><objectPermissions><allowRead>true</allowRead>' +
+      '<object>Case</object></objectPermissions>' +
+      fill('<description>', MB / 2) +
+      fill('<objectPermissions>', MB / 2) +
+      '</PermissionSet>';
+    const started = performance.now();
+    const view = parsePermissionSet(xml);
+    const took = performance.now() - started;
+    expect(view.label).toBe('Ops');
+    expect(view.description).toBeNull();
+    expect(view.objectPermissions).toEqual([
+      {
+        object: 'Case',
+        read: true,
+        create: false,
+        edit: false,
+        delete: false,
+        viewAll: false,
+        modifyAll: false,
+      },
+    ]);
+    expect(took, `${Math.round(took)} ms`).toBeLessThan(1000);
+  });
+});

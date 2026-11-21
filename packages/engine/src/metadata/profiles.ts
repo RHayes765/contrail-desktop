@@ -1,10 +1,13 @@
 import { extractChildBlocks } from '../snapshot/indexer.js';
+import { xmlBlockText } from '../salesforce/xml.js';
 
 /**
  * PermissionSet XML → a grouped, human-readable permissions view. The raw
  * XML is noise to a consultant scanning "what does this grant?" — this is
  * the browser's parsed tab (and later, prompt material for the agent).
- * Same block-parsing idiom as the indexer; no XML library.
+ * Same block-parsing idiom as the indexer; no XML library. Each block is
+ * read in one walk (salesforce/xml.ts): the Manifest view parses deployed
+ * bytes an agent wrote.
  */
 
 export interface ObjectPermissionView {
@@ -47,9 +50,9 @@ export interface PermissionSetView {
   applicationVisibilities: ToggleView[];
 }
 
+/** The first <tag> block's text, trimmed: `/<tag>([\s\S]*?)<\/tag>/`'s capture. */
 function tagValue(block: string, tag: string): string | null {
-  const match = block.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
-  return match?.[1]?.trim() ?? null;
+  return xmlBlockText(block, tag)?.trim() ?? null;
 }
 
 function tagBool(block: string, tag: string): boolean {

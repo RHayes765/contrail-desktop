@@ -215,3 +215,67 @@ describe('Process Builder-generated flows (regression: metadata <name> shadowing
     expect(g.unresolved).toEqual([]);
   });
 });
+
+describe('parseFlowGraph in linear time (slow-path follow-up)', () => {
+  // The Manifest view parses the bytes of a deployed flow, which an agent
+  // wrote. The patterns this parser used started again from every opener
+  // with no closer after it and read to the end (quadratic: seconds for
+  // 1 MB of such openers, with the main process busy). Each shape must parse
+  // in well under a second, and the same.
+  const MB = 1_000_000;
+  const fill = (unit: string, bytes = MB) => unit.repeat(Math.floor(bytes / unit.length));
+  const flow = (inner: string, label = '<label>Router</label>') =>
+    `<Flow>${label}<processType>AutoLaunchedFlow</processType>` +
+    '<status>Active</status><start><object>Case</object><triggerType>RecordAfterSave</triggerType>' +
+    `<connector><targetReference>Check</targetReference></connector></start>${inner}</Flow>`;
+  const decision = (right: string) =>
+    '<decisions><name>Check</name><label>Check</label><rules><name>Hot</name><label>Hot</label>' +
+    `<conditions><leftValueReference>$Record.Priority</leftValueReference><operator>EqualTo</operator>${right}</conditions>` +
+    '<connector><targetReference>Notify</targetReference></connector></rules>' +
+    '<defaultConnectorLabel>Other</defaultConnectorLabel></decisions>';
+  const highValue = '<rightValue><stringValue>High</stringValue></rightValue>';
+  const action = (inside = '') =>
+    `<actionCalls><name>Notify</name><label>Notify</label><actionName>emailSimple</actionName>${inside}</actionCalls>`;
+  const edges = [
+    { from: 'Check', to: 'Notify', kind: 'decision', label: 'Hot' },
+    { from: '__start', to: 'Check', kind: 'normal', label: null },
+  ];
+
+  it('openers with no closer, packed close together, wherever the parser looks', () => {
+    const shapes: Array<[string, string, string, string | null]> = [
+      ['element openers after the elements', flow(decision(highValue) + action() + fill('<assignments>')), 'High', 'Router'],
+      // A control: the flow's own label closes first, so the old pattern was
+      // fast here too.
+      ['label openers after the elements', flow(decision(highValue) + action() + fill('<label>')), 'High', 'Router'],
+      // No label of its own: the first label opener has no closer after it.
+      ['label openers and no label', flow(decision(highValue) + action() + fill('<label>'), ''), 'High', null],
+      ['connector openers with no target', flow(decision(highValue) + action(fill('<connector>'))), 'High', 'Router'],
+      [
+        'wrapper openers before an element name',
+        flow(decision(highValue) + action(fill('<processMetadataValues>'))),
+        'High',
+        'Router',
+      ],
+      [
+        'value openers with no closer before the real value',
+        flow(decision(`${fill('<rightValue>')}<value><stringValue>Low</stringValue></value>`) + action()),
+        'Low',
+        'Router',
+      ],
+    ];
+    for (const [what, xml, value, label] of shapes) {
+      const started = performance.now();
+      const g = parseFlowGraph(xml);
+      const took = performance.now() - started;
+      expect(g.label, what).toBe(label);
+      expect(g.trigger, what).toBe('RecordAfterSave of Case');
+      expect(g.nodes.map((n) => n.name), what).toEqual(['__start', 'Check', 'Notify']);
+      expect(g.edges, what).toEqual(edges);
+      expect(g.nodes[1]!.props, what).toEqual([
+        { name: 'Hot', value: `$Record.Priority EqualTo ${value}` },
+        { name: 'default', value: 'Other' },
+      ]);
+      expect(took, `${what}: ${Math.round(took)} ms`).toBeLessThan(1000);
+    }
+  });
+});

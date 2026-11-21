@@ -13,8 +13,23 @@ import {
   retrieveMemberFor,
   type ProposedComponent,
 } from '../deploy/package.js';
-import { indexSnapshotFiles } from '../snapshot/indexer.js';
-import type { ContrailDb } from '../core/db.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  childBlockNames,
+  extractChildBlocks,
+  findChildBlock,
+  indexSnapshotFiles,
+} from '../snapshot/indexer.js';
+import {
+  withoutXmlBlocks,
+  xmlBlocks,
+  xmlBlockText,
+  xmlTagTexts,
+  xmlTagValue,
+} from '../salesforce/xml.js';
+import { ContrailDb } from '../core/db.js';
 import type { SnapshotStore } from '../snapshot/store.js';
 import type { ConnectionRecord } from '../core/types.js';
 
@@ -3057,5 +3072,584 @@ describe('S47: Omnistudio Data Mappers (OmniDataTransform)', () => {
     ]);
     expect(res.uncovered).toHaveLength(0);
     expect(res.warning).toBeNull();
+  });
+});
+
+describe('Deploy content is scanned in linear time (S47 review follow-up)', () => {
+  // Each shape is about 1 MB of malformed markup an agent could hand
+  // validate_deploy (readOldContent reads the snapshot copy instead). The
+  // lazy patterns these sites used took seconds to minutes on such text,
+  // blocking every tool on the server meanwhile: quadratic in openers with
+  // no closer after them, cubic in the white space after an opener whose
+  // value is not followed by its closer. Each shape must answer in well
+  // under a second, and with the answer those patterns gave.
+  const MB = 1_000_000;
+  const conn = { id: 'conn-1', alias: 'dev' } as ConnectionRecord;
+  const dbAdd = { getArtifact: () => null } as unknown as ContrailDb;
+  const storeNone = {
+    readCurrentFile: () => null,
+    listCurrentFiles: () => [],
+  } as unknown as SnapshotStore;
+  /** `unit` repeated to fill `bytes`. */
+  const fill = (unit: string, bytes = MB) => unit.repeat(Math.floor(bytes / unit.length));
+  /** An opener whose value is not followed by its closer: the next "<" opens another element. */
+  const stuck = (tag: string) => `<${tag}>${' '.repeat(200)}x${' '.repeat(200)}<b/>`;
+  const timed = <T>(run: () => T): [T, number] => {
+    const started = performance.now();
+    const answer = run();
+    return [answer, performance.now() - started];
+  };
+  const fast = (what: string, took: number) =>
+    expect(took, `${what}: ${Math.round(took)} ms`).toBeLessThan(1000);
+
+  it('S34 <target>: values not followed by their closer, then the real one', () => {
+    // The second shape packs the openers close together. The old pattern
+    // was fast on it, but a reader that looked for the closer anywhere
+    // after each opener would not be.
+    const shapes: Array<[string, string]> = [
+      ['values not followed by their closer', fill(stuck('target'))],
+      ['openers packed close together', fill('<target>x<b/>')],
+    ];
+    for (const [what, decoys] of shapes) {
+      const meta =
+        '<AiAuthoringBundle xmlns="http://soap.sforce.com/2006/04/metadata">' +
+        '<bundleType>AGENT</bundleType>' +
+        decoys +
+        '<target> Bot.v2 </target></AiAuthoringBundle>';
+      expect(meta.length, what).toBeGreaterThan(MB * 0.95);
+      const files = {
+        'My_Agent.agent': 'system:\n  instructions: |\n    Probe.\n',
+        'My_Agent.bundle-meta.xml': meta,
+      };
+      const bundle = comp(
+        'AiAuthoringBundle',
+        'My_Agent',
+        JSON.stringify({ contrail_bundle: 1, files }),
+      );
+      const [res, took] = timed(() => analyzeChanges(dbAdd, storeNone, conn, [bundle], []));
+      expect(res.changes[0]!.warnings.join(' '), what).toContain(
+        'pins this bundle to runtime version "Bot.v2";',
+      );
+      fast(what, took);
+    }
+  });
+
+  it('S44 <testCase>: openers with no closer after one single-turn and one multi-turn case', () => {
+    const suite =
+      '<AiTestingDefinition xmlns="http://soap.sforce.com/2006/04/metadata">' +
+      '<testCase><number>1</number></testCase>' +
+      '<testCase><conversationHistory><role>user</role></conversationHistory><number>2</number></testCase>' +
+      fill('<testCase>');
+    expect(suite.length).toBeGreaterThan(MB * 0.95);
+    const [res, took] = timed(() =>
+      analyzeChanges(dbAdd, storeNone, conn, [comp('AiTestingDefinition', 'Suite', suite)], []),
+    );
+    expect(res.changes[0]!.warnings.join(' ')).toContain(
+      '1 case(s) carry <conversationHistory> and 1 do not.',
+    );
+    fast('testCase', took);
+  });
+
+  it('S33 credential principals: parameter blocks with no closer, and values not followed by their closer', () => {
+    const shapes: Array<[string, string, string[]]> = [
+      [
+        'parameter blocks with no closer',
+        '<ExternalCredential><externalCredentialParameters><parameterName>Basic</parameterName>' +
+          '<parameterType>NamedPrincipal</parameterType></externalCredentialParameters>' +
+          fill('<externalCredentialParameters>'),
+        ['Cred-Basic'],
+      ],
+      [
+        'values not followed by their closer',
+        '<ExternalCredential><externalCredentialParameters>' +
+          fill(stuck('parameterType'), MB / 2) +
+          fill(stuck('parameterName'), MB / 2) +
+          '<parameterName> Ops </parameterName><parameterType>PerUserPrincipal</parameterType>' +
+          '</externalCredentialParameters></ExternalCredential>',
+        ['Cred-Ops'],
+      ],
+    ];
+    for (const [what, content, principals] of shapes) {
+      expect(content.length, what).toBeGreaterThan(MB * 0.95);
+      const [res, took] = timed(() =>
+        analyzePermissionCoverage([comp('ExternalCredential', 'Cred', content)]),
+      );
+      expect(res.uncovered.map((u) => u.api_name), what).toEqual(principals);
+      fast(what, took);
+    }
+  });
+
+  it('S44 scorer versions: version blocks with no closer after the one kept', () => {
+    const before =
+      '<AiAgentScorerDefinition>' +
+      '<scorerVersion><status>Available</status><versionNumber>1</versionNumber></scorerVersion>' +
+      '<scorerVersion><status>Draft</status><versionNumber>2</versionNumber></scorerVersion>' +
+      '</AiAgentScorerDefinition>';
+    const proposed =
+      '<AiAgentScorerDefinition>' +
+      '<scorerVersion><status>Draft</status><versionNumber>1</versionNumber></scorerVersion>' +
+      fill('<scorerVersion>');
+    expect(proposed.length).toBeGreaterThan(MB * 0.95);
+    const [warnings, took] = timed(() =>
+      changeDependentWarnings({
+        type: 'AiAgentScorerDefinition',
+        api_name: 'Tone_Check',
+        change: 'modify',
+        proposed,
+        before,
+      }),
+    );
+    expect(warnings.join(' ')).toContain('(org-side versions omitted here: 2)');
+    expect(warnings.join(' ')).toContain('(regressed here: 1 (Available → Draft))');
+    fast('scorerVersion', took);
+  });
+
+  it('inline fields: field blocks with no closer after a real one', () => {
+    const object =
+      '<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">' +
+      '<fields><fullName>F__c</fullName><type>Text</type></fields>' +
+      fill('<fields>');
+    expect(object.length).toBeGreaterThan(MB * 0.95);
+    const [res, took] = timed(() =>
+      analyzePermissionCoverage([comp('CustomObject', 'Obj__c', object)]),
+    );
+    expect(res.uncovered.map((u) => `${u.type}:${u.api_name}`)).toEqual([
+      'CustomObject:Obj__c',
+      'CustomField:Obj__c.F__c',
+    ]);
+    fast('fields', took);
+  });
+
+  it('permission blocks: grant blocks with no closer after the grant that covers', () => {
+    const ps =
+      '<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">' +
+      '<fieldPermissions><editable>false</editable><field>Obj__c.F__c</field>' +
+      '<readable>true</readable></fieldPermissions>' +
+      fill('<fieldPermissions>') +
+      '</PermissionSet>';
+    expect(ps.length).toBeGreaterThan(MB * 0.95);
+    const field = '<fields><fullName>F__c</fullName><type>Text</type></fields>';
+    const [res, took] = timed(() =>
+      analyzePermissionCoverage([
+        comp('CustomField', 'Obj__c.F__c', field),
+        comp('PermissionSet', 'Ops', ps),
+      ]),
+    );
+    expect(res.uncovered).toEqual([]);
+    fast('fieldPermissions', took);
+  });
+
+  it('tab visibility: values not followed by their closer, then the real one', () => {
+    // Upper-case tags on purpose: the visibility pattern was case-insensitive.
+    // The real Hidden tag is upper-case too, so a reader that ignored case
+    // would miss it and wrongly count the tab as visible.
+    const shapes: Array<[string, string, string[]]> = [
+      ['Hidden', 'VISIBILITY', ['Obj__c']],
+      ['DefaultOn', 'visibility', []],
+    ];
+    for (const [visibility, tag, uncovered] of shapes) {
+      const ps =
+        '<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata"><tabSettings><tab>Obj__c</tab>' +
+        fill(stuck('VISIBILITY')) +
+        `<${tag}>${visibility}</${tag}></tabSettings></PermissionSet>`;
+      expect(ps.length, visibility).toBeGreaterThan(MB * 0.95);
+      const [res, took] = timed(() =>
+        analyzePermissionCoverage([
+          comp('CustomTab', 'Obj__c', '<CustomTab/>'),
+          comp('PermissionSet', 'Ops', ps),
+        ]),
+      );
+      expect(res.uncovered.map((u) => u.api_name), visibility).toEqual(uncovered);
+      fast(visibility, took);
+    }
+  });
+
+  it('readOldContent: child blocks with no closer after the one asked for', () => {
+    const block = '<fields><fullName>F__c</fullName><type>Text</type></fields>';
+    const file =
+      '<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">' + block + fill('<fields>');
+    expect(file.length).toBeGreaterThan(MB * 0.95);
+    const store = { readCurrentFile: () => file } as unknown as SnapshotStore;
+    const [old, took] = timed(() =>
+      readOldContent(store, conn, 'CustomField', 'Obj__c.F__c', 'objects/Obj__c.object'),
+    );
+    expect(old).toBe(block);
+    fast('readOldContent', took);
+  });
+
+  it('the readers answer what the patterns they replace did, edge cases included', () => {
+    // The patterns are the reference. These inputs exercise the rules the
+    // readers' comments name: an opener counts only if the next "<" begins
+    // its closer, an empty value is passed over unless emptyOk, a value of
+    // white space alone answers its last character, and only ASCII letters
+    // fold under ignoreCase.
+    const inputs = [
+      '',
+      '<t>x</t>',
+      '<t> x y </t>',
+      '<t></t><t>x</t>',
+      '<t>\t \n</t>',
+      '<t>\t \n</t><t>x</t>',
+      '<t>\u00a0\u2028x\ufeff</t>',
+      '<t>\u200bx\u200b</t>',
+      '<t>x<b/></t><t>y</t>',
+      '<t>x',
+      '<t><t>x</t>',
+      '<T>v</T><t>w</t>',
+      '<t>a</T><T>b</t>',
+      '<tx>a</tx><t>b</t>',
+      '<t>a</t><t>b</t>z<t>c',
+      '<t>ſ</t>',
+    ];
+    for (const s of inputs) {
+      const at = JSON.stringify(s);
+      expect(xmlBlocks(s, 't'), at).toEqual(s.match(/<t>[\s\S]*?<\/t>/g) ?? []);
+      expect(withoutXmlBlocks(s, 't'), at).toBe(s.replace(/<t>[\s\S]*?<\/t>/g, ''));
+      expect(xmlTagValue(s, 't'), at).toBe(s.match(/<t>\s*([^<]+?)\s*<\/t>/)?.[1]);
+      expect(xmlTagValue(s, 't', { emptyOk: true }), at).toBe(
+        s.match(/<t>\s*([^<]*?)\s*<\/t>/)?.[1],
+      );
+      expect(xmlTagValue(s, 't', { ignoreCase: true }), at).toBe(
+        s.match(/<t>\s*([^<]+?)\s*<\/t>/i)?.[1],
+      );
+      expect(xmlTagValue(s, 't', { emptyOk: true, ignoreCase: true }), at).toBe(
+        s.match(/<t>\s*([^<]*?)\s*<\/t>/i)?.[1],
+      );
+    }
+    // The same rules, spelled out.
+    expect(xmlTagValue('<t>\t \n</t>', 't')).toBe('\n');
+    expect(xmlTagValue('<t>\t \n</t>', 't', { emptyOk: true })).toBe('');
+    expect(xmlTagValue('<t></t><t>x</t>', 't')).toBe('x');
+    expect(xmlTagValue('<t></t><t>x</t>', 't', { emptyOk: true })).toBe('');
+    expect(xmlTagValue('<T>v</T>', 't')).toBeUndefined();
+    expect(xmlTagValue('<T>v</T>', 't', { ignoreCase: true })).toBe('v');
+  });
+});
+
+describe('Permission coverage, c: references and child blocks in linear time (slow-path follow-up)', () => {
+  // Each shape is about 1 MB: a large but legitimate package, or markup an
+  // agent could hand validate_deploy. The code these sites used took seconds
+  // on such input (needs × grants, a rescan per opener with no closer, an
+  // index lookup per token), and it runs synchronously, so every tool on the
+  // server waited. Each must answer in well under a second, and with the
+  // answer that code gave.
+  const MB = 1_000_000;
+  const conn = { id: 'conn-1', alias: 'dev' } as ConnectionRecord;
+  const storeNone = {
+    readCurrentFile: () => null,
+    listCurrentFiles: () => [],
+  } as unknown as SnapshotStore;
+  /** `unit` repeated to fill `bytes`. */
+  const fill = (unit: string, bytes = MB) => unit.repeat(Math.floor(bytes / unit.length));
+  const timed = <T>(run: () => T): [T, number] => {
+    const started = performance.now();
+    const answer = run();
+    return [answer, performance.now() - started];
+  };
+  const fast = (what: string, took: number) =>
+    expect(took, `${what}: ${Math.round(took)} ms`).toBeLessThan(1000);
+  const uncoveredNames = (components: ProposedComponent[]) =>
+    analyzePermissionCoverage(components).uncovered.map((u) => `${u.type}:${u.api_name}`);
+
+  it('permission coverage: an 800-field object against a 7,000-grant profile', () => {
+    // An admin profile granting fields on 40 objects, 20 of them on this
+    // object's fields; one more grant spelled in another case inside white
+    // space, one under a capitalised tag, and one switched off.
+    const fields = Array.from(
+      { length: 800 },
+      (_, i) => `<fields><fullName>F${i}__c</fullName><type>Text</type><length>80</length></fields>`,
+    ).join('\n');
+    const grants = [
+      ...Array.from(
+        { length: 7000 },
+        (_, i) =>
+          `<fieldPermissions><editable>true</editable><field>Obj${i % 40}__c.F${i}__c</field>` +
+          '<readable>true</readable></fieldPermissions>',
+      ),
+      '<fieldPermissions><field> obj0__c.f1__c </field><readable>TRUE</readable></fieldPermissions>',
+      '<fieldPermissions><FIELD>Obj0__c.F3__c</FIELD><readable>true</readable></fieldPermissions>',
+      '<fieldPermissions><field>Obj0__c.F7__c</field><readable>false</readable></fieldPermissions>',
+      ...Array.from(
+        { length: 3000 },
+        () => '<userPermissions><enabled>true</enabled><name>ApiEnabled</name></userPermissions>',
+      ),
+    ].join('\n');
+    const components = [
+      comp('CustomObject', 'Obj0__c', `<CustomObject>${fields}</CustomObject>`),
+      comp('Profile', 'Admin', `<Profile>${grants}</Profile>`),
+    ];
+    expect(components[1]!.content.length).toBeGreaterThan(MB);
+    const [uncovered, took] = timed(() => uncoveredNames(components));
+    // 800 fields less 22 granted, plus the object itself.
+    expect(uncovered).toHaveLength(779);
+    expect(uncovered).toContain('CustomObject:Obj0__c');
+    expect(uncovered).toContain('CustomField:Obj0__c.F7__c');
+    for (const granted of ['F0', 'F1', 'F3', 'F40', 'F760']) {
+      expect(uncovered).not.toContain(`CustomField:Obj0__c.${granted}__c`);
+    }
+    fast('800 fields against 7,000 grants', took);
+  });
+
+  it('permission coverage: a grant block packed with name openers that never close', () => {
+    const block =
+      '<fieldPermissions><field>Obj__c.F0__c</field>' +
+      fill('<field>x<b/>') +
+      '<readable>true</readable></fieldPermissions>';
+    const components = [
+      ...Array.from({ length: 2000 }, (_, i) => comp('CustomField', `Obj__c.F${i}__c`, '')),
+      comp('PermissionSet', 'PS', `<PermissionSet>${block}</PermissionSet>`),
+    ];
+    const [uncovered, took] = timed(() => uncoveredNames(components));
+    expect(uncovered).toHaveLength(1999);
+    expect(uncovered).not.toContain('CustomField:Obj__c.F0__c');
+    fast('2,000 needs against a block of about 83,000 openers', took);
+  });
+
+  it('permission coverage: one grant block naming 20,000 fields', () => {
+    // Every need's own pattern, run over the one block from its start,
+    // reached half the block on average: quadratic. A plain API name is
+    // answered by the index alone.
+    const block =
+      '<fieldPermissions>' +
+      Array.from({ length: 20_000 }, (_, i) => `<field>Obj__c.F${i}__c</field>`).join('') +
+      '<readable>true</readable></fieldPermissions>';
+    const fields = Array.from(
+      { length: 20_001 },
+      (_, i) => `<fields><fullName>F${i}__c</fullName></fields>`,
+    ).join('');
+    const components = [
+      comp('CustomObject', 'Obj__c', `<CustomObject>${fields}</CustomObject>`),
+      comp('PermissionSet', 'PS', `<PermissionSet>${block}</PermissionSet>`),
+    ];
+    const [uncovered, took] = timed(() => uncoveredNames(components));
+    expect(uncovered).toEqual(['CustomObject:Obj__c', 'CustomField:Obj__c.F20000__c']);
+    fast('20,000 needs against one block naming them all', took);
+  });
+
+  it('Aura controllers: 49 bundles against a 12,000-grant permission set', () => {
+    // The controller advisory walked every grant block, building a pattern
+    // for each, once per bundle; it now asks the package's grant index. A
+    // package holds at most 50 components, so that cost stayed bounded
+    // (about 0.24 s for this shape, against about 0.04 s now): the time
+    // check cannot tell them apart. What this test pins is the answer.
+    const auraMeta =
+      '<?xml version="1.0" encoding="UTF-8"?>\n' +
+      '<AuraDefinitionBundle xmlns="http://soap.sforce.com/2006/04/metadata">\n' +
+      '    <apiVersion>66.0</apiVersion>\n</AuraDefinitionBundle>\n';
+    const bundles = Array.from({ length: 49 }, (_, i) =>
+      comp(
+        'AuraDefinitionBundle',
+        `pop${i}`,
+        JSON.stringify({
+          contrail_bundle: 1,
+          files: {
+            [`pop${i}.cmp`]: `<aura:component controller="Ctl${i}"/>`,
+            [`pop${i}.cmp-meta.xml`]: auraMeta,
+          },
+        }),
+      ),
+    );
+    // Ctl0 … Ctl24 granted (one of them in another case), the rest not.
+    const grants = Array.from(
+      { length: 12_000 },
+      (_, i) =>
+        `<classAccesses><apexClass>${i === 3 ? 'CTL3' : `Ctl${i < 25 ? i : i + 1000}`}</apexClass>` +
+        '<enabled>true</enabled></classAccesses>',
+    ).join('');
+    expect(grants.length).toBeGreaterThan(MB * 0.95);
+    const dbNone = { getArtifact: () => null, edgesTo: () => [] } as unknown as ContrailDb;
+    const [res, took] = timed(() =>
+      analyzeChanges(
+        dbNone,
+        storeNone,
+        conn,
+        [...bundles, comp('PermissionSet', 'PS', `<PermissionSet>${grants}</PermissionSet>`)],
+        [],
+      ),
+    );
+    const warned = res.changes
+      .filter((c) => c.warnings.some((w) => w.startsWith('server-side controller')))
+      .map((c) => c.api_name);
+    expect(warned).toEqual(Array.from({ length: 24 }, (_, i) => `pop${i + 25}`));
+    fast('49 controllers against 12,000 grants', took);
+  });
+
+  it('permission coverage answers what the per-need pattern did, case folding included', () => {
+    // The pattern every grant was tested with, run here as the reference.
+    const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const reference = (permissionSet: string, name: string) =>
+      xmlBlocks(permissionSet, 'customPermissions').some(
+        (b) =>
+          new RegExp(`<name>\\s*${esc(name)}\\s*</name>`, 'i').test(b) &&
+          /<enabled>\s*true\s*<\/enabled>/i.test(b),
+      );
+    const coveredBy = (granted: string, needed: string) =>
+      analyzePermissionCoverage([
+        comp('CustomPermission', needed, ''),
+        comp(
+          'PermissionSet',
+          'PS',
+          `<customPermissions><enabled>true</enabled><name>${granted}</name></customPermissions>`,
+        ),
+      ]).uncovered.length === 0;
+    // [the name a grant carries, the name the package needs]
+    const pairs: Array<[string, string]> = [
+      ['Perm_A', 'PERM_a'],
+      ['é', 'É'],
+      ['µ', 'μ'],
+      ['ı', 'I'],
+      ['I', 'ı'],
+      ['ſ', 's'],
+      ['\u212a', 'k'],
+      ['ß', 'ẞ'],
+      ['Cred-', 'Cred-\n'],
+      ['Cred-\n\n', 'Cred-\n'],
+      [' \t', '\t'],
+      ['a<b', 'a<b'],
+      ['x y', 'X Y'],
+      ['x  y', 'x y'],
+    ];
+    for (const [granted, needed] of pairs) {
+      const ps = `<customPermissions><enabled>true</enabled><name>${granted}</name></customPermissions>`;
+      expect(coveredBy(granted, needed), JSON.stringify([granted, needed])).toBe(
+        reference(ps, needed),
+      );
+    }
+    // Some of those answers, spelled out: the i flag is not a plain
+    // case-insensitive compare.
+    expect(coveredBy('µ', 'μ')).toBe(true);
+    expect(coveredBy('ı', 'I')).toBe(false);
+    expect(coveredBy('ſ', 's')).toBe(false);
+    expect(coveredBy('\u212a', 'k')).toBe(false);
+    expect(coveredBy('Cred-', 'Cred-\n')).toBe(false);
+    expect(coveredBy('Cred-\n\n', 'Cred-\n')).toBe(true);
+    expect(coveredBy('a<b', 'a<b')).toBe(true);
+  });
+
+  it('c: references: 1 MB of names missing from the index, of one name it holds, and of its spellings', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'contrail-crefs-'));
+    const db = new ContrailDb(join(dir, 'test.db'));
+    try {
+      db.replaceArtifactsForTypes(
+        conn.id,
+        ['LightningComponentBundle'],
+        ['navCard', 'navigationCardPanel'].map((apiName) => ({
+          connectionId: conn.id,
+          type: 'LightningComponentBundle',
+          apiName,
+          filePath: `lwc/${apiName}/${apiName}.js`,
+          contentHash: 'h',
+          lastModifiedDate: null,
+          lastModifiedBy: null,
+          retrievedAt: '2026-11-21T00:00:00.000Z',
+          content: '',
+        })),
+      );
+      // A real index, so each lookup costs what it costs in a validate.
+      let lookups = 0;
+      const counted = {
+        getArtifact: (connectionId: string, type: string, apiName: string) => {
+          lookups += 1;
+          return db.getArtifact(connectionId, type, apiName);
+        },
+      } as unknown as ContrailDb;
+      const page = (body: string) => comp('FlexiPage', 'Home', `<FlexiPage>${body}</FlexiPage>`);
+
+      const distinct = Array.from({ length: 95_000 }, (_, i) => `c:Cmp${i}`).join(' ');
+      expect(distinct.length).toBeGreaterThan(MB);
+      const [missing, t1] = timed(() =>
+        analyzeChanges(counted, storeNone, conn, [page(distinct)], []),
+      );
+      expect(missing.changes[0]!.warnings.join(' ')).toContain(
+        'references Cmp0, Cmp1, Cmp2, Cmp3, Cmp4 (c: namespace)',
+      );
+      expect(lookups).toBeLessThan(20);
+      fast('95,000 distinct names missing from the index', t1);
+
+      lookups = 0;
+      const [held, t2] = timed(() =>
+        analyzeChanges(counted, storeNone, conn, [page(fill('c:navCard '))], []),
+      );
+      expect(held.changes[0]!.warnings.join(' ')).not.toContain('(c: namespace)');
+      expect(lookups).toBeLessThan(20);
+      fast('100,000 references to one name the index holds', t2);
+
+      // 45,000 different spellings of one name the index holds: its lookup
+      // ignores case, so they share one answer.
+      const base = 'navigationCardPanel';
+      const spellings = Array.from({ length: 45_000 }, (_, i) =>
+        [...base].map((ch, j) => ((i >> j) & 1 ? ch.toUpperCase() : ch.toLowerCase())).join(''),
+      );
+      expect(new Set(spellings).size).toBe(45_000);
+      lookups = 0;
+      const [spelled, t3] = timed(() =>
+        analyzeChanges(
+          counted,
+          storeNone,
+          conn,
+          [page(spellings.map((s) => `c:${s}`).join(' '))],
+          [],
+        ),
+      );
+      expect(spelled.changes[0]!.warnings.join(' ')).not.toContain('(c: namespace)');
+      expect(lookups).toBeLessThan(20);
+      fast('45,000 spellings of one name the index holds', t3);
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('child blocks: openers packed close together with no closer after a real block', () => {
+    const real = '<fields><fullName>Real__c</fullName></fields>';
+    const xml = real + fill('<fields>');
+    const [blocks, t1] = timed(() => extractChildBlocks(xml, 'fields'));
+    expect(blocks).toEqual([real]);
+    fast('extractChildBlocks', t1);
+    const [found, t2] = timed(() => findChildBlock(xml, 'fields', 'real__c'));
+    expect(found).toBe(real);
+    fast('findChildBlock', t2);
+    const [names, t3] = timed(() => childBlockNames(xml, 'fields'));
+    expect([...names]).toEqual(['real__c']);
+    fast('childBlockNames', t3);
+  });
+
+  it('the new readers answer what the patterns they replace did, edge cases included', () => {
+    const inputs = [
+      '',
+      '<t>',
+      '<t>a</t>',
+      '<t>a</t><t>b</t>',
+      '<t><t>a</t>',
+      '<t>a<b/></t><t>c</t>',
+      '<T>v</T><t>w</t>',
+      '<t>a</T><T>b</t>',
+      '<tx>a</tx><t>b</t>',
+      '<t> </t>',
+      '<t></t>',
+      '<t>a</t>z<t>c',
+      '</t><t>x</t>',
+      '<t>ſ</t><T>K</T>',
+    ];
+    for (const s of inputs) {
+      const at = JSON.stringify(s);
+      expect(xmlBlockText(s, 't'), at).toBe(s.match(/<t>([\s\S]*?)<\/t>/)?.[1]);
+      expect(xmlTagTexts(s, 't'), at).toEqual([...s.matchAll(/<t>([^<]*)<\/t>/g)].map((m) => m[1]));
+      expect(xmlTagTexts(s, 't', { ignoreCase: true }), at).toEqual(
+        [...s.matchAll(/<t>([^<]*)<\/t>/gi)].map((m) => m[1]),
+      );
+      expect(extractChildBlocks(s, 't'), at).toEqual(s.match(/<t>[\s\S]*?<\/t>/g) ?? []);
+    }
+    // childBlockNames answers findChildBlock's question, for every name.
+    const doc =
+      '<f><fullName>A</fullName></f><f><fullName> b </fullName></f>' +
+      '<f><fullName></fullName><fullName>C</fullName></f><f><label>x</label></f>' +
+      '<f><fullName>   </fullName></f><f><fullName>D</fullName>';
+    const names = childBlockNames(doc, 'f');
+    for (const q of ['a', 'A', 'b', ' b ', 'c', 'C', 'x', '', ' ', 'd']) {
+      expect(names.has(q.toLowerCase()), JSON.stringify(q)).toBe(
+        findChildBlock(doc, 'f', q) !== null,
+      );
+    }
   });
 });

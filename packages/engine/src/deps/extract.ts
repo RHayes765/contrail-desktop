@@ -1,4 +1,4 @@
-import { asArray, parseXml } from '../salesforce/xml.js';
+import { asArray, parseXml, withoutXmlBlocks, xmlBlocks, xmlTagValue } from '../salesforce/xml.js';
 import { isStudioCatalogScorer } from '../core/agentforceScorers.js';
 import type { DependencyEdge } from '../core/types.js';
 import type { IndexedArtifact } from '../snapshot/indexer.js';
@@ -328,9 +328,9 @@ export function extractBotRefs(xml: string): Ref[] {
  * default shape, and recall wins here (module header).
  */
 function addSubjectRef(refs: RefSet, xml: string): void {
-  const subject = xml.match(/<subjectName>\s*([^<]+?)\s*<\/subjectName>/)?.[1];
+  const subject = xmlTagValue(xml, 'subjectName');
   if (!subject) return;
-  const kind = xml.match(/<subjectType>\s*([^<]+?)\s*<\/subjectType>/)?.[1]?.toUpperCase();
+  const kind = xmlTagValue(xml, 'subjectType')?.toUpperCase();
   refs.add(kind === 'PROMPT' ? 'GenAiPromptTemplate' : 'Bot', subject);
 }
 
@@ -351,20 +351,55 @@ export function extractAiEvaluationDefinitionRefs(xml: string): Ref[] {
  * name — exact-case on purpose: a custom scorer may legitimately be called
  * `Coherence`, and recall wins. The <scorer> open tag may carry attributes (a
  * CLI message says custom scorers retrieve as <scorer scorerType="Custom"> —
- * attribute vs element is unverified until the live fixture; the regex
+ * attribute vs element is unverified until the live fixture; the scan
  * tolerates both forms). The suite's own top-level <name> is outside any
  * <scorer> block and never matches.
  */
 export function extractAiTestingDefinitionRefs(xml: string): Ref[] {
   const refs = new RefSet();
   addSubjectRef(refs, xml);
-  for (const m of xml.matchAll(/<scorer(?:\s[^>]*)?>([\s\S]*?)<\/scorer>/g)) {
-    const name = m[1]!.match(/<name>\s*([^<]+?)\s*<\/name>/)?.[1];
+  for (const text of scorerTexts(xml)) {
+    const name = xmlTagValue(text, 'name');
     if (name && !isStudioCatalogScorer(name)) {
       refs.add('AiAgentScorerDefinition', name);
     }
   }
   return refs.list();
+}
+
+/**
+ * The text inside each <scorer> element, in order: the groups
+ * `/<scorer(?:\s[^>]*)?>([\s\S]*?)<\/scorer>/g` captures, read in one walk.
+ * That pattern reads to the end of the text again from every opener with no
+ * closer after it (quadratic). Its answer, kept here: an opener is `<scorer`
+ * followed by ">", or by white space and then everything up to the next ">";
+ * the element ends at the first closer after its opener; and once an opener
+ * finds no ">" or no closer after it, no later opener can find one either.
+ */
+function scorerTexts(xml: string): string[] {
+  const open = '<scorer';
+  const close = '</scorer>';
+  const texts: string[] = [];
+  for (let at = xml.indexOf(open); at !== -1; ) {
+    const after = at + open.length;
+    const next = xml[after];
+    let start: number;
+    if (next === '>') {
+      start = after + 1;
+    } else if (next !== undefined && /\s/.test(next)) {
+      const gt = xml.indexOf('>', after + 1);
+      if (gt === -1) break;
+      start = gt + 1;
+    } else {
+      at = xml.indexOf(open, at + 1);
+      continue;
+    }
+    const end = xml.indexOf(close, start);
+    if (end === -1) break;
+    texts.push(xml.slice(start, end));
+    at = xml.indexOf(open, end + close.length);
+  }
+  return texts;
 }
 
 /**
@@ -412,12 +447,17 @@ export function extractAiAgentScorerDefinitionRefs(xml: string): Ref[] {
 export function extractOmniDataTransformRefs(xml: string, known: KnownArtifacts): Ref[] {
   const refs = new RefSet();
   const ident = /^[A-Za-z][A-Za-z0-9_]*$/;
-  const itemRe = /<omniDataTransformItem>([\s\S]*?)<\/omniDataTransformItem>/g;
+  // Rows and values are read with the one-walk readers in salesforce/xml.ts:
+  // the same answers as the lazy patterns they replace, without those
+  // patterns' quadratic and cubic cost on malformed text.
+  const ROW = 'omniDataTransformItem';
+  const ROW_OPEN = `<${ROW}>`;
+  const ROW_CLOSE = `</${ROW}>`;
   // The header's <type> (Extract | Transform | Load) — read with the item
   // rows stripped so nothing inside a row can answer for the mapper.
-  const isLoad = /<type>\s*Load\s*<\/type>/i.test(xml.replace(itemRe, ''));
+  const isLoad = /<type>\s*Load\s*<\/type>/i.test(withoutXmlBlocks(xml, ROW));
   const value = (row: string, tag: string): string =>
-    row.match(new RegExp(`<${tag}>\\s*([^<]*?)\\s*</${tag}>`))?.[1] ?? '';
+    xmlTagValue(row, tag, { emptyOk: true }) ?? '';
   const addObject = (raw: string) => {
     if (!ident.test(raw) || raw.toLowerCase() === 'json') return;
     const object = known.objects.get(raw.toLowerCase());
@@ -428,8 +468,8 @@ export function extractOmniDataTransformRefs(xml: string, known: KnownArtifacts)
     const qualified = known.fields.get(`${object}.${field}`.toLowerCase());
     if (qualified) refs.add('CustomField', qualified);
   };
-  for (const m of xml.matchAll(itemRe)) {
-    const row = m[1]!;
+  for (const block of xmlBlocks(xml, ROW)) {
+    const row = block.slice(ROW_OPEN.length, block.length - ROW_CLOSE.length);
     const output = value(row, 'outputObjectName');
     const lookup = value(row, 'lookupObjectName');
     addObject(value(row, 'inputObjectName'));

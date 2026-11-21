@@ -1,10 +1,14 @@
 import { extractChildBlocks } from '../snapshot/indexer.js';
+import { withoutXmlBlocks, xmlBlockText } from '../salesforce/xml.js';
 
 /**
  * Flow XML → a node/edge graph for the desktop's diagram view. Best-effort
  * structural read of Flow Builder metadata: every canvas element becomes a
  * node; connectors (normal, fault, decision rules, loop next/end, scheduled
- * paths) become labeled edges. Same regex-block idiom as the indexer.
+ * paths) become labeled edges. Same block-text idiom as the indexer, read in
+ * one walk per tag (salesforce/xml.ts): the Manifest view parses deployed
+ * bytes an agent wrote, and the lazy patterns this used to run were
+ * quadratic on openers with no closer after them.
  */
 
 export type FlowNodeKind =
@@ -81,9 +85,9 @@ const ELEMENT_KINDS: Array<[string, FlowNodeKind]> = [
   ['orchestratedStages', 'stage'],
 ];
 
+/** The first <tag> block's text, trimmed: `/<tag>([\s\S]*?)<\/tag>/`'s capture. */
 function tagValue(block: string, tag: string): string | null {
-  const match = block.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
-  return match?.[1]?.trim() ?? null;
+  return xmlBlockText(block, tag)?.trim() ?? null;
 }
 
 /**
@@ -95,20 +99,35 @@ function tagValue(block: string, tag: string): string | null {
  * the nested wrappers that legitimately carry <name> children, then match.
  */
 function elementName(block: string): string | null {
-  const cleaned = block
-    .replace(/<processMetadataValues>[\s\S]*?<\/processMetadataValues>/g, '')
-    .replace(/<inputParameters>[\s\S]*?<\/inputParameters>/g, '')
-    .replace(/<outputParameters>[\s\S]*?<\/outputParameters>/g, '');
+  let cleaned = block;
+  for (const tag of ['processMetadataValues', 'inputParameters', 'outputParameters']) {
+    cleaned = withoutXmlBlocks(cleaned, tag);
+  }
   return tagValue(cleaned, 'name');
 }
 
-/** First targetReference inside the FIRST occurrence of the given connector tag. */
+/**
+ * First targetReference inside the FIRST occurrence of the given connector
+ * tag: what `/<C>[\s\S]*?<targetReference>([\s\S]*?)<\/targetReference>[\s\S]*?<\/C>/`
+ * captures, read in one walk. Only the first connector opener can match: a
+ * later one finds no <targetReference>, closer or connector closer the first
+ * does not also find.
+ */
 function connectorTarget(block: string, connectorTag: string): string | null {
-  const match = block.match(
-    new RegExp(`<${connectorTag}>[\\s\\S]*?<targetReference>([\\s\\S]*?)</targetReference>[\\s\\S]*?</${connectorTag}>`),
-  );
-  return match?.[1]?.trim() ?? null;
+  const open = `<${connectorTag}>`;
+  const at = block.indexOf(open);
+  if (at === -1) return null;
+  const ref = block.indexOf(TARGET_OPEN, at + open.length);
+  if (ref === -1) return null;
+  const start = ref + TARGET_OPEN.length;
+  const end = block.indexOf(TARGET_CLOSE, start);
+  if (end === -1) return null;
+  if (block.indexOf(`</${connectorTag}>`, end + TARGET_CLOSE.length) === -1) return null;
+  return block.slice(start, end).trim();
 }
+
+const TARGET_OPEN = '<targetReference>';
+const TARGET_CLOSE = '</targetReference>';
 
 /** Render a Flow value block (<elementReference>/<stringValue>/…) as display text. */
 function valueText(block: string): string {
@@ -127,9 +146,25 @@ function conditionText(block: string): string {
   const left =
     tagValue(block, 'leftValueReference') ?? tagValue(block, 'field') ?? '?';
   const operator = tagValue(block, 'operator') ?? '=';
-  const rightBlock = block.match(/<(rightValue|value)>([\s\S]*?)<\/\1>/);
-  const right = rightBlock ? valueText(rightBlock[2] ?? '') : '';
+  const rightBlock = rightValueText(block);
+  const right = rightBlock !== undefined ? valueText(rightBlock) : '';
   return `${left} ${operator}${right ? ' ' + right : ''}`;
+}
+
+/**
+ * A condition's value block text: what `/<(rightValue|value)>([\s\S]*?)<\/\1>/`
+ * captures. Per tag only the first opener can match (if no closer follows
+ * it, none follows a later one), and the pattern takes whichever of the two
+ * tags' matches starts first.
+ */
+function rightValueText(block: string): string | undefined {
+  let first: { at: number; text: string } | undefined;
+  for (const tag of ['rightValue', 'value']) {
+    const text = xmlBlockText(block, tag);
+    const at = block.indexOf(`<${tag}>`);
+    if (text !== undefined && (first === undefined || at < first.at)) first = { at, text };
+  }
+  return first?.text;
 }
 
 /** Best-effort per-kind inspector rows. Crash-safe: unknown shapes yield []. */
@@ -217,7 +252,7 @@ export function parseFlowGraph(xml: string): FlowGraph {
   // any element block — cheapest reliable read: strip element blocks first.
   let outer = xml;
   for (const [tag] of ELEMENT_KINDS) {
-    outer = outer.replace(new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, 'g'), '');
+    outer = withoutXmlBlocks(outer, tag);
   }
   const flowLabel = tagValue(outer, 'label');
   const processType = tagValue(outer, 'processType');

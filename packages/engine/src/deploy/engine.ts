@@ -46,7 +46,6 @@ import type {
 } from '../core/types.js';
 import type { AccessTokenManager } from '../salesforce/tokens.js';
 import type { SnapshotStore } from '../snapshot/store.js';
-import { findChildBlock } from '../snapshot/indexer.js';
 import {
   REBASELINE_PROGRESS,
   executeSnapshotResult,
@@ -164,6 +163,7 @@ import {
   finalizeRevertPackage,
   hhmm,
   listedPropFor,
+  livePresence,
   preImageKey,
   preImageListQueryFor,
   retrieveMessagesNote,
@@ -2792,33 +2792,6 @@ export class DeployEngine {
   }
 
   /**
-   * S46 D3: what the live check knows about one permission-needing
-   * component — true = it found it in the org, false = it found it absent,
-   * null = it cannot place it. A member of the package answers from its own
-   * pre-image. A field authored inline in a CustomObject document has no
-   * pre-image of its own, so it answers from that object's: absent with the
-   * object, else by whether the object's live document holds its block.
-   */
-  private livePresence(
-    live: Extract<PreImageResult, { status: 'ok' }>,
-    type: string,
-    apiName: string,
-  ): boolean | null {
-    const image = live.images.get(preImageKey(type, apiName));
-    if (image) return image.present;
-    if (type === 'CustomField') {
-      const dot = apiName.indexOf('.');
-      const obj =
-        dot > 0 ? live.images.get(preImageKey('CustomObject', apiName.slice(0, dot))) : undefined;
-      if (obj?.present === false) return false;
-      if (obj?.present === true && obj.content !== undefined) {
-        return findChildBlock(obj.content, 'fields', apiName.slice(dot + 1)) !== null;
-      }
-    }
-    return null;
-  }
-
-  /**
    * S45 hook 6: the page-top live-check lines — the UNAVAILABLE banner when
    * the retrieve failed (the only case where "the org was not re-read" is
    * true), else the CHANGED-IN-TARGET summary and the dates-unavailable line.
@@ -3634,7 +3607,7 @@ export class DeployEngine {
     // component, when the live check was unavailable).
     const permCoverage = analyzePermissionCoverage(
       input.components,
-      live.status === 'ok' ? (type, name) => this.livePresence(live, type, name) : undefined,
+      live.status === 'ok' ? livePresence(live.images) : undefined,
     );
 
     // S41 (review fix): supersede IMMEDIATELY before inserting the new

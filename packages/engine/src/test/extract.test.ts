@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildKnownArtifacts,
+  extractAiEvaluationDefinitionRefs,
+  extractAiTestingDefinitionRefs,
   extractApexRefs,
   extractFlowRefs,
   extractObjectXmlRefs,
@@ -8,6 +10,7 @@ import {
   extractAllEdges,
   type KnownArtifacts,
 } from '../deps/extract.js';
+import { isStudioCatalogScorer } from '../core/agentforceScorers.js';
 import { indexSnapshotFiles } from '../snapshot/indexer.js';
 import { strToU8 } from 'fflate';
 import {
@@ -814,6 +817,46 @@ describe('S47: Data Mapper (OmniDataTransform) extractor', () => {
     ).toEqual([]);
   });
 
+  it('reads rows and values in linear time: about 1 MB of malformed rows answers fast, and the same', async () => {
+    // The lazy row pattern re-read to the end of the text once per row
+    // opener with no closer, and the lazy value pattern was cubic in the
+    // white space after an opener whose value is not followed by its closer:
+    // seconds of a blocked snapshot refresh for each shape below.
+    const { extractOmniDataTransformRefs } = await import('../deps/extract.js');
+    const MB = 1_000_000;
+    const fill = (unit: string) => unit.repeat(Math.floor(MB / unit.length));
+    const stuck = `<outputObjectName>${' '.repeat(200)}x${' '.repeat(200)}<b/>`;
+    const load = (rows: string) =>
+      '<OmniDataTransform xmlns="http://soap.sforce.com/2006/04/metadata">' +
+      `<name>SummaryMapper</name>${rows}<type>Load</type></OmniDataTransform>`;
+    const shapes: Array<[string, string]> = [
+      [
+        'row openers with no closer after a real row',
+        load(
+          row({ inputFieldName: 'Total', outputFieldName: 'Amount__c', outputObjectName: 'Invoice__c' }) +
+            fill('<omniDataTransformItem>'),
+        ),
+      ],
+      [
+        'values not followed by their closer, then the real one',
+        load(
+          '<omniDataTransformItem>' +
+            fill(stuck) +
+            '<outputFieldName>Amount__c</outputFieldName>' +
+            '<outputObjectName> Invoice__c </outputObjectName></omniDataTransformItem>',
+        ),
+      ],
+    ];
+    for (const [what, xml] of shapes) {
+      expect(xml.length, what).toBeGreaterThan(MB * 0.95);
+      const started = performance.now();
+      const refs = extractOmniDataTransformRefs(xml, knownSet());
+      const took = performance.now() - started;
+      expect(keysOf(refs), what).toEqual(['CustomField:Invoice__c.Amount__c', 'CustomObject:Invoice__c']);
+      expect(took, `${what}: ${Math.round(took)} ms`).toBeLessThan(1000);
+    }
+  });
+
   it('an indexed Load mapper joins its object and field through extractAllEdges', () => {
     const files = new Map(
       Object.entries({
@@ -835,5 +878,95 @@ describe('S47: Data Mapper (OmniDataTransform) extractor', () => {
     );
     expect(keys).toContain('OmniDataTransform:InvoiceLoad_1>CustomObject:Invoice__c');
     expect(keys).toContain('OmniDataTransform:InvoiceLoad_1>CustomField:Invoice__c.Amount__c');
+  });
+});
+
+describe('S44 test suites read in linear time (slow-path follow-up)', () => {
+  // A suite is text an agent deployed, read again on every snapshot
+  // refresh. The patterns these readers used started again from every
+  // <scorer opener with no ">" or no closer after it and read to the end
+  // (quadratic), and tried every split of the white space after a subject
+  // opener whose value was not followed by its closer (cubic). Each shape
+  // must answer in well under a second, with the edges those patterns gave.
+  const MB = 1_000_000;
+  const fill = (unit: string, bytes = MB) => unit.repeat(Math.floor(bytes / unit.length));
+  const timedKeys = (read: () => Array<{ toType: string; toName: string }>) => {
+    const started = performance.now();
+    const keys = read().map((r) => `${r.toType}:${r.toName}`);
+    return [keys, performance.now() - started] as const;
+  };
+  /** The edges the patterns these readers replace gave. */
+  const reference = (xml: string, scorers: boolean): string[] => {
+    const refs = new Map<string, string>();
+    const add = (type: string, raw: string) => {
+      const name = raw.trim();
+      if (name) refs.set(`${type}:${name.toLowerCase()}`, `${type}:${name}`);
+    };
+    const subject = xml.match(/<subjectName>\s*([^<]+?)\s*<\/subjectName>/)?.[1];
+    if (subject) {
+      const kind = xml.match(/<subjectType>\s*([^<]+?)\s*<\/subjectType>/)?.[1]?.toUpperCase();
+      add(kind === 'PROMPT' ? 'GenAiPromptTemplate' : 'Bot', subject);
+    }
+    if (scorers) {
+      for (const m of xml.matchAll(/<scorer(?:\s[^>]*)?>([\s\S]*?)<\/scorer>/g)) {
+        const name = m[1]!.match(/<name>\s*([^<]+?)\s*<\/name>/)?.[1];
+        if (name && !isStudioCatalogScorer(name)) add('AiAgentScorerDefinition', name);
+      }
+    }
+    return [...refs.values()];
+  };
+
+  it('scorer openers with no ">" or no closer after them, packed close together', () => {
+    const head =
+      '<AiTestingDefinition><subjectName>Support_Agent</subjectName><testCase>' +
+      '<scorer scorerType="Custom"><name>Tone_Check</name></scorer></testCase>';
+    const tails: Array<[string, string]> = [
+      ['openers with no ">" after them', fill('<scorer ')],
+      ['openers with no closer after them', fill('<scorer>')],
+      ['openers with attributes and no closer after them', fill('<scorer a="1">')],
+    ];
+    for (const [what, tail] of tails) {
+      const [keys, took] = timedKeys(() => extractAiTestingDefinitionRefs(head + tail));
+      expect(keys, what).toEqual(['Bot:Support_Agent', 'AiAgentScorerDefinition:Tone_Check']);
+      expect(took, `${what}: ${Math.round(took)} ms`).toBeLessThan(1000);
+    }
+  });
+
+  it('subject values not followed by their closer, then the real one', () => {
+    const stuck = `<subjectName>${' '.repeat(200)}x${' '.repeat(200)}<b/>`;
+    const tail =
+      '<subjectName> Support_Agent </subjectName><subjectType> prompt </subjectType>' +
+      '</AiTestingDefinition>';
+    const xml = `<AiTestingDefinition>${fill(stuck)}${tail}`;
+    for (const read of [extractAiTestingDefinitionRefs, extractAiEvaluationDefinitionRefs]) {
+      const [keys, took] = timedKeys(() => read(xml));
+      expect(keys, read.name).toEqual(['GenAiPromptTemplate:Support_Agent']);
+      expect(took, `${read.name}: ${Math.round(took)} ms`).toBeLessThan(1000);
+    }
+  });
+
+  it('the readers give the edges those patterns gave, edge cases included', () => {
+    const inputs = [
+      '<scorer><name>A</name></scorer>',
+      '<scorer\n x="<a>"><name>B</name></scorer>',
+      '<scorer ><name>C</name>',
+      '<scorerType>T</scorerType><scorer><name>D</name></scorer>',
+      '<scorer x><name>E</name></scorer><scorer>',
+      '<scorer><scorer><name>F</name></scorer></scorer>',
+      '<scorer><name> </name></scorer><scorer><name>coherence</name></scorer>',
+      '<scorer x="1"<name>G</name>></scorer>',
+      '<scorer\t><name>H</name></scorer><scorer><name>h</name></scorer>',
+      '<subjectName></subjectName><subjectName>S</subjectName><subjectType>AGENT</subjectType>',
+      '<subjectName> </subjectName><subjectType>PROMPT</subjectType>',
+      '<subjectType>Prompt</subjectType><subjectName>P</subjectName>',
+      '<scorer',
+    ];
+    for (const xml of inputs) {
+      const at = JSON.stringify(xml);
+      const tested = extractAiTestingDefinitionRefs(xml).map((r) => `${r.toType}:${r.toName}`);
+      expect(tested, at).toEqual(reference(xml, true));
+      const legacy = extractAiEvaluationDefinitionRefs(xml).map((r) => `${r.toType}:${r.toName}`);
+      expect(legacy, at).toEqual(reference(xml, false));
+    }
   });
 });
