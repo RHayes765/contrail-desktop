@@ -60,6 +60,12 @@ import {
   type TestLevel,
 } from '../salesforce/metadataSoap.js';
 import {
+  OMNISTUDIO_SETTING_TIMEOUT_MS,
+  omniStudioValidateText,
+  readOmniStudioMetadataSetting,
+  type OmniStudioMetadataSetting,
+} from '../salesforce/omnistudioSettings.js';
+import {
   RestClient,
   stripAttributes,
   type CompositeSubrequest,
@@ -311,6 +317,16 @@ export interface DeployValidationSummary {
   policy_check?: DryRunPolicyCheck;
   /** S46 (B): real validations only — the request's change record as the agent may see it. */
   governance?: GovernanceForAgent;
+  /**
+   * S47: only when the package holds an OmniDataTransform — the org's
+   * Omnistudio Metadata setting, read alongside the validation (dry runs too).
+   */
+  omnistudio_metadata?: OmniStudioMetadataSetting;
+  /**
+   * S47: a PASSED dry run only, when that setting is off or unread — what it
+   * means for the rows. There is no page and no failure note to carry it.
+   */
+  omnistudio_note?: string;
 }
 
 /**
@@ -3431,6 +3447,20 @@ export class DeployEngine {
         queryStamps: this.stampQueryFor(conn),
       });
     }
+    // S47: a package holding a Data Mapper also reads the org's Omnistudio
+    // Metadata setting — dry runs too — CONCURRENTLY with the checkOnly
+    // deploy, and waits for it on BOTH outcomes: the setting may be why the
+    // validation failed. Never rejects. No other package reads it.
+    const omniP = [...input.components, ...input.destructive].some(
+      (c) => c.type === 'OmniDataTransform',
+    )
+      ? readOmniStudioMetadataSetting(soap, {
+          timeoutMs: OMNISTUDIO_SETTING_TIMEOUT_MS,
+          pollIntervalMs: this.config.snapshot.pollIntervalMs,
+          signal: ctl.signal,
+        })
+      : null;
+    let omni: OmniStudioMetadataSetting | null = null;
     if (job) {
       job.progress = input.dryRun
         ? 'validating with Salesforce (checkOnly)'
@@ -3446,6 +3476,10 @@ export class DeployEngine {
         runTests: input.runTests,
       });
       result = await this.pollDeploy(soap, validationId, job);
+      if (omniP) {
+        if (job) job.progress = 'reading the Omnistudio Metadata setting';
+        omni = await omniP;
+      }
       // S45 hook 2: only a PASSED, approvable validation waits for the
       // pre-image; a failed one (or a dry run) discards it unread.
       if (result.success && preImagesP) {
@@ -3458,6 +3492,8 @@ export class DeployEngine {
       // validation it stops the retrieve's polling at its next tick.
       ctl.abort();
     }
+    // S47: rides the summary (and a failure) as read; never a local refusal.
+    const omniKey = omni ? { omnistudio_metadata: omni } : {};
 
     if (!result.success) {
       this.audit.record('deploy.validation_failed', {
@@ -3482,6 +3518,7 @@ export class DeployEngine {
           'Setup → Flows (its objects can be deleted here once the flow is gone). Fix any other ' +
           'failures and re-validate.'
         : 'Validation failed — no confirmation code was issued. Fix the failures and validate again.';
+      const omniNote = omni ? omniStudioValidateText(conn.alias, omni, 'note') : null;
       return {
         summary: null,
         validation_passed: false,
@@ -3492,7 +3529,8 @@ export class DeployEngine {
           tests_run: result.numberTestsTotal,
           test_failures: result.numberTestErrors,
           test_failure_detail: this.gateTestDetail(conn, result),
-          note,
+          note: omniNote ? `${note} ${omniNote}` : note,
+          ...omniKey,
           // S46 (B): a failed dry run reports the policies too — mid-build
           // dry runs are the ones that fail. Never approvable either way.
           ...(input.dryRun && prePolicy ? { policy_check: dryRunPolicyCheck(prePolicy) } : {}),
@@ -3517,6 +3555,7 @@ export class DeployEngine {
           ...sourceProvenance(input.components),
         },
       });
+      const omniDryNote = omni ? omniStudioValidateText(conn.alias, omni, 'dry') : null;
       const drySummary: DeployValidationSummary = {
         connection: conn.alias,
         org_type: conn.orgType,
@@ -3537,6 +3576,8 @@ export class DeployEngine {
         permission_warning: analyzePermissionCoverage(input.components).warning,
         expires_at: null,
         live_check: null,
+        ...omniKey,
+        ...(omniDryNote ? { omnistudio_note: omniDryNote } : {}),
         // S46 (B): what a real validation would be refused for — reported, not enforced.
         ...(prePolicy ? { policy_check: dryRunPolicyCheck(prePolicy) } : {}),
       };
@@ -3653,6 +3694,7 @@ export class DeployEngine {
       blast,
       live_check: liveCheck,
       governance: minted.stored,
+      ...omniKey,
     };
     const code = generateConfirmationCode();
     const expiresAt = new Date(Date.now() + this.config.deploy.codeTtlMs).toISOString();
@@ -3694,12 +3736,14 @@ export class DeployEngine {
       expires_at: expiresAt,
       live_check: liveCheck,
       governance: minted.forAgent,
+      ...omniKey,
     };
 
     // S45 hook 5: each row's diff — against the live version when the
     // retrieve succeeded and the type is comparable, else the snapshot (the
     // label says which); a page-wide budget keeps the page bounded.
     const diffs = this.rowDiffs(conn, input, changes, live);
+    const omniLine = omni ? omniStudioValidateText(conn.alias, omni, 'page') : null;
     const view: ApprovalPageOptions = {
       kind: 'deploy',
       code,
@@ -3747,8 +3791,10 @@ export class DeployEngine {
       ],
       blast,
       // S45 hook 6: the live-check lines ride view.warnings, so the phone's
-      // warning count includes them with notify.ts untouched.
+      // warning count includes them with notify.ts untouched. S47: the
+      // Omnistudio Metadata line leads — it can make the whole deploy moot.
       warnings: [
+        ...(omniLine ? [omniLine] : []),
         ...(permCoverage.warning ? [permCoverage.warning] : []),
         ...this.liveCheckWarnings(conn, input, live, review.changedInTarget),
       ],

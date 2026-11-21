@@ -6,6 +6,7 @@ import {
   STAMP_NO_ROW_REASON,
   hhmm,
   isProbeable,
+  omniStudioValidateText,
   policyChangedText,
   stampQueryFailedReason,
   unmatchedRuleText,
@@ -22,6 +23,7 @@ import {
   type ExecuteSnapshotBlock,
   type GovernanceState,
   type LiveCheckSummary,
+  type OmniStudioMetadataSetting,
   type RevertPlanComponent,
   type RevertPlanMember,
   type RevertPlanReason,
@@ -1129,6 +1131,8 @@ export class DeployService {
       live_check?: unknown;
       // S46 (B): the change record minted with the request (absent before 0.40).
       governance?: unknown;
+      // S47: the Omnistudio Metadata setting validate read (Data Mapper packages only).
+      omnistudio_metadata?: unknown;
       // DML summaries are a preview object, not component lists.
       operation?: string;
       object?: string;
@@ -1241,6 +1245,9 @@ export class DeployService {
     const targetCheck = targetCheckView(result?.target_check);
     const changes = structured(summary?.changes);
     const destructive = structured(summary?.destructive);
+    // S47: the setting a Data Mapper validation read, as stored — its page
+    // line is the engine's own sentence, never stored in summary_json.
+    const omniSetting = omniStudioSettingView(summary?.omnistudio_metadata);
     return {
       id: rec.id,
       kind: rec.kind,
@@ -1279,6 +1286,9 @@ export class DeployService {
         // Components then deletions, in the order validate named them — the
         // order the engine's own dates line lists members in.
         members: [...changes, ...destructive],
+        omnistudioLine: omniSetting
+          ? omniStudioValidateText(conn.alias, omniSetting, 'page')
+          : null,
       }),
       agentReview: review?.agentReview ?? null,
       // S46 (B): read live from summary_json and the policies — never copied
@@ -1499,6 +1509,14 @@ function preImageView(raw: unknown): DeployPreImageView | null {
     comparable: p.comparable === true,
     restorable: p.restorable === true,
   };
+}
+
+/** S47: summary.omnistudio_metadata → the engine's setting; anything else → null. */
+function omniStudioSettingView(raw: unknown): OmniStudioMetadataSetting | null {
+  const s = record(raw) as Loose<OmniStudioMetadataSetting> | null;
+  if (!s || (s.state !== 'on' && s.state !== 'off' && s.state !== 'unknown')) return null;
+  const reason = str(s.reason);
+  return { state: s.state, ...(reason !== null ? { reason } : {}) };
 }
 
 /** summary.live_check (LiveCheckSummary) → view. */
@@ -1784,6 +1802,10 @@ function probeSourced(p: DeployPreImageView | undefined): boolean {
  * S46: the dates-unavailable line mirrors the engine's liveCheckWarnings
  * and, like it, is ONE line at most. The org's retrieve messages
  * (`liveCheck.retrieveNote`) are never a notice.
+ * S47: a Data Mapper request validated outside this app gets the engine's
+ * Omnistudio Metadata line (off, or not read) rebuilt from its stored
+ * setting, first — as it leads the approval page's warnings. A row this app
+ * presented stored that line in `warnings` already.
  */
 function reviewNotices(
   status: string,
@@ -1795,9 +1817,15 @@ function reviewNotices(
     outsideApp: boolean;
     /** Components then deletions, each with its frozen pre-image when one exists. */
     members: Array<Pick<DeployChangeView, 'type' | 'apiName' | 'preImage'>>;
+    /**
+     * S47: the engine's page line for the stored Omnistudio Metadata
+     * setting; null when it is on or none was stored.
+     */
+    omnistudioLine: string | null;
   },
 ): string[] {
   const out: string[] = [];
+  if (origin.outsideApp && origin.omnistudioLine) out.push(origin.omnistudioLine);
   if (
     liveCheck?.status === 'unavailable' &&
     !warnings.some((w) => w.startsWith('LIVE COMPARISON UNAVAILABLE'))

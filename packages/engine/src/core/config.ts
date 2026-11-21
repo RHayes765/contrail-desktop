@@ -194,7 +194,11 @@ export const DEFAULT_CONFIG: ContrailConfig = {
     // BotTemplate, BotBlock — and, S44, AiTestingDefinition and
     // AiAgentScorerDefinition) — licensing-gated (unlicensed orgs report them
     // unsupported, degraded per-type with a warning) and need
-    // salesforce.apiVersion v66+.
+    // salesforce.apiVersion v66+. S47: OmniDataTransform (Omnistudio Data
+    // Mappers) is explicit-refresh-only too — refresh_snapshot
+    // types:['OmniDataTransform']. Salesforce's type page requires an
+    // Omnistudio licence, and with the org's Omnistudio Metadata setting off
+    // a probed org listed none of the Data Mappers it held as records.
     types: [
       'ApexClass',
       'ApexTrigger',

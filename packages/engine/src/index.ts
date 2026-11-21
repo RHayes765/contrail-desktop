@@ -329,6 +329,13 @@ export {
   stampQueryFailedReason,
   isProbeable,
 } from './deploy/stampprobe.js';
+// S47: Deploy Review's Omnistudio Metadata line for a request validated
+// outside the app (services/deploys.ts rebuilds it from the setting the
+// summary stored, with the engine's own sentence builder).
+export {
+  omniStudioValidateText,
+  type OmniStudioMetadataSetting,
+} from './salesforce/omnistudioSettings.js';
 // S45 F1/F2/F4: the live pre-image, the execute-time target check and the
 // revert package (written under stagingDir()/_reverts/<requestId>/).
 export {

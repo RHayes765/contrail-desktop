@@ -79,6 +79,11 @@ const SIMPLE_DIR_TYPES: Array<{ dir: string; ext: string; type: string }> = [
   { dir: 'permissionsetgroups', ext: '.permissionsetgroup', type: 'PermissionSetGroup' },
   { dir: 'mutingpermissionsets', ext: '.mutingpermissionset', type: 'MutingPermissionSet' },
   { dir: 'quickActions', ext: '.quickAction', type: 'QuickAction' },
+  // S47: Omnistudio Data Mappers — a flat single-file type (describeMetadata
+  // v68, 2026-11-20: suffix rpt, no metaFile); the generic -meta.xml skip is
+  // correct. fileBaseName strips only the final extension, so a versioned
+  // fullName (Name_1) survives intact.
+  { dir: 'omniDataTransforms', ext: '.rpt', type: 'OmniDataTransform' },
 ];
 
 /**

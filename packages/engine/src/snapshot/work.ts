@@ -86,6 +86,8 @@ const TYPE_DIRS: Record<string, string> = {
   LightningComponentBundle: 'lwc',
   // S41: Aura component bundles.
   AuraDefinitionBundle: 'aura',
+  // S47: Omnistudio Data Mappers (explicit-refresh-only).
+  OmniDataTransform: 'omniDataTransforms',
 };
 
 /** The refreshed types' own directories — null if any requested type has no known mapping. */

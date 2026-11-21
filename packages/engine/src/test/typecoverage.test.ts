@@ -4,8 +4,10 @@ import {
   analyzeChanges,
   analyzePermissionCoverage,
   buildDeployZip,
+  changeDependentWarnings,
   deployZipEntryPath,
   isRegisteredType,
+  isValidComponentName,
   parseEnvelopeFor,
   readOldContent,
   retrieveMemberFor,
@@ -2727,5 +2729,333 @@ describe('S46 D3: the permission warning says what Contrail knows about each com
       expect(cov.uncovered).toEqual([]);
       expect(cov.warning).toBeNull();
     }
+  });
+});
+
+describe('S47: Omnistudio Data Mappers (OmniDataTransform)', () => {
+  const conn = { id: 'conn-1', alias: 'dev' } as ConnectionRecord;
+  const V47 = '68.0';
+  const dbAdd = { getArtifact: () => null } as unknown as ContrailDb;
+  const storeNone = {
+    readCurrentFile: () => null,
+    listCurrentFiles: () => [],
+  } as unknown as SnapshotStore;
+  const dbMod = (filePath: string) =>
+    ({ getArtifact: () => ({ filePath }) }) as unknown as ContrailDb;
+  const storeWith = (old: string) =>
+    ({ readCurrentFile: () => old, listCurrentFiles: () => [] }) as unknown as SnapshotStore;
+  const warningsOf = (res: ReturnType<typeof analyzeChanges>) =>
+    res.changes[0]!.warnings.join(' ');
+
+  // Element grammar per Salesforce's OmniDataTransform type page (Industries
+  // developer guide): header elements alphabetical, the repeated
+  // <omniDataTransformItem> rows between nullInputsIncludedInOutput and
+  // outputType, item children alphabetical, item <name> = the mapper's name,
+  // uniqueName = <name>_<versionNumber>. Doc-derived — these strings pin
+  // Contrail's own arms, not a retrieved file.
+  const row = (name: string, input: string, output: string) =>
+    `    <omniDataTransformItem>\n        <disabled>false</disabled>\n` +
+    `        <filterGroup>0.0</filterGroup>\n        <inputFieldName>${input}</inputFieldName>\n` +
+    `        <name>${name}</name>\n        <outputCreationSequence>1.0</outputCreationSequence>\n` +
+    `        <outputFieldName>${output}</outputFieldName>\n` +
+    `        <outputObjectName>json</outputObjectName>\n    </omniDataTransformItem>\n`;
+  const mapper = (name: string, uniqueName: string | null, rows: string) =>
+    `<?xml version="1.0" encoding="UTF-8"?>\n` +
+    `<OmniDataTransform xmlns="http://soap.sforce.com/2006/04/metadata">\n` +
+    `    <active>true</active>\n    <inputType>JSON</inputType>\n    <name>${name}</name>\n` +
+    `    <nullInputsIncludedInOutput>false</nullInputsIncludedInOutput>\n${rows}` +
+    `    <outputType>JSON</outputType>\n    <type>Extract</type>\n` +
+    (uniqueName === null ? '' : `    <uniqueName>${uniqueName}</uniqueName>\n`) +
+    `    <versionNumber>1.0</versionNumber>\n</OmniDataTransform>\n`;
+  const extract = mapper(
+    'AccountSummaryExtract',
+    'AccountSummaryExtract_1',
+    row('AccountSummaryExtract', 'Account:Name', 'AccountName'),
+  );
+  const ADVISORY =
+    "OMNISTUDIO DATA MAPPER — deploys only where the org's Omnistudio Metadata setting is " +
+    'on (per Salesforce Help). Its <active> value decides whether it lands active (per a ' +
+    'Salesforce blog — not yet confirmed here). Formula items need the Data Mapper Designer ' +
+    "(formulaConverted is Designer-computed); check the result in the Designer's Preview.";
+  const MODIFY =
+    'MODIFY OF AN EXISTING DATA MAPPER — whether the org updates it in place (per Salesforce ' +
+    "Help, an active version can't be edited once Data Mapper Versioning is on) is not " +
+    'confirmed, nor whether mapping rows omitted here are removed org-side; carry every row ' +
+    'from a fresh retrieve.';
+  const MIXED =
+    "MIXED PACKAGE — Salesforce says Omnistudio components can't share a deploy with setup " +
+    'metadata (permission sets, profiles, fields, FlexiPages, Expression Sets); if the org ' +
+    'refuses, deploy the Data Mappers on their own.';
+
+  it('places omniDataTransforms/<Name>_<version>.rpt with a literal member and NO meta sidecar', () => {
+    const built = buildDeployZip(
+      [comp('OmniDataTransform', 'AccountSummaryExtract_1', extract)],
+      [],
+      V47,
+      noMeta,
+    );
+    expect(built.files).toEqual(['omniDataTransforms/AccountSummaryExtract_1.rpt', 'package.xml']);
+    expect(built.files.filter((f) => f.endsWith('-meta.xml'))).toEqual([]);
+    expect(built.packageXml).toContain(
+      '<members>AccountSummaryExtract_1</members>\n        <name>OmniDataTransform</name>',
+    );
+    // The body is written byte-for-byte — no envelope, no rewrite.
+    expect(zipText(built.zip, 'omniDataTransforms/AccountSummaryExtract_1.rpt')).toBe(extract);
+  });
+
+  it('deployZipEntryPath matches the builder; retrieveMemberFor and isRegisteredType see the type', () => {
+    expect(deployZipEntryPath('OmniDataTransform', 'AccountSummaryExtract_1')).toEqual({
+      path: 'omniDataTransforms/AccountSummaryExtract_1.rpt',
+      child: false,
+    });
+    expect(retrieveMemberFor('OmniDataTransform', 'AccountSummaryExtract_1')).toEqual({
+      type: 'OmniDataTransform',
+      member: 'AccountSummaryExtract_1',
+    });
+    expect(isRegisteredType('OmniDataTransform')).toBe(true);
+    // The metadata type is the mapper; its item sObject is NOT a type.
+    expect(isRegisteredType('OmniDataTransformItem')).toBe(false);
+  });
+
+  it('the indexer reads omniDataTransforms/<Name>_1.rpt as one row, version suffix intact, and skips a -meta.xml', () => {
+    const files = new Map<string, Uint8Array>([
+      ['omniDataTransforms/AccountSummaryExtract_1.rpt', strToU8(extract)],
+      ['omniDataTransforms/AccountSummaryExtract_1.rpt-meta.xml', strToU8('<stray/>')],
+    ]);
+    const rows = indexSnapshotFiles(files, [], '2026-11-20T00:00:00.000Z');
+    expect(rows.map((r) => `${r.type}:${r.apiName}:${r.filePath}`)).toEqual([
+      'OmniDataTransform:AccountSummaryExtract_1:omniDataTransforms/AccountSummaryExtract_1.rpt',
+    ]);
+  });
+
+  it('name grammar: letters and digits, optionally _<version>; anything else is refused with the reason', () => {
+    for (const name of ['AccountSummaryExtract_1', 'Abc_1', 'Abc', 'Abc2_12']) {
+      expect(isValidComponentName('OmniDataTransform', name), name).toBe(true);
+      expect(() =>
+        buildDeployZip([comp('OmniDataTransform', name, extract)], [], V47, noMeta),
+      ).not.toThrow();
+    }
+    for (const name of ['Abc_Def', 'Abc-1', 'Abc 1', '_1', 'Abc_1_2', 'Abc_', 'Abc.1']) {
+      expect(isValidComponentName('OmniDataTransform', name), name).toBe(false);
+      expect(
+        () => buildDeployZip([comp('OmniDataTransform', name, extract)], [], V47, noMeta),
+        name,
+      ).toThrow(
+        `invalid OmniDataTransform name "${name}" — letters and digits, optionally ` +
+          `_<version> (e.g. AccountSummaryExtract_1). Per Salesforce Help, Data Mapper names ` +
+          `hold letters and digits only once Omnistudio Metadata is on; Salesforce's guides ` +
+          `name the files <Name>_<version> (exact fullName rule not yet confirmed).`,
+      );
+    }
+    // The grammar is the type's, so it holds on the destructive path too.
+    expect(() =>
+      buildDeployZip([], [{ type: 'OmniDataTransform', api_name: 'Abc-1' }], V47, noMeta),
+    ).toThrow('invalid OmniDataTransform name "Abc-1"');
+    // Other types keep the generic grammar.
+    expect(isValidComponentName('ApexClass', 'Abc_Def')).toBe(true);
+  });
+
+  it('a stray envelope aimed at it fails locally and honestly', () => {
+    expect(() =>
+      buildDeployZip(
+        [
+          comp(
+            'OmniDataTransform',
+            'AccountSummaryExtract_1',
+            '{"contrail_bundle":1,"files":{"AccountSummaryExtract_1.rpt":"<OmniDataTransform/>"}}',
+          ),
+        ],
+        [],
+        V47,
+        noMeta,
+      ),
+    ).toThrow(/single-file type/);
+  });
+
+  it('the OMNISTUDIO DATA MAPPER advisory fires on add AND modify; modify adds the hedged arm, never WHOLE-DOCUMENT REPLACE', () => {
+    const added = analyzeChanges(
+      dbAdd,
+      storeNone,
+      conn,
+      [comp('OmniDataTransform', 'AccountSummaryExtract_1', extract)],
+      [],
+    );
+    expect(added.changes[0]!.change).toBe('add');
+    expect(added.changes[0]!.warnings).toEqual([ADVISORY]);
+
+    const modified = analyzeChanges(
+      dbMod('omniDataTransforms/AccountSummaryExtract_1.rpt'),
+      storeWith(mapper('AccountSummaryExtract', 'AccountSummaryExtract_1', '')),
+      conn,
+      [comp('OmniDataTransform', 'AccountSummaryExtract_1', extract)],
+      [],
+    );
+    expect(modified.changes[0]!.change).toBe('modify');
+    // The change-dependent arm leads; the change-independent advisory follows.
+    expect(modified.changes[0]!.warnings).toEqual([MODIFY, ADVISORY]);
+    // Removal of omitted rows is NOT confirmed — the generic sentence that
+    // states it as fact must never appear for this type.
+    expect(warningsOf(modified)).not.toMatch(/WHOLE-DOCUMENT REPLACE/);
+    expect(warningsOf(modified)).not.toContain('is removed.');
+    // Nor is an in-place update: no heading states that the modify REPLACES.
+    expect(warningsOf(modified)).not.toMatch(/REPLACE/);
+
+    // The engine re-runs the change-dependent arms against the live copy:
+    // the modify arm is change-dependent, the advisory is not.
+    const arms = (change: 'add' | 'modify' | 'unchanged_content') =>
+      changeDependentWarnings({
+        type: 'OmniDataTransform',
+        api_name: 'AccountSummaryExtract_1',
+        change,
+        proposed: extract,
+        before: change === 'add' ? null : extract,
+      });
+    expect(arms('modify')).toEqual([MODIFY]);
+    expect(arms('add')).toEqual([]);
+    expect(arms('unchanged_content')).toEqual([]);
+  });
+
+  it('UNIQUENAME MISMATCH: only when the header uniqueName differs from api_name — advisory, never a refusal', () => {
+    const run = (apiName: string, content: string) =>
+      analyzeChanges(dbAdd, storeNone, conn, [comp('OmniDataTransform', apiName, content)], []);
+    const mismatch = run('AccountSummaryExtract', extract);
+    expect(mismatch.changes[0]!.warnings).toContain(
+      "UNIQUENAME MISMATCH — api_name AccountSummaryExtract differs from the file's uniqueName " +
+        "AccountSummaryExtract_1; Salesforce's guides name Data Mapper files <Name>_<version> " +
+        '(fullName rule not yet confirmed).',
+    );
+    expect(() =>
+      buildDeployZip([comp('OmniDataTransform', 'AccountSummaryExtract', extract)], [], V47, noMeta),
+    ).not.toThrow();
+    expect(warningsOf(run('AccountSummaryExtract_1', extract))).not.toMatch(/UNIQUENAME/);
+    // No <uniqueName> in the file: nothing to compare.
+    expect(
+      warningsOf(run('AccountSummaryExtract_1', mapper('AccountSummaryExtract', null, ''))),
+    ).not.toMatch(/UNIQUENAME/);
+    // Only the header's value counts — an item row carrying one is ignored.
+    const rowOnly = mapper(
+      'AccountSummaryExtract',
+      null,
+      row('AccountSummaryExtract', 'Account:Name', 'AccountName').replace(
+        '<name>',
+        '<uniqueName>Other_2</uniqueName><name>',
+      ),
+    );
+    expect(warningsOf(run('AccountSummaryExtract_1', rowOnly))).not.toMatch(/UNIQUENAME/);
+  });
+
+  it('UNIQUENAME MISMATCH reads the header in linear time: about 1 MB of malformed rows or names answers fast, and the same', () => {
+    // The lazy row strip re-read to the end of the text once per row opener
+    // with no closer, and the lazy value pattern was cubic in the white space
+    // after a <uniqueName> with no closer: seconds to minutes of a blocked
+    // server for the first two shapes. Each answers what the patterns did.
+    const MB = 1_000_000;
+    const head = (rest: string) =>
+      `<OmniDataTransform xmlns="http://soap.sforce.com/2006/04/metadata">\n` +
+      `    <name>AccountSummaryExtract</name>\n${rest}`;
+    const decoyRow = row('AccountSummaryExtract', 'Account:Name', 'AccountName').replace(
+      '<name>',
+      '<uniqueName>Row_9</uniqueName><name>',
+    );
+    const shapes: Array<[string, string, string | null]> = [
+      // An opener with no closer leaves the rest in place: no header value.
+      [
+        'row openers with no closer',
+        head('<omniDataTransformItem>'.repeat(Math.floor(MB / 23))),
+        null,
+      ],
+      [
+        '<uniqueName> openers with no closer, each followed by white space',
+        head(`<uniqueName>${' '.repeat(200)}`.repeat(Math.floor(MB / 212))),
+        null,
+      ],
+      [
+        'closed rows carrying their own uniqueName, then the header value',
+        head(
+          decoyRow.repeat(Math.floor(MB / decoyRow.length)) +
+            '    <type>Extract</type>\n    <uniqueName> AccountSummaryExtract_2 </uniqueName>\n' +
+            '</OmniDataTransform>\n',
+        ),
+        'AccountSummaryExtract_2',
+      ],
+    ];
+    for (const [what, content, uniqueName] of shapes) {
+      expect(content.length, what).toBeGreaterThan(MB * 0.95);
+      const started = performance.now();
+      const res = analyzeChanges(
+        dbAdd,
+        storeNone,
+        conn,
+        [comp('OmniDataTransform', 'AccountSummaryExtract_1', content)],
+        [],
+      );
+      const took = performance.now() - started;
+      if (uniqueName === null) {
+        expect(warningsOf(res), what).not.toMatch(/UNIQUENAME/);
+      } else {
+        expect(warningsOf(res), what).toContain(`differs from the file's uniqueName ${uniqueName};`);
+      }
+      expect(took, `${what}: ${Math.round(took)} ms`).toBeLessThan(1000);
+    }
+  });
+
+  it('MIXED PACKAGE: on every Data Mapper entry when any other type shares the package; absent when they deploy alone', () => {
+    const alone = analyzeChanges(
+      dbAdd,
+      storeNone,
+      conn,
+      [
+        comp('OmniDataTransform', 'AccountSummaryExtract_1', extract),
+        comp('OmniDataTransform', 'AccountSummaryTransform_1', extract),
+      ],
+      [{ type: 'OmniDataTransform', api_name: 'OldSummaryExtract_1' }],
+    );
+    for (const entry of [...alone.changes, ...alone.destructive]) {
+      expect(entry.warnings, entry.api_name).not.toContain(MIXED);
+    }
+
+    const withSetup = analyzeChanges(
+      dbAdd,
+      storeNone,
+      conn,
+      [
+        comp('OmniDataTransform', 'AccountSummaryExtract_1', extract),
+        comp('PermissionSet', 'Summary_Access', '<PermissionSet/>'),
+      ],
+      [{ type: 'OmniDataTransform', api_name: 'OldSummaryExtract_1' }],
+    );
+    expect(withSetup.changes[0]!.warnings).toContain(MIXED);
+    expect(withSetup.destructive[0]!.warnings).toContain(MIXED);
+    // Said on the Data Mapper entries only.
+    expect(withSetup.changes[1]!.warnings).not.toContain(MIXED);
+
+    // A deletion of another type mixes the package too.
+    const withDeletion = analyzeChanges(
+      dbAdd,
+      storeNone,
+      conn,
+      [comp('OmniDataTransform', 'AccountSummaryExtract_1', extract)],
+      [{ type: 'CustomField', api_name: 'Account.Old_Region__c' }],
+    );
+    expect(withDeletion.changes[0]!.warnings).toContain(MIXED);
+    expect(withDeletion.destructive[0]!.warnings).not.toContain(MIXED);
+
+    // No Data Mapper, no advisory.
+    const none = analyzeChanges(
+      dbAdd,
+      storeNone,
+      conn,
+      [comp('PermissionSet', 'Summary_Access', '<PermissionSet/>')],
+      [{ type: 'CustomField', api_name: 'Account.Old_Region__c' }],
+    );
+    expect(JSON.stringify(none)).not.toContain('MIXED PACKAGE');
+  });
+
+  it('OmniDataTransform deliberately produces NO permission needs', () => {
+    const res = analyzePermissionCoverage([
+      comp('OmniDataTransform', 'AccountSummaryExtract_1', extract),
+    ]);
+    expect(res.uncovered).toHaveLength(0);
+    expect(res.warning).toBeNull();
   });
 });

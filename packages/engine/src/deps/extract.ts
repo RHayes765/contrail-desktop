@@ -390,6 +390,61 @@ export function extractAiAgentScorerDefinitionRefs(xml: string): Ref[] {
 }
 
 /**
+ * S47: Data Mapper → the sObjects and fields its mapping rows name.
+ * DOC-DERIVED: the element names come from Salesforce's OmniDataTransform
+ * type page (Industries developer guide), not yet from a file retrieved
+ * from an org. Per <omniDataTransformItem> row:
+ * - object edges from inputObjectName, outputObjectName (the literal `json`
+ *   output skipped, any case) and lookupObjectName;
+ * - field edges only where BOTH halves are plain identifiers: on a Load
+ *   mapper, outputObjectName + outputFieldName (the sObject field it
+ *   writes), and on a lookup row, lookupObjectName + lookupByFieldName /
+ *   lookupReturnedFieldName.
+ * inputFieldName is never read. On Extract output rows it is a path through
+ * query aliases (Alias:Field), and on Transform / Load rows a path into the
+ * mapper's input. On an Extract query step's filter rows it most likely
+ * names a field of inputObjectName, but those are skipped too: conservative
+ * until a retrieved file confirms the row shapes. Edges join ONLY to
+ * artifacts the index holds (named with the index's own casing): a grammar
+ * nobody has yet seen retrieved must not mint edges to names nothing
+ * resolves.
+ */
+export function extractOmniDataTransformRefs(xml: string, known: KnownArtifacts): Ref[] {
+  const refs = new RefSet();
+  const ident = /^[A-Za-z][A-Za-z0-9_]*$/;
+  const itemRe = /<omniDataTransformItem>([\s\S]*?)<\/omniDataTransformItem>/g;
+  // The header's <type> (Extract | Transform | Load) — read with the item
+  // rows stripped so nothing inside a row can answer for the mapper.
+  const isLoad = /<type>\s*Load\s*<\/type>/i.test(xml.replace(itemRe, ''));
+  const value = (row: string, tag: string): string =>
+    row.match(new RegExp(`<${tag}>\\s*([^<]*?)\\s*</${tag}>`))?.[1] ?? '';
+  const addObject = (raw: string) => {
+    if (!ident.test(raw) || raw.toLowerCase() === 'json') return;
+    const object = known.objects.get(raw.toLowerCase());
+    if (object) refs.add('CustomObject', object);
+  };
+  const addField = (object: string, field: string) => {
+    if (!ident.test(object) || !ident.test(field) || object.toLowerCase() === 'json') return;
+    const qualified = known.fields.get(`${object}.${field}`.toLowerCase());
+    if (qualified) refs.add('CustomField', qualified);
+  };
+  for (const m of xml.matchAll(itemRe)) {
+    const row = m[1]!;
+    const output = value(row, 'outputObjectName');
+    const lookup = value(row, 'lookupObjectName');
+    addObject(value(row, 'inputObjectName'));
+    addObject(output);
+    addObject(lookup);
+    if (isLoad) addField(output, value(row, 'outputFieldName'));
+    if (lookup) {
+      addField(lookup, value(row, 'lookupByFieldName'));
+      addField(lookup, value(row, 'lookupReturnedFieldName'));
+    }
+  }
+  return refs.list();
+}
+
+/**
  * S33: NamedCredential → the ExternalCredential its Authentication parameter
  * names (<namedCredentialParameters><externalCredential>, live-confirmed) and,
  * on legacy NamedCredentials, the AuthProvider (top-level <authProvider>).
@@ -694,6 +749,8 @@ export function extractAllEdges(
       add(a.type, a.apiName, extractAiTestingDefinitionRefs(a.content));
     } else if (a.type === 'AiAgentScorerDefinition') {
       add(a.type, a.apiName, extractAiAgentScorerDefinitionRefs(a.content));
+    } else if (a.type === 'OmniDataTransform') {
+      add(a.type, a.apiName, extractOmniDataTransformRefs(a.content, known));
     } else if (a.type === 'NamedCredential') {
       add(a.type, a.apiName, extractNamedCredentialRefs(a.content));
     } else if (a.type === 'ExternalCredential') {

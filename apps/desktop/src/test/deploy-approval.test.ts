@@ -7,6 +7,7 @@ import {
   ContrailError,
   REBASELINE_PROGRESS,
   hhmm,
+  omniStudioValidateText,
   policyChangedText,
   unmatchedRuleText,
   type ApprovalRequestView,
@@ -14,6 +15,7 @@ import {
   type ContrailConfig,
   type EngineDeps,
   type GovernanceState,
+  type OmniStudioMetadataSetting,
 } from '@contrail/engine';
 // The engine's own execute-result builder (not re-exported by the package
 // index): the re-baseline note Deploy Review reads is the engine's text.
@@ -3494,5 +3496,116 @@ describe('S46 C: the re-baseline result in Deploy Review', () => {
     const text = (await service.interceptAgentExecute('s-st', 'deploy', connId)!).content[0]!.text;
     expect(text).toContain('"approved": true');
     expect(text).toContain('"status": "pending"');
+  });
+});
+
+// ── S47: the Omnistudio Metadata line in Deploy Review ──────────────────
+
+describe('S47: the Omnistudio Metadata line for a Data Mapper validated outside the app', () => {
+  const MAPPER = {
+    type: 'OmniDataTransform',
+    api_name: 'AccountSummaryExtract_1',
+    change: 'add',
+    warnings: [],
+  };
+  /** The engine's own page line for a setting, in dev-org. */
+  const pageLine = (setting: OmniStudioMetadataSetting): string =>
+    omniStudioValidateText('dev-org', setting, 'page')!;
+  const omniNotices = (notices: string[]): string[] =>
+    notices.filter((n) => /omnistudio metadata/i.test(n));
+
+  /** A Data Mapper deploy validated OUTSIDE this app (no review_json), e.g. by the plugin. */
+  function seedMapper(connId: string, code: string, extra: Record<string, unknown>): string {
+    return db.insertDeployRequest({
+      connectionId: connId,
+      kind: 'deploy',
+      confirmationCode: code,
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      summaryJson: JSON.stringify({ changes: [MAPPER], destructive: [], ...extra }),
+    }).id;
+  }
+
+  it("OFF: the engine's page line leads the notices, ahead of the outside-the-app one", () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const id = seedMapper(connId, 'OMNI-OFFX', {
+      omnistudio_metadata: { state: 'off' },
+      live_check: {
+        status: 'ok',
+        started_at: '2026-11-20T15:01:00.000Z',
+        at: '2026-11-20T15:02:00.000Z',
+        dates_unavailable_types: [],
+        stamp_scheme: 2,
+        members: 1,
+      },
+    });
+    const line = pageLine({ state: 'off' });
+    expect(line.startsWith('OMNISTUDIO METADATA IS OFF in "dev-org" — Salesforce Help says')).toBe(
+      true,
+    );
+    expect(line.endsWith('so ADD / NOT IN TARGET below does not prove none exists.')).toBe(true);
+    const view = service.get(id);
+    // Nothing from its page was stored here: the line is rebuilt, first.
+    expect(view.warnings).toEqual([]);
+    expect(view.notices).toHaveLength(2);
+    expect(view.notices[0]).toBe(line);
+    expect(view.notices[1]).toMatch(/^Validated outside the app/);
+    // Reported, never enforced: the row is still a validated request.
+    expect(view.status).toBe('validated');
+    expect(JSON.stringify(view)).not.toContain('OMNI-OFFX');
+  });
+
+  it('not read: the neutral line naming the reason', () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const setting: OmniStudioMetadataSetting = {
+      state: 'unknown',
+      reason: 'timed out after 30000 ms',
+    };
+    const id = seedMapper(connId, 'OMNI-UNKN', { omnistudio_metadata: setting });
+    const notices = service.get(id).notices;
+    expect(notices).toEqual([pageLine(setting)]);
+    expect(notices[0]).toBe(
+      'Omnistudio Metadata setting not read in "dev-org" (timed out after 30000 ms). Per ' +
+        'Salesforce Help, the Metadata API deploys Omnistudio components only where that ' +
+        'setting is on. If it is off, Data Mappers that exist there as records are invisible ' +
+        'to Contrail, so ADD / NOT IN TARGET below does not prove none exists.',
+    );
+  });
+
+  it('on, absent or malformed: no Omnistudio line', () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['OMNI-ONXX', { omnistudio_metadata: { state: 'on' } }],
+      ['OMNI-NONE', {}],
+      ['OMNI-BADA', { omnistudio_metadata: { state: 'maybe' } }],
+      ['OMNI-BADB', { omnistudio_metadata: 'off' }],
+    ];
+    for (const [code, extra] of cases) {
+      expect(omniNotices(service.get(seedMapper(connId, code, extra)).notices)).toEqual([]);
+    }
+  });
+
+  it('a row this app presented keeps the line it stored — no second one', () => {
+    const connId = seedConnection('developer', 'dev-org');
+    const id = seedMapper(connId, 'OMNI-PRES', { omnistudio_metadata: { state: 'off' } });
+    const line = pageLine({ state: 'off' });
+    const presenter = new NativeApprovalPresenter();
+    presenter.attach(service);
+    service.expectPresentation('session-1', connId);
+    void presenter.present({
+      requestId: id,
+      kind: 'deploy',
+      code: 'OMNI-PRES',
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      org: { alias: 'dev-org', orgName: 'Dev', orgType: 'developer', instanceUrl: 'https://x' },
+      changes: [{ label: 'ADD OmniDataTransform:AccountSummaryExtract_1', warnings: [] }],
+      destructive: [],
+      results: [],
+      blast: [],
+      warnings: [line],
+    });
+    const view = service.get(id);
+    expect(view.warnings).toEqual([line]);
+    expect(omniNotices(view.notices)).toEqual([]);
+    expect(JSON.stringify(view)).not.toContain('OMNI-PRES');
   });
 });

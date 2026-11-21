@@ -319,6 +319,15 @@ const FILE_TYPES: Record<string, FileSpec> = {
     requireMainMeta: true,
     flat: true,
   },
+  // S47: Omnistudio Data Mappers. describeMetadata at v68 (2026-11-20):
+  // directory omniDataTransforms, suffix rpt, inFolder=false,
+  // metaFile=false, no child types — a plain single-file document, no meta
+  // sidecar, no envelope. The Industries developer-guide page's
+  // .omniDataTransform suffix is wrong (describe and Salesforce's CLI
+  // registry both say rpt). Per Salesforce Help the Metadata API deploys
+  // these only where the org's Omnistudio Metadata setting is on; the
+  // analyzeChanges arms say so on every approval page. Explicit-refresh-only.
+  OmniDataTransform: { dir: 'omniDataTransforms', ext: '.rpt' },
 };
 
 const XMLNS_META = 'http://soap.sforce.com/2006/04/metadata';
@@ -1031,6 +1040,24 @@ function validateTypeAndName(type: string, name: string): void {
     }
     return;
   }
+  if (type === 'OmniDataTransform') {
+    // S47: per Salesforce Help, with the Omnistudio Metadata setting on
+    // (the only state in which the Metadata API deploys these) a Data
+    // Mapper name holds letters and digits only — no underscores, dashes or
+    // spaces. The fullName is most likely <Name>_<version> (Salesforce's
+    // guides name the files that way; not yet confirmed against an org), so
+    // both the bare name and one _<digits> suffix are accepted.
+    if (!/^[A-Za-z0-9]+(_[0-9]+)?$/.test(name)) {
+      throw new ContrailError(
+        `invalid OmniDataTransform name "${name}" — letters and digits, optionally ` +
+          `_<version> (e.g. AccountSummaryExtract_1). Per Salesforce Help, Data Mapper ` +
+          `names hold letters and digits only once Omnistudio Metadata is on; Salesforce's ` +
+          `guides name the files <Name>_<version> (exact fullName rule not yet confirmed).`,
+        'bad_component',
+      );
+    }
+    return;
+  }
   if (!NAME_RE.test(name) || name.includes('/')) {
     throw new ContrailError(`invalid component name "${name}"`, 'bad_component');
   }
@@ -1291,6 +1318,22 @@ export function changeDependentWarnings(input: ChangeWarningInput): string[] {
         `here is not something the org performs` +
         (regressed.length > 0 ? ` (regressed here: ${regressed.join('; ')})` : '') +
         `. Retrieve-first, carry every existing version forward, edit only Draft versions.`,
+    );
+  }
+  // S47: a Data Mapper is one document of <omniDataTransformItem> rows, but
+  // whether a modify REMOVES the rows its file omits is not confirmed — so
+  // the type stays OUT of the WHOLE-DOCUMENT REPLACE list above (its
+  // sentence states removal as fact) and gets its own hedged arm. Nor is
+  // it documented what a deploy over an existing Data Mapper does at all:
+  // Salesforce Help says that once Data Mapper Versioning is on an active
+  // version can't be edited, so the org may refuse the modify or land it
+  // some other way. The arm states neither as fact.
+  if (type === 'OmniDataTransform' && change === 'modify') {
+    warnings.push(
+      `MODIFY OF AN EXISTING DATA MAPPER — whether the org updates it in place (per ` +
+        `Salesforce Help, an active version can't be edited once Data Mapper Versioning is ` +
+        `on) is not confirmed, nor whether mapping rows omitted here are removed org-side; ` +
+        `carry every row from a fresh retrieve.`,
     );
   }
   // Folder definitions replace their sharing wholesale: the folderShares
@@ -1624,6 +1667,31 @@ export function analyzeChanges(
           `own scorer name for custom logic.`,
       );
     }
+    // S47: Data Mappers — fires on add AND modify (S34 D1 precedent). The
+    // setting gate is Salesforce Help's; that <active> carries over on
+    // deploy is a Salesforce blog's claim, not yet confirmed; formulaConverted
+    // is the Designer's compiled form of a formula, not hand-writable.
+    if (c.type === 'OmniDataTransform') {
+      warnings.push(
+        `OMNISTUDIO DATA MAPPER — deploys only where the org's Omnistudio Metadata setting ` +
+          `is on (per Salesforce Help). Its <active> value decides whether it lands active ` +
+          `(per a Salesforce blog — not yet confirmed here). Formula items need the Data ` +
+          `Mapper Designer (formulaConverted is Designer-computed); check the result in the ` +
+          `Designer's Preview.`,
+      );
+      // Advisory, never a refusal: the fullName rule is not confirmed, so
+      // a mismatch may be deliberate. Item rows carry no <uniqueName> in
+      // the documented grammar; they are stepped over anyway so only the
+      // header's value is read.
+      const uniqueName = omniDataTransformUniqueName(c.content);
+      if (uniqueName && uniqueName !== c.api_name) {
+        warnings.push(
+          `UNIQUENAME MISMATCH — api_name ${c.api_name} differs from the file's uniqueName ` +
+            `${uniqueName}; Salesforce's guides name Data Mapper files <Name>_<version> ` +
+            `(fullName rule not yet confirmed).`,
+        );
+      }
+    }
     // S36: PSG grants are rebuilt asynchronously — fires on add AND modify
     // (S34 D1 precedent: the honesty rides every deploy, by design).
     if (c.type === 'PermissionSetGroup') {
@@ -1737,6 +1805,26 @@ export function analyzeChanges(
     return { type: d.type, api_name: d.api_name, change: 'delete', warnings };
   });
 
+  // S47 MIXED PACKAGE: Salesforce Help ("Tool Considerations") and a
+  // Salesforce KB say Omnistudio components can't share a deploy with setup
+  // metadata. Which types count as "setup" is not precisely documented, so
+  // ANY other type in the package (components or deletions) draws the
+  // advisory on every OmniDataTransform entry — never a local refusal; the
+  // org's answer is the authority.
+  {
+    const packageTypes = new Set([...components, ...deletions].map((x) => x.type));
+    if (packageTypes.has('OmniDataTransform') && packageTypes.size > 1) {
+      for (const entry of [...changes, ...destructive]) {
+        if (entry.type !== 'OmniDataTransform') continue;
+        entry.warnings.push(
+          `MIXED PACKAGE — Salesforce says Omnistudio components can't share a deploy with ` +
+            `setup metadata (permission sets, profiles, fields, FlexiPages, Expression ` +
+            `Sets); if the org refuses, deploy the Data Mappers on their own.`,
+        );
+      }
+    }
+  }
+
   return { changes, destructive };
 }
 
@@ -1826,6 +1914,47 @@ function scorerVersionStatuses(xml: string): Map<string, string> {
     if (n) out.set(n, s ?? '');
   }
   return out;
+}
+
+/**
+ * S47: the header <uniqueName> of an OmniDataTransform document, or
+ * undefined. It runs on agent-supplied content before any org call, so it is
+ * ONE forward walk, never a lazy regex. The lazy strip it replaces,
+ * `/<omniDataTransformItem>[\s\S]*?<\/omniDataTransformItem>/g`, read to the
+ * end of the text again for every opener with no closer after it (quadratic:
+ * 24 s for 1.8 MB of openers, measured on one machine), and the value
+ * pattern `/<uniqueName>\s*([^<]*?)\s*<\/uniqueName>/` was cubic in the white
+ * space after a <uniqueName> with no closer (19 s for 4,000 spaces) — either
+ * one blocked every tool on the server meanwhile. The answer is the same as
+ * theirs: the <omniDataTransformItem> rows are stepped over (an opener with
+ * no closer after it leaves the rest of the text in place, as the strip
+ * did), and the value is the text between the first <uniqueName> whose next
+ * "<" opens </uniqueName> and that "<", trimmed of the white space the
+ * pattern's \s* took.
+ */
+function omniDataTransformUniqueName(content: string): string | undefined {
+  const ROW_OPEN = '<omniDataTransformItem>';
+  const ROW_CLOSE = '</omniDataTransformItem>';
+  let header = '';
+  let from = 0;
+  for (;;) {
+    const open = content.indexOf(ROW_OPEN, from);
+    if (open === -1) break;
+    const close = content.indexOf(ROW_CLOSE, open + ROW_OPEN.length);
+    if (close === -1) break;
+    header += content.slice(from, open);
+    from = close + ROW_CLOSE.length;
+  }
+  header += content.slice(from);
+  const OPEN = '<uniqueName>';
+  for (let at = header.indexOf(OPEN); at !== -1; ) {
+    const start = at + OPEN.length;
+    const lt = header.indexOf('<', start);
+    if (lt === -1) return undefined;
+    if (header.startsWith('</uniqueName>', lt)) return header.slice(start, lt).trim();
+    at = header.indexOf(OPEN, lt);
+  }
+  return undefined;
 }
 
 /** Custom entities (need explicit object permissions); standard objects don't. */
@@ -1923,6 +2052,14 @@ function isGranted(containerText: string, need: PermissionNeed): boolean {
  * (folderShares on the folder component), which no PermissionSet grants — an
  * arm here would flag every report deploy as uncovered with advice the human
  * cannot act on. The folder-sharing honesty warning lives in analyzeChanges.
+ *
+ * S47: deliberately NO arm for OmniDataTransform either. No per-component
+ * permission-set grant for running a Data Mapper turned up in Salesforce's
+ * docs, and what Help does name — object permissions on the Omnistudio
+ * config objects for non-admin users who create, update or delete
+ * components — is a standing org-setup grant, not a per-component one this
+ * table could check. The type page does document a header <requiredPermission>
+ * field; what it gates is not yet confirmed, so no arm keys on it.
  *
  * S46 D3: the warning says only what Contrail knows about each uncovered
  * component. `presence(type, apiName)`: true = the live check found it in the

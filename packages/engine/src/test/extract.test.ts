@@ -683,3 +683,157 @@ describe('S44: Studio test & scorer extractors', () => {
     expect(keys.some((k) => k.endsWith('>AiAgentScorerDefinition:bot_response_rating'))).toBe(false);
   });
 });
+
+describe('S47: Data Mapper (OmniDataTransform) extractor', () => {
+  // Element grammar per Salesforce's OmniDataTransform type page: item
+  // children alphabetical, item <name> = the mapper's name, the rows between
+  // nullInputsIncludedInOutput and outputType. Doc-derived — no retrieved
+  // file exists yet, so these pin Contrail's reading, not the org's shape.
+  const row = (fields: Record<string, string>) =>
+    '<omniDataTransformItem>' +
+    Object.entries({ disabled: 'false', name: 'SummaryMapper', ...fields })
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([k, v]) => `<${k}>${v}</${k}>`)
+      .join('') +
+    '</omniDataTransformItem>';
+  const mapper = (type: string, rows: string[]) =>
+    '<OmniDataTransform xmlns="http://soap.sforce.com/2006/04/metadata">' +
+    '<active>true</active><name>SummaryMapper</name>' +
+    '<nullInputsIncludedInOutput>false</nullInputsIncludedInOutput>' +
+    rows.join('') +
+    `<outputType>JSON</outputType><type>${type}</type>` +
+    '<uniqueName>SummaryMapper_1</uniqueName><versionNumber>1.0</versionNumber>' +
+    '</OmniDataTransform>';
+  const knownSet = () =>
+    buildKnownArtifacts([
+      { type: 'CustomObject', apiName: 'Account' },
+      { type: 'CustomObject', apiName: 'Invoice__c' },
+      { type: 'CustomField', apiName: 'Account.Region__c' },
+      { type: 'CustomField', apiName: 'Invoice__c.Amount__c' },
+      { type: 'CustomField', apiName: 'Invoice__c.Status__c' },
+    ]);
+  const keysOf = (refs: Array<{ toType: string; toName: string }>) =>
+    refs.map((r) => `${r.toType}:${r.toName}`).sort();
+
+  it('Extract: object edges from inputObjectName; json outputs and inputFieldName give NO edge', async () => {
+    const { extractOmniDataTransformRefs } = await import('../deps/extract.js');
+    const xml = mapper('Extract', [
+      // A query step: the sObject it reads, filtered by two of its fields.
+      row({
+        filterOperator: '=',
+        filterValue: 'AccountId',
+        inputFieldName: 'Id',
+        inputObjectName: 'Account',
+        outputFieldName: 'Account',
+        outputObjectName: 'json',
+      }),
+      // The filter field Account.Region__c IS in the index, yet adds no edge:
+      // filter rows' inputFieldName is deliberately not read.
+      row({
+        filterOperator: '=',
+        filterValue: 'RegionCode',
+        inputFieldName: 'Region__c',
+        inputObjectName: 'Account',
+        outputFieldName: 'Account',
+        outputObjectName: 'json',
+      }),
+      // Output rows: alias paths in, JSON out — never sObject field names.
+      row({
+        inputFieldName: 'Account:Region__c',
+        outputFieldName: 'Region',
+        outputObjectName: 'json',
+      }),
+      row({ inputFieldName: 'Amount__c', outputFieldName: 'Amount__c', outputObjectName: 'JSON' }),
+    ]);
+    expect(keysOf(extractOmniDataTransformRefs(xml, knownSet()))).toEqual(['CustomObject:Account']);
+  });
+
+  it('Load: outputObjectName + outputFieldName give object AND field edges, joined in the index casing', async () => {
+    const { extractOmniDataTransformRefs } = await import('../deps/extract.js');
+    const xml = mapper('Load', [
+      row({ inputFieldName: 'Total', outputFieldName: 'amount__c', outputObjectName: 'invoice__c' }),
+      row({ inputFieldName: 'State', outputFieldName: 'Status__c', outputObjectName: 'Invoice__c' }),
+    ]);
+    expect(keysOf(extractOmniDataTransformRefs(xml, knownSet()))).toEqual([
+      'CustomField:Invoice__c.Amount__c',
+      'CustomField:Invoice__c.Status__c',
+      'CustomObject:Invoice__c',
+    ]);
+    // Field edges are Load-only: the same row on a Transform names the object only.
+    const transform = mapper('Transform', [
+      row({ inputFieldName: 'Total', outputFieldName: 'Amount__c', outputObjectName: 'Invoice__c' }),
+    ]);
+    expect(keysOf(extractOmniDataTransformRefs(transform, knownSet()))).toEqual([
+      'CustomObject:Invoice__c',
+    ]);
+  });
+
+  it('lookups: lookupObjectName plus lookupByFieldName / lookupReturnedFieldName', async () => {
+    const { extractOmniDataTransformRefs } = await import('../deps/extract.js');
+    const xml = mapper('Transform', [
+      row({
+        inputFieldName: 'RegionCode',
+        lookupByFieldName: 'Region__c',
+        lookupObjectName: 'Account',
+        lookupReturnedFieldName: 'Name',
+        outputFieldName: 'AccountName',
+        outputObjectName: 'json',
+      }),
+      row({
+        inputFieldName: 'InvoiceNumber',
+        lookupByFieldName: 'Name',
+        lookupObjectName: 'Invoice__c',
+        lookupReturnedFieldName: 'Status__c',
+        outputFieldName: 'InvoiceStatus',
+        outputObjectName: 'json',
+      }),
+    ]);
+    // Account.Name and Invoice__c.Name are not in the index: no edge for them
+    // (join only to known). Invoice__c.Status__c comes from the returned field.
+    expect(keysOf(extractOmniDataTransformRefs(xml, knownSet()))).toEqual([
+      'CustomField:Account.Region__c',
+      'CustomField:Invoice__c.Status__c',
+      'CustomObject:Account',
+      'CustomObject:Invoice__c',
+    ]);
+  });
+
+  it('only plain identifiers that the index holds join — paths and unknown names add nothing', async () => {
+    const { extractOmniDataTransformRefs } = await import('../deps/extract.js');
+    const xml = mapper('Load', [
+      row({ inputFieldName: 'A', outputFieldName: 'Parent__r.Name', outputObjectName: 'Invoice__c' }),
+      row({ inputFieldName: 'B', outputFieldName: 'Amount__c', outputObjectName: 'Opportunity' }),
+      row({ inputFieldName: 'C', outputFieldName: 'Amount__c', outputObjectName: 'Invoice:Line' }),
+    ]);
+    expect(keysOf(extractOmniDataTransformRefs(xml, knownSet()))).toEqual([
+      'CustomObject:Invoice__c',
+    ]);
+    // Malformed XML degrades to no edges, never a throw.
+    expect(
+      extractOmniDataTransformRefs('<OmniDataTransform><omniDataTransformItem>', knownSet()),
+    ).toEqual([]);
+  });
+
+  it('an indexed Load mapper joins its object and field through extractAllEdges', () => {
+    const files = new Map(
+      Object.entries({
+        'objects/Invoice__c.object': strToU8(INVOICE_OBJECT_XML),
+        'omniDataTransforms/InvoiceLoad_1.rpt': strToU8(
+          mapper('Load', [
+            row({
+              inputFieldName: 'Total',
+              outputFieldName: 'Amount__c',
+              outputObjectName: 'Invoice__c',
+            }),
+          ]),
+        ),
+      }),
+    );
+    const artifacts = indexSnapshotFiles(files, [], '2026-11-20T00:00:00.000Z');
+    const keys = extractAllEdges('conn1', artifacts).map(
+      (e) => `${e.fromType}:${e.fromName}>${e.toType}:${e.toName}`,
+    );
+    expect(keys).toContain('OmniDataTransform:InvoiceLoad_1>CustomObject:Invoice__c');
+    expect(keys).toContain('OmniDataTransform:InvoiceLoad_1>CustomField:Invoice__c.Amount__c');
+  });
+});

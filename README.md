@@ -18,6 +18,50 @@ whose only input is a test definition the human already approved).
 > Settings screen), `list_skills` and `read_skill` (the app's own skill library)
 > and `render_flow` (the Metadata and Diff screens' flow diagrams).
 
+**Omnistudio Data Mappers (S47).** `OmniDataTransform`, the Metadata API type
+behind Omnistudio Data Mappers (which document generation templates use), is
+deployable, indexed and explicit-refresh
+(`refresh_snapshot types:["OmniDataTransform"]`). Salesforce marks the
+OmniDataTransform and OmniDataTransformItem objects internal use only — their
+records are not to be created, edited or deleted — so the Data Mapper Designer
+and this type are the supported routes, unless the org has turned on Clean
+Metadata Deployment: per Salesforce Help the legacy Omnistudio types can then
+no longer be deployed or retrieved, and Data Mappers move to
+`DataMapperDefinition`, a type Contrail does not register. A Data Mapper is
+one plain `omniDataTransforms/<api_name>.rpt` document (folder and suffix
+from the org's own describe; the Industries guide's `.omniDataTransform`
+suffix is wrong). Its api_name is letters and digits, optionally
+`_<version>`: Salesforce's
+guides name the files `<Name>_<version>`, and the exact fullName rule is not
+yet confirmed against an org. Per Salesforce Help the Metadata API deploys
+Omnistudio components only where the org's **Omnistudio Metadata** setting is
+on, and that setting can't be turned off again. So whenever a package holds a
+Data Mapper, `validate_deploy` reads the setting (one Settings retrieve,
+alongside the validation, dry runs too) and returns it as
+`omnistudio_metadata`; when it is off, Deploy Review's warnings lead with
+OMNISTUDIO METADATA IS OFF (rebuilt from that stored setting for a request
+validated outside the app) — Data Mappers that exist there as records are
+invisible to Contrail, so an ADD proves nothing — and a failed validation's
+note, or a passed dry run's `omnistudio_note`, says the same. The setting is
+reported, never enforced: the org's own answer decides. A `refresh_snapshot`
+that lists no Data Mappers now says why when the setting is off, where it used
+to be a silent zero. Every add or modify carries a Data Mapper note on its
+Deploy Review row (the setting; whether it lands active follows its `<active>`
+value per a Salesforce blog, not yet confirmed here; formula items need the
+Designer, whose `formulaConverted` can't be reliably hand-written), and the row
+also warns when the api_name differs from the file's `uniqueName`, when the
+package mixes Data Mappers with any other type (Salesforce says Omnistudio
+components can't share a deploy with setup metadata), and, on a modify, that
+neither an in-place update (per Salesforce Help an active version can't be
+edited once Data Mapper Versioning is on) nor the removal of omitted mapping
+rows is confirmed. The
+permission-coverage check has no Data Mapper arm: no per-component grant for
+running one turned up in Salesforce's docs, and the type's documented
+`<requiredPermission>` field is not yet confirmed to gate anything. Dependency
+edges join a Data Mapper to the objects its rows name and the fields its Load
+and lookup rows name, where the index holds them — read from Salesforce's
+documented grammar, not yet from a retrieved file. No new tool (still 39).
+
 **Governance for client work (S46).** The six proposing tools
 (`validate_deploy`, `deactivate_flow`, `dml_propose`, `apex_propose`,
 `agent_activation_propose`, `bulk_load_propose`) take a `justification` — one
